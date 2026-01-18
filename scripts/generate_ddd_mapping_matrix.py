@@ -77,6 +77,103 @@ def compute_service_rel(source_path: str, context: str) -> str:
     return p
 
 
+DDD_LAYER_CHILDREN: dict[str, set[str]] = {
+    # From `ddd四层微服务目录结构-python.md` (allow project-specific deeper nesting under these roots).
+    "presentation": {"api", "graphql", "grpc", "websocket", "cli", "dto", "assemblers"},
+    "application": {
+        "ports",
+        "inbound_routing",
+        "services",
+        "workflows",
+        "event_handlers",
+        "transaction",
+        "commands",
+        "queries",
+        "event_bus",
+        "integration_events",
+        "app_dto",
+        "assemblers",
+    },
+    "domain": {
+        "aggregates",
+        "entities",
+        "value_objects",
+        "services",
+        "events",
+        "repositories",
+        "specifications",
+        "policies",
+        "factories",
+        "exceptions",
+    },
+    "infrastructure": {
+        "persistence",
+        "external_services",
+        "caching",
+        "monitoring",
+        "container",
+        "configuration",
+        "messaging",
+        "event_bus",
+    },
+}
+
+
+def _choose_ddd_child_prefix(layer_dir: str, evidence: str) -> str:
+    # Keep this strictly content-signal driven (evidence comes from source parsing), to follow AGENT.md rules.
+    if layer_dir == "presentation":
+        if evidence == "cli-adapter" or "typer" in evidence or "click" in evidence:
+            return "cli"
+        if evidence.startswith(("fastapi:", "class:http-adapter")):
+            return "api"
+        if evidence.startswith("model:"):
+            return "dto"
+        return "api"
+
+    if layer_dir == "application":
+        if evidence.startswith("port:"):
+            return "ports"
+        return "services"
+
+    if layer_dir == "domain":
+        if evidence.startswith("domain:exceptions"):
+            return "exceptions"
+        if evidence.startswith("port:"):
+            return "repositories"
+        if evidence.startswith(("domain:constants", "model:")):
+            return "value_objects"
+        return "entities"
+
+    if layer_dir == "infrastructure":
+        if evidence.startswith("alembic:migration"):
+            return "persistence/migrations"
+        if evidence.startswith("io:") and any(x in evidence for x in ("sqlalchemy", "sqlmodel", "psycopg", "psycopg2", "pymongo")):
+            return "persistence"
+        if evidence.startswith("io:") and any(x in evidence for x in ("redis",)):
+            return "caching"
+        if evidence.startswith("io:") and any(x in evidence for x in ("celery", "aio_pika", "kafka", "kombu")):
+            return "messaging"
+        if any(x in evidence for x in ("opentelemetry", "prometheus_client", "structlog", "sentry_sdk")):
+            return "monitoring"
+        if any(x in evidence for x in ("uvicorn", "gunicorn")):
+            return "container"
+        return "external_services/adapters"
+
+    return ""
+
+
+def normalize_ddd_layer_relpath(layer_dir: str, service_rel: str, evidence: str) -> str:
+    p = service_rel.replace("\\", "/").lstrip("/")
+    if not p:
+        return p
+    first = p.split("/", 1)[0]
+    allowed = DDD_LAYER_CHILDREN.get(layer_dir, set())
+    if first in allowed:
+        return p
+    prefix = _choose_ddd_child_prefix(layer_dir, evidence) or first
+    return f"{prefix}/{p}"
+
+
 def extract_module_docstring_first_line(python_source: str) -> str | None:
     try:
         tree = ast.parse(python_source)
@@ -578,11 +675,15 @@ def summarize_python_module(text: str, import_roots: set[str]) -> str:
     return "Python module."
 
 
-def infer_target_path(context: str, layer: str, service_rel: str) -> str:
+def infer_target_path(context: str, layer: str, service_rel: str, *, evidence: str) -> str:
     service = infer_service_name(context)
     p = service_rel.replace("\\", "/")
     basename = p.rsplit("/", 1)[-1]
     suffix = Path(basename).suffix.lower()
+
+    # Align with `ddd四层微服务目录结构-python.md`: service entrypoint lives at service root.
+    if p == "main.py":
+        return f"services/{service}/main.py"
 
     root_artifacts = {"Dockerfile", "Dockerfile.dev", "Makefile", "pyproject.toml", "uv.lock", "alembic.ini"}
     if basename in root_artifacts or suffix in {".md", ".toml", ".ini", ".lock", ".example"} and "/" not in p:
@@ -594,7 +695,8 @@ def infer_target_path(context: str, layer: str, service_rel: str) -> str:
         "Domain": "domain",
         "Infrastructure": "infrastructure",
     }[layer]
-    return f"services/{service}/{layer_dir}/{p}"
+    normalized = normalize_ddd_layer_relpath(layer_dir, p, evidence)
+    return f"services/{service}/{layer_dir}/{normalized}"
 
 
 def main() -> int:
@@ -644,7 +746,7 @@ def main() -> int:
         else:
             core_resp = summarize_non_python(entry.source_path, content)
 
-        target = infer_target_path(context, layer, service_rel)
+        target = infer_target_path(context, layer, service_rel, evidence=evidence)
 
         rows.append(
             {
@@ -714,7 +816,7 @@ def main() -> int:
                 r["layer"] = inferred
                 r["confidence"] = "Medium"
                 r["evidence"] = inferred_reason or "empty:inferred"
-                r["target"] = infer_target_path(r["context"], inferred, r["service_rel"])
+                r["target"] = infer_target_path(r["context"], inferred, r["service_rel"], evidence=r["evidence"])
 
     layer_order = {"Interface": 0, "Application": 1, "Domain": 2, "Infrastructure": 3}
     rows.sort(key=lambda r: (r["context"], layer_order.get(r["layer"], 99), r["source"]))
