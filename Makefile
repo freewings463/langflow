@@ -1,11 +1,10 @@
-.PHONY: all init format_backend format lint build run_backend dev help tests coverage clean_python_cache clean_npm_cache clean_frontend_build clean_all run_clic load_test_setup load_test_setup_basic load_test_list_flows load_test_run load_test_langflow_quick load_test_stress load_test_example load_test_clean load_test_remote_setup load_test_remote_run load_test_help docs docs_build docs_install
+.PHONY: all init format_backend format lint build run_backend dev help tests coverage clean_python_cache clean_all run_clic load_test_setup load_test_setup_basic load_test_list_flows load_test_run load_test_langflow_quick load_test_stress load_test_example load_test_clean load_test_remote_setup load_test_remote_run load_test_help
 
 # Configurations
 VERSION=$(shell grep "^version" pyproject.toml | sed 's/.*\"\(.*\)\"$$/\1/')
 DOCKER=podman
 DOCKERFILE=docker/build_and_push.Dockerfile
 DOCKERFILE_BACKEND=docker/build_and_push_backend.Dockerfile
-DOCKERFILE_FRONTEND=docker/frontend/build_and_push_frontend.Dockerfile
 DOCKER_COMPOSE=docker_example/docker-compose.yml
 PYTHON_REQUIRED=$(shell grep '^requires-python[[:space:]]*=' pyproject.toml | sed -n 's/.*"\([^"]*\)".*/\1/p')
 RED=\033[0;31m
@@ -18,7 +17,6 @@ host ?= 0.0.0.0
 port ?= 7860
 env ?= .env
 open_browser ?= true
-path = src/backend/base/langflow/frontend
 workers ?= 1
 async ?= true
 lf ?= false
@@ -38,7 +36,6 @@ CLEAR_DIRS = $(foreach dir,$1,$(shell mkdir -p $(dir) && find $(dir) -mindepth 1
 # check for required tools
 check_tools:
 	@command -v uv >/dev/null 2>&1 || { echo >&2 "$(RED)uv is not installed. Aborting.$(NC)"; exit 1; }
-	@command -v npm >/dev/null 2>&1 || { echo >&2 "$(RED)NPM is not installed. Aborting.$(NC)"; exit 1; }
 	@echo "$(GREEN)All required tools are installed.$(NC)"
 
 help: ## show basic help message with common commands
@@ -50,16 +47,14 @@ help: ## show basic help message with common commands
 	@echo "$(GREEN)Basic Commands:$(NC)"
 	@echo "  $(GREEN)make init$(NC)                - Initialize project (install all dependencies)"
 	@echo "  $(GREEN)make run_cli$(NC)             - Run Langflow CLI"
-	@echo "  $(GREEN)make run_clic$(NC)            - Run CLI with fresh frontend build"
-	@echo "  $(GREEN)make format$(NC)              - Format all code (backend + frontend)"
+	@echo "  $(GREEN)make run_clic$(NC)            - Run Langflow CLI (alias of run_cli)"
+	@echo "  $(GREEN)make format$(NC)              - Format backend code (ruff)"
 	@echo "  $(GREEN)make tests$(NC)               - Run all tests"
 	@echo "  $(GREEN)make build$(NC)               - Build the project"
-	@echo "  $(GREEN)make docs$(NC)                - Start documentation server (http://localhost:3030)"
 	@echo "  $(GREEN)make clean_all$(NC)           - Clean all caches and build artifacts"
 	@echo ''
 	@echo "$(GREEN)Specialized Help Commands:$(NC)"
 	@echo "  $(GREEN)make help_backend$(NC)        - Show backend-specific commands"
-	@echo "  $(GREEN)make help_frontend$(NC)       - Show frontend-specific commands"
 	@echo "  $(GREEN)make help_test$(NC)           - Show testing commands"
 	@echo "  $(GREEN)make help_docker$(NC)         - Show Docker commands"
 	@echo "  $(GREEN)make help_advanced$(NC)       - Show advanced/miscellaneous commands"
@@ -83,7 +78,6 @@ install_backend: ## install the backend dependencies
 
 init: check_tools ## initialize the project
 	@make install_backend
-	@make install_frontend
 	@uvx pre-commit install
 	@echo "$(GREEN)All requirements are installed.$(NC)"
 
@@ -100,22 +94,7 @@ clean_python_cache:
 	$(call CLEAR_DIRS,.mypy_cache )
 	@echo "$(GREEN)Python cache cleaned.$(NC)"
 
-clean_npm_cache:
-	@echo "Cleaning npm cache..."
-	cd src/frontend && npm cache clean --force
-	$(call CLEAR_DIRS,src/frontend/node_modules src/frontend/build src/backend/base/langflow/frontend)
-	rm -f src/frontend/package-lock.json
-	@echo "$(GREEN)NPM cache and frontend directories cleaned.$(NC)"
-
-clean_frontend_build: ## clean frontend build artifacts to ensure fresh build
-	@echo "Cleaning frontend build artifacts..."
-	@echo "  - Removing src/frontend/build directory"
-	$(call CLEAR_DIRS,src/frontend/build)
-	@echo "  - Removing built frontend files from backend"
-	$(call CLEAR_DIRS,src/backend/base/langflow/frontend)
-	@echo "$(GREEN)Frontend build artifacts cleaned - fresh build guaranteed.$(NC)"
-
-clean_all: clean_python_cache clean_npm_cache # clean all caches and temporary directories
+clean_all: clean_python_cache # clean all caches and temporary directories
 	@echo "$(GREEN)All caches and temporary directories cleaned.$(NC)"
 
 setup_uv: ## install uv using pipx
@@ -219,11 +198,7 @@ format_backend: ## backend code formatters
 	@uv run ruff check . --fix
 	@uv run ruff format .
 
-format: format_backend format_frontend ## run code formatters
-
-format_frontend_check: ## run biome check without formatting
-	@echo 'Running Biome check on frontend...'
-	@cd src/frontend && npx @biomejs/biome check
+format: format_backend ## run code formatters
 
 unsafe_fix:
 	@uv run ruff check . --fix --unsafe-fixes
@@ -233,20 +208,12 @@ lint: install_backend ## run linters
 
 
 
-run_clic: clean_frontend_build install_frontend install_backend build_frontend ## run the CLI with fresh frontend build
-	@echo 'Running the CLI with fresh frontend build'
-	@uv run langflow run \
-		--frontend-path $(path) \
-		--log-level $(log_level) \
-		--host $(host) \
-		--port $(port) \
-		$(if $(env),--env-file $(env),) \
-		$(if $(filter false,$(open_browser)),--no-open-browser)
+run_clic: run_cli ## run the CLI (alias of run_cli)
 
-run_cli: install_frontend install_backend build_frontend ## run the CLI quickly (without cleaning build cache)
-	@echo 'Running the CLI quickly (reusing existing build cache if available)'
+run_cli: install_backend ## run the CLI (backend-only)
+	@echo 'Running the CLI (backend-only)'
 	@uv run langflow run \
-		--frontend-path $(path) \
+		--backend-only \
 		--log-level $(log_level) \
 		--host $(host) \
 		--port $(port) \
@@ -255,9 +222,6 @@ run_cli: install_frontend install_backend build_frontend ## run the CLI quickly 
 
 run_cli_debug:
 	@echo 'Running the CLI in debug mode'
-	@make install_frontend > /dev/null
-	@echo 'Building the frontend'
-	@make build_frontend > /dev/null
 	@echo 'Install backend dependencies'
 	@make install_backend > /dev/null
 ifdef env
@@ -269,9 +233,7 @@ endif
 
 setup_devcontainer: ## set up the development container
 	make install_backend
-	make install_frontend
-	make build_frontend
-	uv run langflow --frontend-path src/frontend/build
+	uv run langflow run --backend-only
 
 setup_env: ## set up the environment
 	@sh ./scripts/setup/setup_env.sh
@@ -307,23 +269,19 @@ build_and_run: setup_env ## build the project and run it
 	$(call CLEAR_DIRS,dist src/backend/base/dist)
 	make build
 	uv run pip install dist/*.tar.gz
-	uv run langflow run
+	uv run langflow run --backend-only
 
 build_and_install: ## build the project and install it
 	@echo 'Removing dist folder'
 	$(call CLEAR_DIRS,dist src/backend/base/dist)
 	make build && uv run pip install dist/*.whl && pip install src/backend/base/dist/*.whl --force-reinstall
 
-build: setup_env ## build the frontend static files and package the project
+build: setup_env ## build and package the project (backend-only)
 ifdef base
-	make install_frontendci
-	make build_frontend
 	make build_langflow_base args="$(args)"
 endif
 
 ifdef main
-	make install_frontendci
-	make build_frontend
 	make build_langflow_base args="$(args)"
 	make build_langflow args="$(args)"
 endif
@@ -347,8 +305,6 @@ docker_build: dockerfile_build clear_dockerimage ## build DockerFile
 
 docker_build_backend: dockerfile_build_be clear_dockerimage ## build Backend DockerFile
 
-docker_build_frontend: dockerfile_build_fe clear_dockerimage ## build Frontend Dockerfile
-
 dockerfile_build:
 	@echo 'BUILDING DOCKER IMAGE: ${DOCKERFILE}'
 	@command -v $(DOCKER) >/dev/null 2>&1 || { echo "Error: $(DOCKER) is not installed. Please install $(DOCKER), or run 'make docker_build DOCKER=podman' (or DOCKER=docker) if you have an alternative installed."; exit 1; }
@@ -363,14 +319,6 @@ dockerfile_build_be: dockerfile_build
 		--build-arg LANGFLOW_IMAGE=langflow:${VERSION} \
 		-f ${DOCKERFILE_BACKEND} \
 		-t langflow_backend:${VERSION} .
-
-dockerfile_build_fe: dockerfile_build
-	@echo 'BUILDING DOCKER IMAGE FRONTEND: ${DOCKERFILE_FRONTEND}'
-	@command -v $(DOCKER) >/dev/null 2>&1 || { echo "Error: $(DOCKER) is not installed. Please install $(DOCKER), or run 'make docker_build_frontend DOCKER=podman' (or DOCKER=docker) if you have an alternative installed."; exit 1; }
-	@$(DOCKER) build --rm \
-		--build-arg LANGFLOW_IMAGE=langflow:${VERSION} \
-		-f ${DOCKERFILE_FRONTEND} \
-		-t langflow_frontend:${VERSION} .
 
 clear_dockerimage:
 	@echo 'Clearing the docker build'
@@ -421,7 +369,7 @@ publish_langflow_testpypi:
 	# TODO: update this to use the test-pypi repository
 	uv publish -r test-pypi
 
-publish: ## build the frontend static files and package the project and publish it to PyPI
+publish: ## publish the project to PyPI
 	@echo 'Publishing the project'
 ifdef base
 	make publish_base
@@ -431,7 +379,7 @@ ifdef main
 	make publish_langflow
 endif
 
-publish_testpypi: ## build the frontend static files and package the project and publish it to PyPI
+publish_testpypi: ## publish the project to test PyPI
 	@echo 'Publishing the project'
 
 ######################
@@ -538,30 +486,24 @@ patch: ## Update version across all projects. Usage: make patch v=1.5.0
 	echo "$(GREEN)Updating langflow-base pyproject.toml...$(NC)"; \
 	python -c "import re; fname='src/backend/base/pyproject.toml'; txt=open(fname).read(); txt=re.sub(r'^version = \".*\"', 'version = \"$$LANGFLOW_BASE_VERSION\"', txt, flags=re.MULTILINE); open(fname, 'w').write(txt)"; \
 	\
-	echo "$(GREEN)Updating frontend package.json...$(NC)"; \
-	python -c "import re; fname='src/frontend/package.json'; txt=open(fname).read(); txt=re.sub(r'\"version\": \".*\"', '\"version\": \"$$LANGFLOW_VERSION\"', txt); open(fname, 'w').write(txt)"; \
-	\
 	echo "$(GREEN)Validating version changes...$(NC)"; \
 	if ! grep -q "^version = \"$$LANGFLOW_VERSION\"" pyproject.toml; then echo "$(RED)✗ Main pyproject.toml version validation failed$(NC)"; exit 1; fi; \
 	if ! grep -q "\"langflow-base==$$LANGFLOW_BASE_VERSION\"" pyproject.toml; then echo "$(RED)✗ Main pyproject.toml langflow-base dependency validation failed$(NC)"; exit 1; fi; \
 	if ! grep -q "^version = \"$$LANGFLOW_BASE_VERSION\"" src/backend/base/pyproject.toml; then echo "$(RED)✗ Langflow-base pyproject.toml version validation failed$(NC)"; exit 1; fi; \
-	if ! grep -q "\"version\": \"$$LANGFLOW_VERSION\"" src/frontend/package.json; then echo "$(RED)✗ Frontend package.json version validation failed$(NC)"; exit 1; fi; \
 	echo "$(GREEN)✓ All versions updated successfully$(NC)"; \
 	\
-	echo "$(GREEN)Syncing dependencies in parallel...$(NC)"; \
-	uv sync --quiet & \
-	(cd src/frontend && npm install --silent) & \
-	wait; \
+	echo "$(GREEN)Syncing dependencies...$(NC)"; \
+	uv sync --quiet; \
 	\
 	echo "$(GREEN)Validating final state...$(NC)"; \
 	CHANGED_FILES=$$(git status --porcelain | wc -l | tr -d ' '); \
-	if [ "$$CHANGED_FILES" -lt 5 ]; then \
-		echo "$(RED)✗ Expected at least 5 changed files, but found $$CHANGED_FILES$(NC)"; \
+	if [ "$$CHANGED_FILES" -lt 3 ]; then \
+		echo "$(RED)✗ Expected at least 3 changed files, but found $$CHANGED_FILES$(NC)"; \
 		echo "$(RED)Changed files:$(NC)"; \
 		git status --porcelain; \
 		exit 1; \
 	fi; \
-	EXPECTED_FILES="pyproject.toml uv.lock src/backend/base/pyproject.toml src/frontend/package.json src/frontend/package-lock.json"; \
+	EXPECTED_FILES="pyproject.toml uv.lock src/backend/base/pyproject.toml"; \
 	for file in $$EXPECTED_FILES; do \
 		if ! git status --porcelain | grep -q "$$file"; then \
 			echo "$(RED)✗ Expected file $$file was not modified$(NC)"; \
@@ -574,9 +516,7 @@ patch: ## Update version across all projects. Usage: make patch v=1.5.0
 	echo "$(GREEN)Updated files:$(NC)"; \
 	echo "  - pyproject.toml: $$LANGFLOW_VERSION"; \
 	echo "  - src/backend/base/pyproject.toml: $$LANGFLOW_BASE_VERSION"; \
-	echo "  - src/frontend/package.json: $$LANGFLOW_VERSION"; \
 	echo "  - uv.lock: dependency lock updated"; \
-	echo "  - src/frontend/package-lock.json: dependency lock updated"; \
 	echo "$(GREEN)Dependencies synced successfully!$(NC)"
 
 ######################
@@ -828,14 +768,13 @@ help_backend: ## show backend-specific commands
 	@echo "$(GREEN)Development:$(NC)"
 	@echo "  $(GREEN)make backend$(NC)             - Run backend in development mode"
 	@echo "  $(GREEN)make run_cli$(NC)             - Run Langflow CLI"
-	@echo "  $(GREEN)make run_clic$(NC)            - Run CLI with fresh frontend build"
+	@echo "  $(GREEN)make run_clic$(NC)            - Run Langflow CLI (alias of run_cli)"
 	@echo "  $(GREEN)make run_cli_debug$(NC)       - Run CLI in debug mode"
 	@echo "  $(GREEN)make setup_devcontainer$(NC)  - Set up development container"
 	@echo "  $(GREEN)make setup_env$(NC)           - Set up environment variables"
 	@echo ''
 	@echo "$(GREEN)Code Quality:$(NC)"
 	@echo "  $(GREEN)make format_backend$(NC)      - Format backend code (ruff)"
-	@echo "  $(GREEN)make format_frontend_check$(NC) - Check frontend formatting (biome)"
 	@echo "  $(GREEN)make lint$(NC)                - Run backend linters (mypy)"
 	@echo "  $(GREEN)make codespell$(NC)           - Check spelling errors"
 	@echo "  $(GREEN)make fix_codespell$(NC)       - Fix spelling errors automatically"
@@ -897,22 +836,6 @@ help_test: ## show testing commands
 	@echo "  $(GREEN)make tests$(NC)               - Run all tests (unit + integration + coverage)"
 	@echo "  $(GREEN)make coverage$(NC)            - Run tests and generate coverage report"
 	@echo ''
-	@echo "$(GREEN)Frontend Tests:$(NC)"
-	@echo "  $(GREEN)make tests_frontend$(NC)      - Run Playwright e2e tests"
-	@echo "  $(GREEN)make test_frontend$(NC)       - Run Jest unit tests"
-	@echo "  $(GREEN)make test_frontend_watch$(NC) - Run Jest tests in watch mode"
-	@echo "  $(GREEN)make test_frontend_coverage$(NC) - Run Jest with coverage"
-	@echo "  $(GREEN)make test_frontend_coverage_open$(NC) - Run coverage and open report"
-	@echo "  $(GREEN)make test_frontend_verbose$(NC) - Run Jest with verbose output"
-	@echo "  $(GREEN)make test_frontend_ci$(NC)    - Run Jest in CI mode"
-	@echo "  $(GREEN)make test_frontend_clean$(NC) - Clean cache and run Jest"
-	@echo "  $(GREEN)make test_frontend_bail$(NC)  - Run Jest with bail (stop on first failure)"
-	@echo "  $(GREEN)make test_frontend_silent$(NC) - Run Jest silently"
-	@echo "  $(GREEN)make test_frontend_file path$(NC) - Run tests for specific file"
-	@echo "  $(GREEN)make test_frontend_pattern pattern$(NC) - Run tests matching pattern"
-	@echo "  $(GREEN)make test_frontend_snapshots$(NC) - Update Jest snapshots"
-	@echo "  $(GREEN)make test_frontend_config$(NC) - Show Jest configuration"
-	@echo ''
 	@echo "$(GREEN)Load Testing:$(NC)"
 	@echo "  $(GREEN)make locust$(NC)              - Run locust load tests"
 	@echo "    Options: locust_users=10 locust_spawn_rate=1 locust_host=http://localhost:7860"
@@ -931,7 +854,6 @@ help_docker: ## show docker commands
 	@echo "$(GREEN)Docker Build:$(NC)"
 	@echo "  $(GREEN)make docker_build$(NC)        - Build main Docker image"
 	@echo "  $(GREEN)make docker_build_backend$(NC) - Build backend Docker image"
-	@echo "  $(GREEN)make docker_build_frontend$(NC) - Build frontend Docker image"
 	@echo ''
 	@echo "$(GREEN)Docker Compose:$(NC)"
 	@echo "  $(GREEN)make docker_compose_up$(NC)   - Build and start docker compose"
@@ -958,13 +880,11 @@ help_advanced: ## show advanced and miscellaneous commands
 	@echo "$(GREEN)Cleanup:$(NC)"
 	@echo "  $(GREEN)make clean_all$(NC)           - Clean all caches and temporary directories"
 	@echo "  $(GREEN)make clean_python_cache$(NC)  - Clean Python cache files"
-	@echo "  $(GREEN)make clean_npm_cache$(NC)     - Clean npm cache and node_modules"
-	@echo "  $(GREEN)make clean_frontend_build$(NC) - Clean frontend build artifacts"
 	@echo ''
 	@echo "$(GREEN)Version Management:$(NC)"
 	@echo "  $(GREEN)make patch v=X.Y.Z$(NC)       - Update version across all projects"
 	@echo "    Example: make patch v=1.5.0"
-	@echo "    This updates: pyproject.toml, langflow-base, frontend package.json"
+	@echo "    This updates: pyproject.toml, langflow-base"
 	@echo ''
 	@echo "$(GREEN)Publishing:$(NC)"
 	@echo "  $(GREEN)make publish$(NC)             - Publish to PyPI (use: make publish base=1 or main=1)"
@@ -997,42 +917,4 @@ help_advanced: ## show advanced and miscellaneous commands
 	@echo "$(GREEN)═══════════════════════════════════════════════════════════════════$(NC)"
 	@echo ''
 
-######################
-# DOCUMENTATION
-######################
-
-docs_port ?= 3030
-
-check_yarn:
-	@command -v yarn >/dev/null 2>&1 || { \
-		echo "$(RED)Error: yarn is not installed.$(NC)"; \
-		echo "$(YELLOW)The docs project requires yarn. Please install it:$(NC)"; \
-		echo "  brew install yarn"; \
-		echo "  # or"; \
-		echo "  npm install -g yarn"; \
-		exit 1; \
-	}
-
-docs_install: check_yarn ## install documentation dependencies
-	@echo "$(GREEN)Installing documentation dependencies...$(NC)"
-	@cd docs && yarn install
-
-docs: docs_install ## start documentation development server (default port 3030)
-	@echo "$(GREEN)Starting documentation server at http://localhost:$(docs_port)$(NC)"
-	@cd docs && yarn start --port $(docs_port)
-
-docs_build: docs_install ## build documentation for production
-	@echo "$(GREEN)Building documentation...$(NC)"
-	@cd docs && yarn build
-	@echo "$(GREEN)Documentation built successfully in docs/build/$(NC)"
-
-docs_serve: docs_build ## build and serve documentation locally
-	@echo "$(GREEN)Serving built documentation...$(NC)"
-	@cd docs && yarn serve --port $(docs_port)
-
-######################
-# INCLUDE FRONTEND MAKEFILE
-######################
-
-# Include frontend-specific Makefile
-include Makefile.frontend
+# Frontend + docs site removed; keep migration docs in `docs/migration/`.
