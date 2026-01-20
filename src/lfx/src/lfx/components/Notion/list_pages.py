@@ -13,6 +13,7 @@ from lfx.schema.data import Data
 
 
 class NotionListPages(LCToolComponent):
+    # 根据过滤与排序查询 Notion 数据库页面
     display_name: str = "List Pages "
     description: str = (
         "Query a Notion database with filtering and sorting. "
@@ -25,6 +26,7 @@ class NotionListPages(LCToolComponent):
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：密钥、数据库 ID、查询 JSON
         SecretStrInput(
             name="notion_secret",
             display_name="Notion Secret",
@@ -45,6 +47,7 @@ class NotionListPages(LCToolComponent):
     ]
 
     class NotionListPagesSchema(BaseModel):
+        # 工具入参 Schema
         database_id: str = Field(..., description="The ID of the Notion database to query.")
         query_json: str | None = Field(
             default="",
@@ -53,6 +56,7 @@ class NotionListPages(LCToolComponent):
         )
 
     def run_model(self) -> list[Data]:
+        # 执行数据库查询并格式化输出
         result = self._query_notion_database(self.database_id, self.query_json)
 
         if isinstance(result, str):
@@ -63,6 +67,7 @@ class NotionListPages(LCToolComponent):
         combined_text = f"Pages found: {len(result)}\n\n"
 
         for page in result:
+            # 结构化页面数据
             page_data = {
                 "id": page["id"],
                 "url": page["url"],
@@ -86,6 +91,7 @@ class NotionListPages(LCToolComponent):
         return records
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="notion_list_pages",
             description=self.description,
@@ -94,6 +100,7 @@ class NotionListPages(LCToolComponent):
         )
 
     def _query_notion_database(self, database_id: str, query_json: str | None = None) -> list[dict[str, Any]] | str:
+        # 组装查询请求
         url = f"https://api.notion.com/v1/databases/{database_id}/query"
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",
@@ -104,11 +111,13 @@ class NotionListPages(LCToolComponent):
         query_payload = {}
         if query_json and query_json.strip():
             try:
+                # 解析过滤/排序 JSON
                 query_payload = json.loads(query_json)
             except json.JSONDecodeError as e:
                 return f"Invalid JSON format for query: {e}"
 
         try:
+            # 发送查询请求
             response = requests.post(url, headers=headers, json=query_payload, timeout=10)
             response.raise_for_status()
             results = response.json()

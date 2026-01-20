@@ -1,1 +1,14 @@
-"""Processing module for lfx package."""
+"""
+模块名称：lfx.processing
+
+本模块提供图执行与参数调整的处理入口，主要用于运行图与应用运行期 tweaks。主要功能包括：
+- 功能1：运行图并生成输出
+- 功能2：对图数据或顶点参数应用 tweaks
+
+关键组件：
+- `process`：图执行与 tweaks 处理逻辑
+- `utils`：JSON 修复等辅助工具
+
+设计背景：集中处理图运行与参数调整，避免调用方散落实现细节。
+注意事项：`process` 与 `utils` 均依赖输入数据结构一致性。
+"""

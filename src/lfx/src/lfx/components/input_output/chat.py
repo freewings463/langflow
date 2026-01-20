@@ -1,3 +1,19 @@
+"""
+模块名称：Chat 输入组件
+
+本模块提供从 Playground 获取聊天输入的组件，主要用于将用户输入、
+会话信息与附件文件转换为 `Message` 并写入历史（可选）。
+主要功能包括：
+- 生成 `Message` 并携带会话/上下文信息
+- 支持附件文件与消息持久化
+
+关键组件：
+- `ChatInput`：聊天输入组件
+
+设计背景：统一 Playground 输入的消息结构，便于后续处理。
+注意事项：文件字段会过滤空值并强制转为列表。
+"""
+
 from lfx.base.data.utils import IMG_FILE_TYPES, TEXT_FILE_TYPES
 from lfx.base.io.chat import ChatComponent
 from lfx.inputs.inputs import BoolInput
@@ -17,6 +33,11 @@ from lfx.utils.constants import (
 
 
 class ChatInput(ChatComponent):
+    """Chat 输入组件。
+
+    契约：`message_response()` 返回 `Message` 并按需持久化。
+    副作用：可能写入消息历史并更新组件状态。
+    """
     display_name = "Chat Input"
     description = "Get chat inputs from the Playground."
     documentation: str = "https://docs.langflow.org/chat-input-and-output"
@@ -82,11 +103,19 @@ class ChatInput(ChatComponent):
     ]
 
     async def message_response(self) -> Message:
-        # Ensure files is a list and filter out empty/None values
+        """构建聊天消息并可选持久化到历史。
+
+        关键路径（三步）：
+        1) 规范化文件列表并过滤空值
+        2) 组装 `Message`（含会话/上下文/文件）
+        3) 按需写入历史并返回
+        异常流：无显式异常抛出，异常由下游处理。
+        """
+        # 实现：确保 files 为列表并过滤空值
         files = self.files if self.files else []
         if files and not isinstance(files, list):
             files = [files]
-        # Filter out None/empty values
+        # 实现：过滤 None/空值
         files = [f for f in files if f is not None and f != ""]
 
         session_id = self.session_id or self.graph.session_id or ""

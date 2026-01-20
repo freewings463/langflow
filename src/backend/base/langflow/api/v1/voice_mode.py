@@ -1,3 +1,15 @@
+"""
+模块名称：语音模式接口
+
+本模块提供语音输入、TTS 输出与 WebSocket 语音交互能力。
+主要功能：
+- 语音活动检测与音频处理
+- 与 OpenAI/ElevenLabs 进行语音合成
+- 基于 WebSocket 的语音会话管理
+设计背景：为语音交互模式提供完整的 API 与会话编排。
+注意事项：依赖外部 TTS/LLM 服务与用户凭据。
+"""
+
 import asyncio
 import base64
 import json
@@ -80,6 +92,7 @@ CLIENT_TO_LF = "Client → LF"
 
 @lru_cache(maxsize=1)
 def get_vad():
+    """获取并缓存 VAD 实例。"""
     import webrtcvad
 
     return webrtcvad.Vad(mode=3)
@@ -124,6 +137,8 @@ async def authenticate_and_get_openai_key(session: DbSession, user: User, websoc
 
 
 class VoiceConfig:
+    """语音会话配置容器，保存每个会话的参数与模型设置。"""
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.use_elevenlabs = False
@@ -164,6 +179,8 @@ class VoiceConfig:
 
 
 class ElevenLabsClientManager:
+    """ElevenLabs 客户端单例管理器。"""
+
     _instance = None
     _api_key = None
 
@@ -197,6 +214,7 @@ class ElevenLabsClientManager:
 
 
 def get_voice_config(session_id: str) -> VoiceConfig:
+    """按会话 ID 获取或创建语音配置。"""
     if session_id is None:
         msg = "session_id cannot be None"
         raise ValueError(msg)
@@ -206,6 +224,8 @@ def get_voice_config(session_id: str) -> VoiceConfig:
 
 
 class TTSConfig:
+    """TTS 会话配置容器，保存实时转写参数与客户端实例。"""
+
     def __init__(self, session_id: str, openai_key: str):
         self.session_id = session_id
         self.use_elevenlabs = False
@@ -245,6 +265,7 @@ class TTSConfig:
 
 
 def get_tts_config(session_id: str, openai_key: str) -> TTSConfig:
+    """按会话 ID 获取或创建 TTS 配置。"""
     if session_id is None:
         msg = "session_id cannot be None"
         raise ValueError(msg)
@@ -328,6 +349,8 @@ async def process_message_queue(queue_key, session):
 
 
 class SendQueues:
+    """OpenAI 与客户端双向发送队列管理器。"""
+
     def __init__(self, openai_ws: websockets.WebSocketClientProtocol, client_ws: WebSocket, log_event):
         self.openai_ws: websockets.WebSocketClientProtocol = openai_ws
         self.openai_send_q: asyncio.Queue[tuple] = asyncio.Queue()
@@ -393,6 +416,7 @@ class SendQueues:
 
 
 def get_create_response(send_handler: SendQueues, session_id):
+    """构造用于发送 `response.create` 的闭包。"""
     def create_response(original: dict | None = None):
         msg = {}
         if original is not None:
@@ -417,8 +441,8 @@ async def handle_function_call(
     session_id: str,
     msg_handler: SendQueues,
 ):
+    """处理 OpenAI 函数调用并回传流式结果。"""
     create_response = get_create_response(msg_handler, session_id)
-    """Handle function calls from the OpenAI API."""
     try:
         args = json.loads(function_call_args) if function_call_args else {}
         input_request = InputValueRequest(
@@ -518,6 +542,7 @@ last_sender_by_session: defaultdict[str, str | None] = defaultdict(lambda: None)
 
 
 async def get_flow_desc_from_db(flow_id: str) -> Flow:
+    """按流程 ID 获取描述信息。"""
     async with session_scope() as session:
         stmt = select(Flow).where(Flow.id == UUID(flow_id))
         result = await session.exec(stmt)
@@ -534,11 +559,13 @@ async def get_or_create_elevenlabs_client(user_id=None, session=None):
 
 
 def pcm16_to_float_array(pcm_data):
+    """将 PCM16 字节流转换为归一化浮点数组。"""
     values = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
     return values / 32768.0
 
 
 async def text_chunker_with_timeout(chunks, timeout=0.3):
+    """按标点切分文本流，并在超时后输出缓冲。"""
     splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
     buffer = ""
     ait = chunks.__aiter__()
@@ -569,6 +596,7 @@ async def text_chunker_with_timeout(chunks, timeout=0.3):
 
 
 async def queue_generator(queue: asyncio.Queue):
+    """从队列中异步生成消息，遇到 `None` 结束。"""
     while True:
         item = await queue.get()
         if item is None:
@@ -577,6 +605,7 @@ async def queue_generator(queue: asyncio.Queue):
 
 
 def create_event_logger():
+    """创建事件日志记录函数（带去重统计）。"""
     state = {"last_event_type": None, "event_count": 0}
 
     def log_event(event: dict, provenance: str) -> None:
@@ -602,12 +631,14 @@ _completed: dict[str, float] = {}
 
 
 def mark_response_done(response_id: str):
+    """标记响应已完成并记录时间戳。"""
     logger.debug(f"Marking response {response_id} as done")
     _completed[response_id] = time.time()
 
 
 # Don't let this grow unbounded
 def is_response_done(response_id: str) -> bool:
+    """判断响应是否完成，并清理过期记录。"""
     now = time.time()
     # prune old entries
     for k, ts in list(_completed.items()):
@@ -620,6 +651,8 @@ def is_response_done(response_id: str) -> bool:
 
 
 class FunctionCall:
+    """函数调用状态机，汇总参数并执行调用。"""
+
     def __init__(
         self,
         item: dict,
@@ -702,6 +735,7 @@ async def flow_as_tool_websocket_no_session(
     background_tasks: BackgroundTasks,
     session: DbSession,
 ):
+    """无会话模式的 Flow-as-Tool WebSocket 入口。"""
     session_id = str(uuid4())
     await flow_as_tool_websocket(
         client_websocket=client_websocket,
@@ -1130,6 +1164,7 @@ async def flow_tts_websocket_no_session(
     background_tasks: BackgroundTasks,
     session: DbSession,
 ):
+    """无会话模式的 TTS WebSocket 入口。"""
     session_id = str(uuid4())
     await flow_tts_websocket(
         client_websocket=client_websocket,
@@ -1327,6 +1362,7 @@ async def flow_tts_websocket(
 
 
 def extract_transcript(json_data):
+    """从 OpenAI 响应中提取文本转写内容。"""
     try:
         content_list = json_data.get("item", {}).get("content", [])
         for content_item in content_list:

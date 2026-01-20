@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+"""
+模块名称：存储服务抽象层
+
+本模块定义存储服务的抽象接口，约束不同后端的文件操作行为。
+主要功能包括：
+- 定义文件读写/删除/列举的统一接口
+- 约定逻辑路径与命名空间规则
+- 提供默认的文件流式读取实现
+
+关键组件：
+- `StorageService`
+- `get_file_stream`
+
+设计背景：便于替换存储后端（本地/S3 等）而不影响上层组件。
+注意事项：所有文件操作以 `flow_id` 作为命名空间隔离。
+"""
+
 from abc import abstractmethod
 from typing import TYPE_CHECKING
 
@@ -14,24 +31,19 @@ if TYPE_CHECKING:
 
 
 class StorageService(Service):
-    """Abstract base class for file storage services.
+    """存储服务抽象基类。
 
-    This class defines the interface for file storage operations that can be
-    implemented by different backends (local filesystem, S3, etc.).
-
-    All file operations are namespaced by flow_id to isolate files between
-    different flows or users.
+    契约：
+    - 输入：`flow_id`/`file_name` 组合的逻辑路径
+    - 输出：文件字节内容或路径字符串
+    - 副作用：由具体后端实现决定
+    - 失败语义：子类应抛出明确的文件错误或传递底层异常
     """
 
     name = "storage_service"
 
     def __init__(self, session_service, settings_service: SettingsService):
-        """Initialize the storage service.
-
-        Args:
-            session_service: The session service instance
-            settings_service: The settings service instance containing configuration
-        """
+        """初始化存储服务基类。"""
         self.settings_service = settings_service
         self.session_service = session_service
         self.data_dir: anyio.Path = anyio.Path(settings_service.settings.config_dir)
@@ -39,158 +51,55 @@ class StorageService(Service):
 
     @abstractmethod
     def build_full_path(self, flow_id: str, file_name: str) -> str:
-        """Build the full path/key for a file.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file
-
-        Returns:
-            str: The full path or key for the file
-        """
+        """构建文件完整路径或存储键。"""
         raise NotImplementedError
 
     @abstractmethod
     def parse_file_path(self, full_path: str) -> tuple[str, str]:
-        """Parse a full storage path to extract flow_id and file_name.
-
-        This reverses the build_full_path operation.
-
-        Args:
-            full_path: Full path as returned by build_full_path
-
-        Returns:
-            tuple[str, str]: A tuple of (flow_id, file_name)
-
-        Raises:
-            ValueError: If the path format is invalid or doesn't match expected structure
-        """
+        """解析完整路径为 (flow_id, file_name)。"""
         raise NotImplementedError
 
     @abstractmethod
     def resolve_component_path(self, logical_path: str) -> str:
-        """Convert a logical path to a format that components can use directly.
-
-        Logical paths are in the format "{flow_id}/{filename}" as stored in the database.
-        This method converts them to a format appropriate for the storage backend:
-        - Local storage: Absolute filesystem path (/data_dir/flow_id/filename)
-        - S3 storage: Logical path as-is (flow_id/filename)
-
-        Components receive this resolved path and can use it without knowing the
-        storage implementation details.
-
-        Args:
-            logical_path: Path in the format "flow_id/filename"
-
-        Returns:
-            str: A path that components can use directly
-        """
+        """将逻辑路径转换为组件可直接使用的路径。"""
         raise NotImplementedError
 
     def set_ready(self) -> None:
-        """Mark the service as ready."""
+        """标记服务已就绪。"""
         self._ready = True
 
     @abstractmethod
     async def save_file(self, flow_id: str, file_name: str, data: bytes, *, append: bool = False) -> None:
-        """Save a file to storage.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to save
-            data: The file content as bytes
-            append: If True, append to existing file instead of overwriting.
-
-        Raises:
-            Exception: If the file cannot be saved
-        """
+        """保存文件。"""
         raise NotImplementedError
 
     @abstractmethod
     async def get_file(self, flow_id: str, file_name: str) -> bytes:
-        """Retrieve a file from storage.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to retrieve
-
-        Returns:
-            bytes: The file content
-
-        Raises:
-            FileNotFoundError: If the file does not exist
-        """
+        """读取文件内容。"""
         raise NotImplementedError
 
     async def get_file_stream(self, flow_id: str, file_name: str, chunk_size: int = 8192) -> AsyncIterator[bytes]:
-        """Retrieve a file from storage as a stream.
-
-        Default implementation loads the entire file and yields it in chunks.
-        Subclasses can override this for more efficient streaming.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to retrieve
-            chunk_size: Size of chunks to yield (default: 8192 bytes)
-
-        Yields:
-            bytes: Chunks of the file content
-
-        Raises:
-            FileNotFoundError: If the file does not exist
-        """
-        # Default implementation - subclasses can override for true streaming
+        """以流方式读取文件（默认分块输出）。"""
+        # 注意：默认实现一次性读取后再分块
         content = await self.get_file(flow_id, file_name)
         for i in range(0, len(content), chunk_size):
             yield content[i : i + chunk_size]
 
     @abstractmethod
     async def list_files(self, flow_id: str) -> list[str]:
-        """List all files in a flow's storage namespace.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-
-        Returns:
-            list[str]: List of file names in the namespace
-
-        Raises:
-            FileNotFoundError: If the namespace directory does not exist
-        """
+        """列举某个命名空间下的文件名列表。"""
         raise NotImplementedError
 
     @abstractmethod
     async def get_file_size(self, flow_id: str, file_name: str) -> int:
-        """Get the size of a file in bytes.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file
-
-        Returns:
-            int: Size of the file in bytes
-
-        Raises:
-            FileNotFoundError: If the file does not exist
-        """
+        """获取文件大小（字节）。"""
         raise NotImplementedError
 
     @abstractmethod
     async def delete_file(self, flow_id: str, file_name: str) -> None:
-        """Delete a file from storage.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to delete
-
-        Note:
-            Should not raise an error if the file doesn't exist
-        """
+        """删除文件。"""
         raise NotImplementedError
 
     async def teardown(self) -> None:
-        """Perform cleanup operations when the service is being shut down.
-
-        Subclasses should override this to clean up any resources (connections, etc.)
-        """
+        """服务关闭时执行清理（由子类实现）。"""
         raise NotImplementedError

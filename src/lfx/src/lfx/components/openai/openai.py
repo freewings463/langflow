@@ -1,3 +1,19 @@
+"""模块名称：OpenAI Embeddings 组件适配
+
+本模块提供 OpenAI 向量化能力的 Langflow 组件封装。
+使用场景：在检索、相似度匹配或向量存储流程中生成文本嵌入。
+主要功能包括：
+- 组装 OpenAI Embeddings 所需参数
+- 支持多种部署/代理/超时配置
+- 透传 `model_kwargs` 与默认请求参数
+
+关键组件：
+- OpenAIEmbeddingsComponent：嵌入模型组件入口
+
+设计背景：统一 Langflow Embeddings 接口，兼容 OpenAI 与代理部署
+注意事项：`openai_api_key` 为必填；`tiktoken_enable=False` 需要本地 `transformers`
+"""
+
 from langchain_openai import OpenAIEmbeddings
 
 from lfx.base.embeddings.model import LCEmbeddingsModel
@@ -7,6 +23,14 @@ from lfx.io import BoolInput, DictInput, DropdownInput, FloatInput, IntInput, Me
 
 
 class OpenAIEmbeddingsComponent(LCEmbeddingsModel):
+    """OpenAI Embeddings 组件，输出向量化能力。
+
+    契约：输入模型、密钥与请求参数，输出 `Embeddings`
+    关键路径：1) 读取组件字段 2) 组装参数 3) 初始化 `OpenAIEmbeddings`
+    副作用：可能触发网络初始化；依赖本地 `tiktoken` 或 `transformers`
+    异常流：底层 SDK 异常直接上抛
+    排障入口：OpenAI SDK 抛错消息或网络错误
+    """
     display_name = "OpenAI Embeddings"
     description = "Generate embeddings using OpenAI models."
     icon = "OpenAI"
@@ -73,6 +97,12 @@ class OpenAIEmbeddingsComponent(LCEmbeddingsModel):
     ]
 
     def build_embeddings(self) -> Embeddings:
+        """构建 OpenAI Embeddings 实例。
+
+        契约：返回 `Embeddings`；`None` 代表使用 SDK 默认值
+        副作用：可能进行网络初始化；读取代理与组织配置
+        异常流：底层 SDK 异常直接上抛
+        """
         return OpenAIEmbeddings(
             client=self.client or None,
             model=self.model,

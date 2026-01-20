@@ -1,3 +1,18 @@
+"""
+模块名称：Tavily Search 组件
+
+本模块封装 Tavily Search API 的调用与结果解析逻辑，用于为 RAG/LLM 提供检索结果。
+主要功能：
+- 组装搜索请求并调用 Tavily API；
+- 解析检索结果并输出为 Data/DataFrame。
+
+关键组件：
+- TavilySearchComponent：搜索组件入口。
+
+设计背景：为 LLM/RAG 提供稳定的搜索能力与结构化输出。
+注意事项：依赖外部 API，建议设置合理的查询参数以控制成本与延迟。
+"""
+
 import httpx
 
 from lfx.custom.custom_component.component import Component
@@ -9,6 +24,16 @@ from lfx.template.field.base import Output
 
 
 class TavilySearchComponent(Component):
+    """Tavily Search 检索组件
+
+    契约：输入 `api_key` 与 `query`；输出 `list[Data]` 或 `DataFrame`。
+    关键路径：1) 解析查询与过滤条件 2) 调用 Search API 3) 解析结果输出。
+    决策：使用 Tavily Search API 作为检索来源
+    问题：需要面向 LLM 的高相关搜索结果
+    方案：调用官方 Search 接口并解析字段
+    代价：依赖外部服务与 API 配额
+    重评：当需要替换为内部搜索服务时
+    """
     display_name = "Tavily Search API"
     description = """**Tavily Search** is a search engine optimized for LLMs and RAG, \
         aimed at efficient, quick, and persistent search results."""
@@ -76,7 +101,7 @@ class TavilySearchComponent(Component):
             display_name="Time Range",
             info="The time range back from the current date to filter results.",
             options=["day", "week", "month", "year"],
-            value=None,  # Default to None to make it optional
+            value=None,  # 注意：默认 None 表示可选参数。
             advanced=True,
         ),
         BoolInput(
@@ -112,8 +137,23 @@ class TavilySearchComponent(Component):
     ]
 
     def fetch_content(self) -> list[Data]:
+        """执行搜索并返回 Data 列表
+
+        契约：返回 `list[Data]`；失败时返回包含错误信息的 Data。
+        关键路径（三步）：
+        1) 解析域名过滤与高级参数
+        2) 组装并发送搜索请求
+        3) 解析响应并封装结果
+        异常流：超时/HTTP 错误/请求错误/解析错误返回错误 Data。
+        排障入口：日志包含 `Request timed out` / `HTTP error occurred` / `Request error occurred`。
+        决策：超时设置为 90s
+        问题：搜索接口在复杂查询下响应较慢
+        方案：显式设置 90s 超时
+        代价：等待时间更长
+        重评：当接口响应时间稳定后
+        """
         try:
-            # Only process domains if they're provided
+            # 实现：仅在提供域名时才进行解析。
             include_domains = None
             exclude_domains = None
 
@@ -142,24 +182,25 @@ class TavilySearchComponent(Component):
                 "time_range": self.time_range,
             }
 
-            # Only add domains to payload if they exist and have values
+            # 注意：仅在域名列表存在时加入 payload。
             if include_domains:
                 payload["include_domains"] = include_domains
             if exclude_domains:
                 payload["exclude_domains"] = exclude_domains
 
-            # Add conditional parameters only if they should be included
+            # 注意：仅在高级搜索时允许 chunks_per_source。
             if self.search_depth == "advanced" and self.chunks_per_source:
                 payload["chunks_per_source"] = self.chunks_per_source
 
             if self.topic == "news" and self.days:
-                payload["days"] = int(self.days)  # Ensure days is an integer
+                # 注意：news 场景下保证 days 为整数。
+                payload["days"] = int(self.days)
 
-            # Add time_range if it's set
+            # 注意：仅在设置了 time_range 时追加。
             if hasattr(self, "time_range") and self.time_range:
                 payload["time_range"] = self.time_range
 
-            # Add timeout handling
+            # 实现：设置 90s 超时避免请求挂起。
             with httpx.Client(timeout=90.0) as client:
                 response = client.post(url, json=payload, headers=headers)
 
@@ -208,5 +249,6 @@ class TavilySearchComponent(Component):
             return data_results
 
     def fetch_content_dataframe(self) -> DataFrame:
+        """将搜索结果转换为 DataFrame。"""
         data = self.fetch_content()
         return DataFrame(data)

@@ -1,3 +1,16 @@
+"""模块名称：初始配置与启动数据加载
+
+模块目的：在启动与登录过程中初始化项目、文件夹与演示数据。
+主要功能：
+- `starter projects` 的加载与版本迁移
+- `agentic flows` 的创建与更新
+- 从文件系统/远程 `bundle` 导入 `flows`
+使用场景：服务启动、用户首次登录、运维批量导入。
+关键组件：`create_or_update_starter_projects`、`create_or_update_agentic_flows`、`load_bundles_from_urls`
+设计背景：需要可重复执行的初始化流程并兼容历史数据结构。
+注意事项：涉及数据库与文件 `I/O`，需在异步上下文与事务中调用。
+"""
+
 import asyncio
 import copy
 import io
@@ -50,19 +63,25 @@ from langflow.services.database.models.folder.constants import (
 from langflow.services.database.models.folder.model import Folder, FolderCreate, FolderRead
 from langflow.services.deps import get_settings_service, get_storage_service, get_variable_service, session_scope
 
-# In the folder ./starter_projects we have a few JSON files that represent
-# starter projects. We want to load these into the database so that users
-# can use them as a starting point for their own projects.
+# 注意：`starter_projects` 目录存放示例项目 `JSON`，用于初始化数据库示例数据。
 
 
 def update_projects_components_with_latest_component_versions(project_data, all_types_dict):
-    # Flatten the all_types_dict for easy access
+    """将项目节点模板更新为最新组件版本。
+
+    关键路径：
+    1) 扁平化组件索引并清理内部元数据
+    2) 遍历节点并按最新模板/输出更新
+    3) 记录变更日志并返回更新后的项目数据
+
+    契约：仅更新已存在的节点类型；跳过 `SKIPPED_COMPONENTS`。
+    失败语义：项目结构不完整时可能抛 `KeyError/TypeError`。
+    """
+    # 便于按 `node_type` 快速索引组件定义
     all_types_dict_flat = {}
     for category in all_types_dict.values():
         for key, component in category.items():
-            # Strip hash_history from component metadata before using in flows
-            # hash_history is internal metadata for tracking component evolution
-            # and should only exist in component_index.json, not in saved flows
+            # 注意：`hash_history` 仅用于组件索引追踪，不应写入保存的流程
             if "metadata" in component and "hash_history" in component["metadata"]:
                 del component["metadata"]["hash_history"]
             all_types_dict_flat[key] = component
@@ -78,7 +97,7 @@ def update_projects_components_with_latest_component_versions(project_data, all_
             latest_node = all_types_dict_flat.get(node_type)
             latest_template = latest_node.get("template")
             node_data["template"]["code"] = latest_template["code"]
-            # skip components that are having dynamic values that need to be persisted for templates
+            # 注意：跳过需要持久化动态模板值的组件
 
             if node_type in SKIPPED_COMPONENTS:
                 continue
@@ -90,7 +109,7 @@ def update_projects_components_with_latest_component_versions(project_data, all_
             }
             has_tool_outputs = any(output.get("types") == ["Tool"] for output in node_data.get("outputs", []))
             if "outputs" in latest_node and not has_tool_outputs and not is_tool_or_agent:
-                # Set selected output as the previous selected output
+                # 继承旧选中输出，避免 `UI` 状态丢失
                 for output in latest_node["outputs"]:
                     node_data_output = next(
                         (output_ for output_ in node_data["outputs"] if output_["name"] == output["name"]),
@@ -138,7 +157,7 @@ def update_projects_components_with_latest_component_versions(project_data, all_
                 for attr in NODE_FORMAT_ATTRIBUTES:
                     if (
                         attr in latest_node
-                        # Check if it needs to be updated
+                        # 仅在字段变化时写入
                         and latest_node[attr] != node_data.get(attr)
                     ):
                         node_changes_log[node_type].append(
@@ -154,22 +173,19 @@ def update_projects_components_with_latest_component_versions(project_data, all_
                     if field_name not in node_data["template"]:
                         node_data["template"][field_name] = field_dict
                         continue
-                    # The idea here is to update some attributes of the field
+                    # 仅更新允许覆盖的字段属性
                     to_check_attributes = FIELD_FORMAT_ATTRIBUTES
-                    # Skip specific field attributes that should respect the starter project template values.
-                    # Currently we skip 'advanced' so that a field marked as advanced in the component code
-                    # will NOT overwrite the value specified in the starter project template. This preserves
-                    # the intended UX configuration of the starter projects.
-                    # SKIPPED_FIELD_ATTRIBUTES = {"advanced"}
-                    # Iterate through the attributes we want to potentially update
+                    # 注意：跳过需要保留示例项目配置的属性（如 `advanced`）
+                    # `SKIPPED_FIELD_ATTRIBUTES = {"advanced"}`
+                    # 遍历可更新属性
                     for attr in to_check_attributes:
-                        # Respect the template value by not updating if the attribute is in the skipped set
+                        # 若属性在跳过集合中则保留原值
                         if attr in SKIPPED_FIELD_ATTRIBUTES:
                             continue
                         if (
                             attr in field_dict
                             and attr in node_data["template"].get(field_name)
-                            # Check if it needs to be updated
+                            # 仅在值变化时更新
                             and field_dict[attr] != node_data["template"][field_name][attr]
                         ):
                             node_changes_log[node_type].append(
@@ -180,7 +196,7 @@ def update_projects_components_with_latest_component_versions(project_data, all_
                                 }
                             )
                             node_data["template"][field_name][attr] = field_dict[attr]
-            # Remove fields that are not in the latest template
+            # 清理最新模板中已不存在的字段
             if node_type != "Prompt":
                 for field_name in list(node_data["template"].keys()):
                     is_tool_mode_and_field_is_tools_metadata = (
@@ -193,6 +209,11 @@ def update_projects_components_with_latest_component_versions(project_data, all_
 
 
 def scape_json_parse(json_string: str) -> dict:
+    """将含转义占位符的 `JSON` 字符串解析为字典。
+
+    契约：`None` 返回空字典；字典输入原样返回。
+    失败语义：非法 `JSON` 字符串会抛 `json.JSONDecodeError`。
+    """
     if json_string is None:
         return {}
     if isinstance(json_string, dict):
@@ -202,6 +223,16 @@ def scape_json_parse(json_string: str) -> dict:
 
 
 def update_new_output(data):
+    """修复旧格式输出与边的句柄信息。
+
+    关键路径：
+    1) 解析并标准化 source/target handle
+    2) 补齐输出类型与节点输出列表
+    3) 反写 edges 与 nodes 并返回拷贝
+
+    契约：输入 `data` 需包含 `nodes`/`edges`。
+    失败语义：结构缺失可能抛 `KeyError/TypeError`。
+    """
     nodes = copy.deepcopy(data["nodes"])
     edges = copy.deepcopy(data["edges"])
 
@@ -262,9 +293,7 @@ def update_new_output(data):
             edge["sourceHandle"] = escape_json_dump(new_source_handle)
             edge["data"]["sourceHandle"] = new_source_handle
             edge["data"]["targetHandle"] = new_target_handle
-    # The above sets the edges but some of the sourceHandles do not have valid name
-    # which can be found in the nodes. We need to update the sourceHandle with the
-    # name from node['data']['node']['outputs']
+    # 注意：部分 `sourceHandle` 缺失 `name`，需从节点输出补齐
     for node in nodes:
         if "outputs" in node["data"]["node"]:
             for output in node["data"]["node"]["outputs"]:
@@ -286,33 +315,22 @@ def update_new_output(data):
 
 
 def update_edges_with_latest_component_versions(project_data):
-    """Update edges in a project with the latest component versions.
+    """更新边的句柄结构以匹配最新组件版本。
 
-    This function processes each edge in the project data and ensures that the source and target handles
-    are updated to match the latest component versions. It tracks all changes made to edges in a log
-    for debugging purposes.
+    关键路径：
+    1) 深拷贝项目数据并解析 source/target handle
+    2) 基于节点输出/模板更新 output_types 与 inputTypes
+    3) 记录变更并回写 edge 数据
 
-    Args:
-        project_data (dict): The project data containing nodes and edges to be updated.
-
-    Returns:
-        dict: A deep copy of the project data with updated edges.
-
-    The function performs the following operations:
-    1. Creates a deep copy of the project data to avoid modifying the original
-    2. For each edge, extracts and parses the source and target handles
-    3. Finds the corresponding source and target nodes
-    4. Updates output types in the source handle based on the node's outputs
-    5. Updates input types in the target handle based on the node's template
-    6. Escapes and updates the handles in the edge data
-    7. Logs all changes made to the edges
+    契约：输入 `project_data` 需包含 `nodes` 与 `edges`。
+    失败语义：节点缺失会记录错误日志并继续处理其他边。
     """
-    # Initialize a dictionary to track changes for logging
+    # 用于记录边的变更，便于排障
     edge_changes_log = defaultdict(list)
-    # Create a deep copy to avoid modifying the original data
+    # 深拷贝避免污染原始数据
     project_data_copy = deepcopy(project_data)
 
-    # Create a mapping of node types to node IDs for node reconciliation
+    # 建立节点类型到节点 ID 的映射，便于缺失节点时尝试修复
     node_type_map = {}
     for node in project_data_copy.get("nodes", []):
         node_type = node.get("data", {}).get("type", "")
@@ -321,15 +339,15 @@ def update_edges_with_latest_component_versions(project_data):
                 node_type_map[node_type] = []
             node_type_map[node_type].append(node.get("id"))
 
-    # Process each edge in the project
+    # 遍历每条边并进行句柄更新
     for edge in project_data_copy.get("edges", []):
-        # Extract and parse source and target handles
+        # 解析源/目标句柄
         source_handle = edge.get("data", {}).get("sourceHandle")
         source_handle = scape_json_parse(source_handle)
         target_handle = edge.get("data", {}).get("targetHandle")
         target_handle = scape_json_parse(target_handle)
 
-        # Find the corresponding source and target nodes
+        # 查找源/目标节点
         source_node = next(
             (node for node in project_data.get("nodes", []) if node.get("id") == edge.get("source")),
             None,
@@ -339,67 +357,66 @@ def update_edges_with_latest_component_versions(project_data):
             None,
         )
 
-        # Try to reconcile missing nodes by type
+        # 若节点缺失，尝试按类型匹配修复
         if source_node is None and source_handle and "dataType" in source_handle:
             node_type = source_handle.get("dataType")
             if node_type_map.get(node_type):
-                # Use the first node of matching type as replacement
+                # 选择同类型第一个节点作为替代
                 new_node_id = node_type_map[node_type][0]
                 logger.info(f"Reconciling missing source node: replacing {edge.get('source')} with {new_node_id}")
 
-                # Update edge source
+                # 更新边的 `source`
                 edge["source"] = new_node_id
 
-                # Update source handle ID
+                # 更新源句柄的 `id`
                 source_handle["id"] = new_node_id
 
-                # Find the new source node
+                # 获取替换后的源节点
                 source_node = next(
                     (node for node in project_data.get("nodes", []) if node.get("id") == new_node_id),
                     None,
                 )
 
-                # Update edge ID (complex as it contains encoded handles)
-                # This is a simplified approach - in production you'd need to parse and rebuild the ID
+                # 注意：`edge.id` 包含编码句柄，这里使用简化替换策略
                 old_id_prefix = edge.get("id", "").split("{")[0]
                 if old_id_prefix:
                     new_id_prefix = old_id_prefix.replace(edge.get("source"), new_node_id)
                     edge["id"] = edge.get("id", "").replace(old_id_prefix, new_id_prefix)
 
         if target_node is None and target_handle and "id" in target_handle:
-            # Extract node type from target handle ID (e.g., "AstraDBGraph-jr8pY" -> "AstraDBGraph")
+            # 从目标句柄的 `id` 解析节点类型（示例：`AstraDBGraph-jr8pY` -> `AstraDBGraph`）
             id_parts = target_handle.get("id", "").split("-")
             if len(id_parts) > 0:
                 node_type = id_parts[0]
                 if node_type_map.get(node_type):
-                    # Use the first node of matching type as replacement
+                    # 选择同类型第一个节点作为替代
                     new_node_id = node_type_map[node_type][0]
                     logger.info(f"Reconciling missing target node: replacing {edge.get('target')} with {new_node_id}")
 
-                    # Update edge target
+                    # 更新边的 `target`
                     edge["target"] = new_node_id
 
-                    # Update target handle ID
+                    # 更新目标句柄的 `id`
                     target_handle["id"] = new_node_id
 
-                    # Find the new target node
+                    # 获取替换后的目标节点
                     target_node = next(
                         (node for node in project_data.get("nodes", []) if node.get("id") == new_node_id),
                         None,
                     )
 
-                    # Update edge ID (simplified approach)
+                    # 简化更新 `edge.id`
                     old_id_suffix = edge.get("id", "").split("}-")[1] if "}-" in edge.get("id", "") else ""
                     if old_id_suffix:
                         new_id_suffix = old_id_suffix.replace(edge.get("target"), new_node_id)
                         edge["id"] = edge.get("id", "").replace(old_id_suffix, new_id_suffix)
 
         if source_node and target_node:
-            # Extract node data for easier access
+            # 提前提取节点数据便于访问
             source_node_data = source_node.get("data", {}).get("node", {})
             target_node_data = target_node.get("data", {}).get("node", {})
 
-            # Find the output data that matches the source handle name
+            # 按源句柄的 `name` 匹配输出
             output_data = next(
                 (
                     output
@@ -409,7 +426,7 @@ def update_edges_with_latest_component_versions(project_data):
                 None,
             )
 
-            # If not found by name, try to find by display_name
+            # 若未命中，尝试用 `display_name` 匹配
             if not output_data:
                 output_data = next(
                     (
@@ -419,11 +436,11 @@ def update_edges_with_latest_component_versions(project_data):
                     ),
                     None,
                 )
-                # Update source handle name if found by display_name
+            # 若通过 `display_name` 命中则同步 `name`
                 if output_data:
                     source_handle["name"] = output_data.get("name")
 
-            # Determine the new output types based on the output data
+            # 计算输出类型集合
             if output_data:
                 if len(output_data.get("types", [])) == 1:
                     new_output_types = output_data.get("types", [])
@@ -434,7 +451,7 @@ def update_edges_with_latest_component_versions(project_data):
             else:
                 new_output_types = []
 
-            # Update output types if they've changed and log the change
+            # 若输出类型变化则记录并更新
             if source_handle.get("output_types", []) != new_output_types:
                 edge_changes_log[source_node_data.get("display_name", "unknown")].append(
                     {
@@ -445,7 +462,7 @@ def update_edges_with_latest_component_versions(project_data):
                 )
                 source_handle["output_types"] = new_output_types
 
-            # Update input types if they've changed and log the change
+            # 若输入类型变化则记录并更新
             field_name = target_handle.get("fieldName")
             if field_name in target_node_data.get("template", {}) and target_handle.get(
                 "inputTypes", []
@@ -461,11 +478,11 @@ def update_edges_with_latest_component_versions(project_data):
                     target_node_data.get("template", {}).get(field_name, {}).get("input_types", [])
                 )
 
-            # Escape the updated handles for JSON storage
+            # 将更新后的句柄转义后写回
             escaped_source_handle = escape_json_dump(source_handle)
             escaped_target_handle = escape_json_dump(target_handle)
 
-            # Try to parse and escape the old handles for comparison
+            # 解析旧句柄用于对比
             try:
                 old_escape_source_handle = escape_json_dump(json.loads(edge.get("sourceHandle", "{}")))
             except (json.JSONDecodeError, TypeError):
@@ -476,7 +493,7 @@ def update_edges_with_latest_component_versions(project_data):
             except (json.JSONDecodeError, TypeError):
                 old_escape_target_handle = edge.get("targetHandle", "")
 
-            # Update source handle if it's changed and log the change
+            # 更新源句柄并记录变更
             if old_escape_source_handle != escaped_source_handle:
                 edge_changes_log[source_node_data.get("display_name", "unknown")].append(
                     {
@@ -489,7 +506,7 @@ def update_edges_with_latest_component_versions(project_data):
                 if "data" in edge:
                     edge["data"]["sourceHandle"] = source_handle
 
-            # Update target handle if it's changed and log the change
+            # 更新目标句柄并记录变更
             if old_escape_target_handle != escaped_target_handle:
                 edge_changes_log[target_node_data.get("display_name", "unknown")].append(
                     {
@@ -503,20 +520,20 @@ def update_edges_with_latest_component_versions(project_data):
                     edge["data"]["targetHandle"] = target_handle
 
         else:
-            # Log an error if source or target node is not found after reconciliation attempt
+            # 排障：若修复后仍缺失节点，则记录错误
             logger.error(f"Source or target node not found for edge: {edge}")
 
-    # Log all the changes that were made
+    # 记录所有变更
     log_node_changes(edge_changes_log)
     return project_data_copy
 
 
 def log_node_changes(node_changes_log) -> None:
-    # The idea here is to log the changes that were made to the nodes in debug
-    # Something like:
-    # Node: "Node Name" was updated with the following changes:
-    # attr_name: old_value -> new_value
-    # let's create one log per node
+    """将节点/边的变更日志格式化输出到 `debug`。
+
+    契约：`node_changes_log` 为 `dict[str, list[dict]]`。
+    """
+    # 实现：按节点汇总变更并输出一条日志
     formatted_messages = []
     for node_name, changes in node_changes_log.items():
         message = f"\nNode: {node_name} was updated with the following changes:"
@@ -528,6 +545,16 @@ def log_node_changes(node_changes_log) -> None:
 
 
 async def load_starter_projects(retries=3, delay=1) -> list[tuple[anyio.Path, dict]]:
+    """异步加载示例项目的 `JSON`。
+
+    关键路径：
+    1) 扫描 `starter_projects` 目录
+    2) 逐文件解析 `JSON`，失败按重试策略处理
+    3) 返回 `(path, data)` 列表
+
+    契约：`retries` 为失败重试次数，`delay` 为重试间隔秒数。
+    失败语义：重试耗尽后抛 `ValueError`。
+    """
     starter_projects = []
     folder = anyio.Path(__file__).parent / "starter_projects"
     await logger.adebug("Loading starter projects")
@@ -539,39 +566,35 @@ async def load_starter_projects(retries=3, delay=1) -> list[tuple[anyio.Path, di
             try:
                 project = orjson.loads(content)
                 starter_projects.append((file, project))
-                break  # Break if load is successful
+                break  # 成功后退出重试
             except orjson.JSONDecodeError as e:
                 attempt += 1
                 if attempt >= retries:
                     msg = f"Error loading starter project {file}: {e}"
                     raise ValueError(msg) from e
-                await asyncio.sleep(delay)  # Wait before retrying
+                await asyncio.sleep(delay)  # 重试前等待
     await logger.adebug(f"Loaded {len(starter_projects)} starter projects")
     return starter_projects
 
 
 async def copy_profile_pictures() -> None:
-    """Asynchronously copies profile pictures from the source directory to the target configuration directory.
+    """异步复制头像资源到配置目录。
 
-    This function copies profile pictures while optimizing I/O operations by:
-    1. Using a set to track existing files and avoid redundant filesystem checks
-    2. Performing bulk copy operations concurrently using asyncio.gather
-    3. Offloading blocking I/O to threads
+    关键路径：
+    1) 校验源目录并创建目标目录
+    2) 读取目标目录已有文件以避免重复复制
+    3) 并发复制文件并记录日志
 
-    The directory structure is:
-    profile_pictures/
-    ├── People/
-    │   └── [profile images]
-    └── Space/
-        └── [profile images]
+    契约：源目录为 `profile_pictures`，按相对路径复制到配置目录。
+    失败语义：配置目录未设置或复制异常时抛出错误。
     """
-    # Get config directory from settings
+    # 从设置读取配置目录
     config_dir = get_storage_service().settings_service.settings.config_dir
     if config_dir is None:
         msg = "Config dir is not set in the settings"
         raise ValueError(msg)
 
-    # Setup source and target paths
+    # 构建源/目标路径
     origin = anyio.Path(__file__).parent / "profile_pictures"
     target = anyio.Path(config_dir) / "profile_pictures"
 
@@ -579,19 +602,19 @@ async def copy_profile_pictures() -> None:
         msg = f"The source folder '{origin}' does not exist."
         raise ValueError(msg)
 
-    # Create target dir if needed
+    # 目标目录不存在则创建
     if not await target.exists():
         await target.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Get set of existing files in target to avoid redundant checks
+        # 记录已存在文件，避免重复检查
         target_files = {str(f.relative_to(target)) async for f in target.rglob("*") if await f.is_file()}
 
-        # Define a helper coroutine to copy a single file concurrently
+        # 定义单文件复制任务
         async def copy_file(src_file, dst_file, rel_path):
-            # Create parent directories if needed
+            # 确保父目录存在
             await dst_file.parent.mkdir(parents=True, exist_ok=True)
-            # Offload blocking I/O to a thread
+            # 将阻塞 `I/O` 下放到线程
             await asyncio.to_thread(shutil.copy2, str(src_file), str(dst_file))
             await logger.adebug(f"Copied file '{rel_path}'")
 
@@ -615,6 +638,7 @@ async def copy_profile_pictures() -> None:
 
 
 def get_project_data(project):
+    """从项目字典中抽取标准化字段集合。"""
     project_name = project.get("name")
     project_description = project.get("description")
     project_is_component = project.get("is_component")
@@ -643,6 +667,7 @@ def get_project_data(project):
 
 
 async def update_project_file(project_path: anyio.Path, project: dict, updated_project_data) -> None:
+    """将更新后的项目数据回写到 `JSON` 文件。"""
     project["data"] = updated_project_data
     async with async_open(str(project_path), "w", encoding="utf-8") as f:
         await f.write(orjson.dumps(project, option=ORJSON_OPTIONS).decode())
@@ -659,6 +684,7 @@ def update_existing_project(
     project_icon,
     project_icon_bg_color,
 ) -> None:
+    """将更新后的项目字段写回已有 `Flow` 记录。"""
     logger.info(f"Updating starter project {project_name}")
     existing_project.data = project_data
     existing_project.folder = STARTER_FOLDER_NAME
@@ -682,6 +708,7 @@ def create_new_project(
     project_icon_bg_color,
     new_folder_id,
 ) -> None:
+    """构建并写入新的示例项目记录。"""
     new_project = FlowCreate(
         name=project_name,
         description=project_description,
@@ -699,23 +726,27 @@ def create_new_project(
 
 
 async def get_all_flows_similar_to_project(session: AsyncSession, folder_id: UUID) -> list[Flow]:
+    """获取指定文件夹下的所有流程。"""
     stmt = select(Folder).options(selectinload(Folder.flows)).where(Folder.id == folder_id)
     return list((await session.exec(stmt)).first().flows)
 
 
 async def delete_starter_projects(session, folder_id) -> None:
+    """删除指定文件夹下的所有示例项目。"""
     flows = await get_all_flows_similar_to_project(session, folder_id)
     for flow in flows:
         await session.delete(flow)
 
 
 async def folder_exists(session, folder_name):
+    """判断指定名称的文件夹是否存在。"""
     stmt = select(Folder).where(Folder.name == folder_name)
     folder = (await session.exec(stmt)).first()
     return folder is not None
 
 
 async def get_or_create_starter_folder(session):
+    """获取或创建示例项目文件夹。"""
     if not await folder_exists(session, STARTER_FOLDER_NAME):
         new_folder = FolderCreate(name=STARTER_FOLDER_NAME, description=STARTER_FOLDER_DESCRIPTION)
         db_folder = Folder.model_validate(new_folder, from_attributes=True)
@@ -728,16 +759,14 @@ async def get_or_create_starter_folder(session):
 
 
 async def get_or_create_assistant_folder(session, user_id: UUID):
-    """Create or get the Langflow Assistant folder for a specific user.
+    """获取或创建 `Langflow Assistant` 文件夹。
 
-    This folder contains agentic flows and cannot be deleted.
+    关键路径：
+    1) 按 `user_id` 与文件夹名查询
+    2) 不存在则创建并提交
+    3) 返回文件夹记录
 
-    Args:
-        session: Database session
-        user_id: The ID of the user who owns the folder
-
-    Returns:
-        The Langflow Assistant folder
+    契约：该文件夹用于存放 `agentic flows`，不应被删除。
     """
     stmt = select(Folder).where(Folder.user_id == user_id, Folder.name == ASSISTANT_FOLDER_NAME)
     result = await session.exec(stmt)
@@ -755,13 +784,15 @@ async def get_or_create_assistant_folder(session, user_id: UUID):
 
 
 async def load_agentic_flows() -> list[tuple[anyio.Path, dict]]:
-    """Load agentic flows from the agentic/flows directory.
+    """从 `agentic/flows` 目录加载 `agentic flows`。
 
-    Returns:
-        List of tuples containing (file_path, flow_data)
+    关键路径：
+    1) 校验目录存在
+    2) 逐文件读取并解析 `JSON`
+    3) 返回 `(path, flow)` 元组列表
     """
     agentic_flows: list[tuple[anyio.Path, dict]] = []
-    # Get the path to the agentic/flows directory
+    # 目录位置：`agentic/flows`
     folder = anyio.Path(__file__).parent.parent / "agentic" / "flows"
 
     if not await folder.exists():
@@ -784,33 +815,29 @@ async def load_agentic_flows() -> list[tuple[anyio.Path, dict]]:
 
 
 async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -> None:
-    """Create or update agentic flows in the Langflow Assistant folder for a user.
+    """在用户的 `Langflow Assistant` 文件夹中创建 `agentic flows`。
 
-    This function is called on user login to ensure that all agentic flows
-    are present and up-to-date in the user's Langflow Assistant folder.
+    关键路径：
+    1) 检查 `agentic` 功能开关并获取文件夹
+    2) 读取 `agentic flows` 的 `JSON` 并解析元数据
+    3) 仅创建不存在的 `flows`（不更新已有）
 
-    The function will:
-    - Extract flow_id and endpoint_name from the JSON
-    - Skip updates if flow already exists (only create new flows)
-    - Create new flows if they don't exist
-
-    Args:
-        session: Database session
-        user_id: The ID of the user
+    契约：仅在启用 `agentic_experience` 时执行。
+    失败语义：解析或写库失败时记录异常日志并继续后续处理。
     """
     from lfx.services.deps import get_settings_service
 
-    # Only configure if agentic experience is enabled
+    # 仅在启用 `agentic` 体验时执行
     settings_service = get_settings_service()
     if not settings_service.settings.agentic_experience:
         await logger.adebug("Agentic experience disabled, skipping agentic flows creation")
         return
 
     try:
-        # Get or create the Langflow Assistant folder
+        # 获取或创建助手文件夹
         assistant_folder = await get_or_create_assistant_folder(session, user_id)
 
-        # Load all agentic flows from the directory
+        # 加载 `agentic flows`
         agentic_flows = await load_agentic_flows()
 
         if not agentic_flows:
@@ -821,7 +848,7 @@ async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -
         flows_updated = 0
 
         for _, flow_data in agentic_flows:
-            # Extract flow metadata from JSON
+            # 从 `JSON` 提取流程元数据
             (
                 flow_name,
                 flow_description,
@@ -834,11 +861,11 @@ async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -
                 flow_tags,
             ) = get_project_data(flow_data)
 
-            # Extract flow_id and endpoint_name from JSON
+            # 提取 `flow_id` 与 `endpoint_name`
             flow_id = flow_data.get("id")
             flow_endpoint_name = flow_data.get("endpoint_name")
 
-            # Convert flow_id to UUID if it's a valid UUID string
+            # 将 `flow_id` 转换为 `UUID`（若合法）
             if flow_id and isinstance(flow_id, str):
                 try:
                     flow_id = UUID(flow_id)
@@ -846,17 +873,17 @@ async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -
                     await logger.awarning(f"Invalid UUID for flow {flow_name}: {flow_id}, will use auto-generated ID")
                     flow_id = None
 
-            # Try to find an existing flow by ID or endpoint_name
+            # 按 `id` 或 `endpoint_name` 查找已存在流程
             existing_flow = await find_existing_flow(session, flow_id, flow_endpoint_name)
 
             if existing_flow:
-                # Skip update if flow already exists
+                # 已存在则跳过更新
                 await logger.adebug(f"Agentic flow already exists, skipping: {flow_name}")
                 flows_updated += 1
             else:
                 try:
                     await logger.adebug(f"Creating agentic flow: {flow_name}")
-                    # Create new flow with ID and endpoint_name from JSON
+                    # 使用 `JSON` 中的 `id`/`endpoint_name` 创建流程
                     new_project = FlowCreate(
                         name=flow_name,
                         description=flow_description,
@@ -868,11 +895,11 @@ async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -
                         folder_id=assistant_folder.id,
                         gradient=flow_gradient,
                         tags=flow_tags,
-                        endpoint_name=flow_endpoint_name,  # Set endpoint_name from JSON
+                        endpoint_name=flow_endpoint_name,  # 使用 `JSON` 中的 `endpoint_name`
                     )
                     db_flow = Flow.model_validate(new_project, from_attributes=True)
 
-                    # Set the ID from JSON if provided
+                    # 若 `JSON` 提供 `ID` 则直接赋值
                     if flow_id:
                         db_flow.id = flow_id
 
@@ -894,6 +921,7 @@ async def create_or_update_agentic_flows(session: AsyncSession, user_id: UUID) -
 
 
 def _is_valid_uuid(val):
+    """校验字符串是否为合法 `UUID`。"""
     try:
         uuid_obj = UUID(val)
     except ValueError:
@@ -902,9 +930,15 @@ def _is_valid_uuid(val):
 
 
 async def load_flows_from_directory() -> None:
-    """On langflow startup, this loads all flows from the directory specified in the settings.
+    """启动时从配置目录加载流程并写入默认文件夹。
 
-    All flows are uploaded into the default folder for the superuser.
+    关键路径：
+    1) 读取 `load_flows_path` 并遍历 `JSON`
+    2) 查询超级用户并确保默认文件夹存在
+    3) 逐文件 upsert 流程数据
+
+    契约：仅处理 `.json` 文件。
+    失败语义：找不到超级用户时抛 `NoResultFound`。
     """
     settings_service = get_settings_service()
     flows_path = settings_service.settings.load_flows_path
@@ -912,7 +946,7 @@ async def load_flows_from_directory() -> None:
         return
 
     async with session_scope() as session:
-        # Find superuser by role instead of username to avoid issues with credential reset
+        # 注意：按角色查找超级用户，避免用户名变更影响
         from langflow.services.database.models.user.model import User
 
         stmt = select(User).where(User.is_superuser == True)  # noqa: E712
@@ -922,7 +956,7 @@ async def load_flows_from_directory() -> None:
             msg = "No superuser found in the database"
             raise NoResultFound(msg)
 
-        # Ensure that the default folder exists for this user
+        # 确保该用户的默认文件夹存在
         _ = await get_or_create_default_folder(session, user.id)
 
         for file_path in await asyncio.to_thread(Path(flows_path).iterdir):
@@ -935,6 +969,7 @@ async def load_flows_from_directory() -> None:
 
 
 async def detect_github_url(url: str) -> str:
+    """将 GitHub 仓库/分支/标签/提交 `URL` 解析为 `zip` 下载地址。"""
     if matched := re.match(r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)?/?$", url):
         owner, repo = matched.groups()
 
@@ -966,6 +1001,16 @@ async def detect_github_url(url: str) -> str:
 
 
 async def load_bundles_from_urls() -> tuple[list[TemporaryDirectory], list[str]]:
+    """从配置的 `bundle` 地址下载并导入流程/组件。
+
+    关键路径：
+    1) 解析 `URL`（支持 GitHub 多种形式）
+    2) 下载 zip 并解析 `flows`/`components` 目录
+    3) 导入流程并返回组件路径列表
+
+    契约：无 bundle 配置则返回空列表。
+    失败语义：下载或解析失败会抛异常由上层处理。
+    """
     component_paths: set[str] = set()
     temp_dirs = []
     settings_service = get_settings_service()
@@ -974,7 +1019,7 @@ async def load_bundles_from_urls() -> tuple[list[TemporaryDirectory], list[str]]
         return [], []
 
     async with session_scope() as session:
-        # Find superuser by role instead of username to avoid issues with credential reset
+        # 按角色查找超级用户，避免用户名变更影响
         from langflow.services.database.models.user.model import User
 
         stmt = select(User).where(User.is_superuser == True)  # noqa: E712
@@ -1012,6 +1057,15 @@ async def load_bundles_from_urls() -> tuple[list[TemporaryDirectory], list[str]]
 
 
 async def upsert_flow_from_file(file_content: AnyStr, filename: str, session: AsyncSession, user_id: UUID) -> None:
+    """从文件内容创建或更新流程。
+
+    关键路径：
+    1) 解析 `JSON` 并校验 `id`/`endpoint_name`
+    2) 若存在则更新，否则创建并关联默认文件夹
+    3) 写回数据库并更新时间戳
+
+    失败语义：`id` 非法时记录错误并返回。
+    """
     flow = orjson.loads(file_content)
     flow_endpoint_name = flow.get("endpoint_name")
     if _is_valid_uuid(filename):
@@ -1031,12 +1085,12 @@ async def upsert_flow_from_file(file_content: AnyStr, filename: str, session: As
         await logger.ainfo(f"Updating existing flow: {flow_id} with endpoint name {flow_endpoint_name}")
         for key, value in flow.items():
             if hasattr(existing, key):
-                # flow dict from json and db representation are not 100% the same
+                # 注意：`JSON` 字段与数据库模型并非完全一致，仅更新同名属性
                 setattr(existing, key, value)
         existing.updated_at = datetime.now(tz=timezone.utc).astimezone()
         existing.user_id = user_id
 
-        # Ensure that the flow is associated with an existing default folder
+        # 确保关联默认文件夹
         if existing.folder_id is None:
             folder = await get_or_create_default_folder(session, user_id)
             existing.folder_id = folder.id
@@ -1052,7 +1106,7 @@ async def upsert_flow_from_file(file_content: AnyStr, filename: str, session: As
     else:
         await logger.ainfo(f"Creating new flow: {flow_id} with endpoint name {flow_endpoint_name}")
 
-        # Assign the newly created flow to the default folder
+        # 新建流程绑定默认文件夹
         folder = await get_or_create_default_folder(session, user_id)
         flow["user_id"] = user_id
         flow["folder_id"] = folder.id
@@ -1063,6 +1117,7 @@ async def upsert_flow_from_file(file_content: AnyStr, filename: str, session: As
 
 
 async def find_existing_flow(session, flow_id, flow_endpoint_name):
+    """按 `endpoint_name` 或 `id` 查找已存在的流程。"""
     if flow_endpoint_name:
         await logger.adebug(f"flow_endpoint_name: {flow_endpoint_name}")
         stmt = select(Flow).where(Flow.endpoint_name == flow_endpoint_name)
@@ -1078,15 +1133,17 @@ async def find_existing_flow(session, flow_id, flow_endpoint_name):
 
 
 async def create_or_update_starter_projects(all_types_dict: dict) -> None:
-    """Create or update starter projects.
+    """创建或更新 `starter projects`。
 
-    Args:
-        all_types_dict (dict): Dictionary containing all component types and their templates
+    关键路径：
+    1) 根据配置决定是否创建/更新
+    2) 加载示例项目并更新版本
+    3) 写入数据库并记录日志
+
+    契约：`all_types_dict` 为组件类型与模板的索引。
     """
     if not get_settings_service().settings.create_starter_projects:
-        # no-op for environments that don't want to create starter projects.
-        # note that this doesn't check if the starter projects are already loaded in the db;
-        # this is intended to be used to skip all startup project logic.
+        # 注意：关闭时直接跳过全部初始化逻辑
         return
 
     async with session_scope() as session:
@@ -1095,13 +1152,12 @@ async def create_or_update_starter_projects(all_types_dict: dict) -> None:
 
         if get_settings_service().settings.update_starter_projects:
             await logger.adebug("Updating starter projects")
-            # 1. Delete all existing starter projects
+        # 1) 清理已有 `starter projects`
             successfully_updated_projects = 0
             await delete_starter_projects(session, new_folder.id)
-            # Profile pictures are now served directly from the package installation directory
-            # No need to copy them to config_dir
+            # 注意：头像资源已从安装目录直接提供，无需复制到配置目录
 
-            # 2. Update all starter projects with the latest component versions (this modifies the actual file data)
+            # 2) 使用最新组件版本更新 `starter projects`（会修改文件内容）
             for project_path, project in starter_projects:
                 (
                     project_name,
@@ -1123,7 +1179,7 @@ async def create_or_update_starter_projects(all_types_dict: dict) -> None:
                     await update_project_file(project_path, project, updated_project_data)
 
                 try:
-                    # Create the updated starter project
+                    # 写入更新后的 `starter project`
                     create_new_project(
                         session=session,
                         project_name=project_name,
@@ -1143,7 +1199,7 @@ async def create_or_update_starter_projects(all_types_dict: dict) -> None:
                 successfully_updated_projects += 1
             await logger.adebug(f"Successfully updated {successfully_updated_projects} starter projects")
         else:
-            # Even if we're not updating starter projects, we still need to create any that don't exist
+            # 即使不更新，也需要补齐不存在的 `starter projects`
             await logger.adebug("Creating new starter projects")
             successfully_created_projects = 0
             existing_flows = await get_all_flows_similar_to_project(session, new_folder.id)
@@ -1182,11 +1238,11 @@ async def create_or_update_starter_projects(all_types_dict: dict) -> None:
 
 
 async def initialize_auto_login_default_superuser() -> None:
+    """在 `AUTO_LOGIN` 模式下初始化默认超级用户。"""
     settings_service = get_settings_service()
     if not settings_service.auth_settings.AUTO_LOGIN:
         return
-    # In AUTO_LOGIN mode, always use the default credentials for initial bootstrapping
-    # without persisting the password in memory after setup.
+    # 注意：`AUTO_LOGIN` 使用默认凭据完成初始化，不保留明文密码
     from lfx.services.settings.constants import DEFAULT_SUPERUSER, DEFAULT_SUPERUSER_PASSWORD
 
     username = DEFAULT_SUPERUSER
@@ -1198,7 +1254,7 @@ async def initialize_auto_login_default_superuser() -> None:
     async with session_scope() as async_session:
         super_user = await create_super_user(db=async_session, username=username, password=password)
         await get_variable_service().initialize_user_variables(super_user.id, async_session)
-        # Initialize agentic variables if agentic experience is enabled
+        # 若启用 `agentic` 体验，则初始化相关变量
         from langflow.api.utils.mcp.agentic_mcp import initialize_agentic_user_variables
 
         if get_settings_service().settings.agentic_experience:
@@ -1208,41 +1264,35 @@ async def initialize_auto_login_default_superuser() -> None:
 
 
 async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> FolderRead:
-    """Ensure the default folder exists for the given user_id. If it doesn't exist, create it.
+    """获取或创建用户默认文件夹。
 
-    Uses an idempotent insertion approach to handle concurrent creation gracefully.
+    关键路径：
+    1) 查询当前默认文件夹
+    2) 如存在旧名称则执行迁移
+    3) 并发冲突时回退重查
 
-    If the DEFAULT_FOLDER_NAME env var is set to a custom value (e.g., "OpenRAG"), this function
-    will check for legacy folder names and migrate them to avoid duplicates.
-
-    This implementation avoids an external distributed lock and works with both SQLite and PostgreSQL.
-
-    Args:
-        session (AsyncSession): The active database session.
-        user_id (UUID): The ID of the user who owns the folder.
-
-    Returns:
-        FolderRead: The default folder for the user.
+    契约：采用幂等写入策略以支持并发创建。
+    失败语义：并发冲突且重查失败时抛 `ValueError`。
     """
-    # First, check if the current default folder exists
+    # 先检查当前默认文件夹
     stmt = select(Folder).where(Folder.user_id == user_id, Folder.name == DEFAULT_FOLDER_NAME)
     result = await session.exec(stmt)
     folder = result.first()
     if folder:
         return FolderRead.model_validate(folder, from_attributes=True)
 
-    # Check if a legacy folder exists and migrate it if the name is different from default
+    # 检查旧名称文件夹并在需要时迁移
     if DEFAULT_FOLDER_NAME not in LEGACY_FOLDER_NAMES:
         for legacy_name in LEGACY_FOLDER_NAMES:
             if legacy_name == DEFAULT_FOLDER_NAME:
-                continue  # Skip if legacy name is the same as current default
+                continue  # 若旧名称与默认一致则跳过
 
             legacy_stmt = select(Folder).where(Folder.user_id == user_id, Folder.name == legacy_name)
             legacy_result = await session.exec(legacy_stmt)
             legacy_folder = legacy_result.first()
 
             if legacy_folder:
-                # Migrate the legacy folder by renaming it
+                # 将旧文件夹改名为默认名称
                 await logger.ainfo(
                     f"Migrating legacy folder '{legacy_name}' to '{DEFAULT_FOLDER_NAME}' for user {user_id}"
                 )
@@ -1254,18 +1304,18 @@ async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> 
                     await session.refresh(legacy_folder)
                     return FolderRead.model_validate(legacy_folder, from_attributes=True)
                 except sa.exc.IntegrityError:
-                    # If there's a conflict, rollback and proceed to create new folder
+                    # 若并发冲突则回滚并进入创建流程
                     await session.rollback()
                     break
 
-    # If no existing folder found, create a new one
+    # 若不存在则创建新文件夹
     try:
         folder_obj = Folder(user_id=user_id, name=DEFAULT_FOLDER_NAME, description=DEFAULT_FOLDER_DESCRIPTION)
         session.add(folder_obj)
         await session.flush()
         await session.refresh(folder_obj)
     except sa.exc.IntegrityError as e:
-        # Another worker may have created the folder concurrently.
+        # 可能被其他 `worker` 并发创建
         await session.rollback()
         result = await session.exec(stmt)
         folder = result.first()
@@ -1277,6 +1327,16 @@ async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> 
 
 
 async def sync_flows_from_fs():
+    """轮询文件系统并同步流程变更到数据库。
+
+    关键路径：
+    1) 周期性读取绑定 `fs_path` 的流程
+    2) 比较文件 `mtime`，增量更新数据库字段
+    3) 处理异常并在取消时退出
+
+    契约：轮询间隔由 `fs_flows_polling_interval` 控制（毫秒转秒）。
+    失败语义：数据库连接丢失时退出，其它异常记录并中断循环。
+    """
     flow_mtimes = {}
     fs_flows_polling_interval = get_settings_service().settings.fs_flows_polling_interval / 1000
     storage_service = get_storage_service()
@@ -1288,13 +1348,13 @@ async def sync_flows_from_fs():
                     flows = (await session.exec(stmt)).all()
                     for flow in flows:
                         mtime = flow_mtimes.setdefault(flow.id, 0)
-                        # Resolve path: if relative, construct full path using user's flows directory
+                        # 路径解析：相对路径使用用户 `flows` 目录拼接
                         fs_path_str = flow.fs_path
                         if not Path(fs_path_str).is_absolute():
-                            # Relative path - construct full path
+                            # 相对路径
                             path = storage_service.data_dir / "flows" / str(flow.user_id) / fs_path_str
                         else:
-                            # Absolute path - use as-is
+                            # 绝对路径直接使用
                             path = anyio.Path(fs_path_str)
                         try:
                             if await path.exists():
@@ -1322,8 +1382,8 @@ async def sync_flows_from_fs():
             except (sa.exc.OperationalError, ValueError) as e:
                 if "no active connection" in str(e) or "connection is closed" in str(e):
                     await logger.adebug("Database connection lost, assuming shutdown")
-                    break  # Exit gracefully, don't error
-                raise  # Re-raise if it's a real connection problem
+                    break  # 数据库关闭时正常退出
+                raise  # 其他数据库错误继续抛出
             except Exception:  # noqa: BLE001
                 await logger.aexception("Error while syncing flows from database")
                 break

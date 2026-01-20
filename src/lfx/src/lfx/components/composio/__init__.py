@@ -1,3 +1,19 @@
+"""
+模块名称：`composio` 组件包入口
+
+本模块提供 `lfx.components.composio` 的懒加载导出，集中管理 Composio 生态组件。
+主要功能包括：
+- 通过 `__getattr__` 动态导入组件，降低启动成本
+- 统一对外导出列表，便于组件发现与注册
+
+关键组件：
+- ComposioAPIComponent：Composio 工具总入口
+- 各 `Composio*APIComponent`：具体应用的工具封装
+
+设计背景：Composio 组件数量多且依赖重，按需加载可减少导入开销。
+注意事项：访问未注册的导出名会抛 `AttributeError`。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -134,7 +150,7 @@ _dynamic_imports = {
     "ComposioWrikeAPIComponent": "wrike_composio",
 }
 
-# Always expose all components - individual failures will be handled on import
+# 注意：统一暴露所有组件，单个导入失败由 `__getattr__` 处理
 __all__ = [
     "ComposioAPIComponent",
     "ComposioAgentQLAPIComponent",
@@ -205,7 +221,12 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import composio components on attribute access."""
+    """按需导入 Composio 组件。
+
+    契约：`attr_name` 必须在 `_dynamic_imports` 中注册。
+    副作用：动态导入模块并写入 `globals()`。
+    失败语义：缺少注册或导入失败时抛 `AttributeError`。
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
@@ -219,4 +240,5 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """提供可见导出列表，便于 `dir()` 与 IDE 补全。"""
     return list(__all__)

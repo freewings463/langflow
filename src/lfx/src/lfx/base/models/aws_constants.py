@@ -1,8 +1,26 @@
+"""
+模块名称：Amazon Bedrock 模型元数据
+
+本模块维护 Amazon Bedrock 相关模型与区域的静态列表，主要用于统一模型注册与
+UI 选择项生成。
+主要功能包括：
+- 提供 Bedrock 模型元数据主表
+- 生成向后兼容的模型名称列表
+- 提供嵌入模型与区域枚举
+
+关键组件：
+- `AWS_MODELS_DETAILED`：元数据主列表
+- `AWS_MODEL_IDs`：兼容的模型名称列表
+
+设计背景：以静态元数据作为 UI 与兼容层的稳定来源。
+注意事项：此列表不反映实时可用性，实际可用性由上层与云端控制。
+"""
+
 from .model_metadata import create_model_metadata
 
-# Unified model metadata - single source of truth
+# 统一元数据：作为唯一事实来源
 AWS_MODELS_DETAILED = [
-    # Amazon Titan Models
+    # Amazon Titan 模型
     create_model_metadata(
         provider="Amazon Bedrock", name="amazon.titan-text-express-v1", icon="Amazon", tool_calling=True
     ),
@@ -12,7 +30,7 @@ AWS_MODELS_DETAILED = [
     create_model_metadata(
         provider="Amazon Bedrock", name="amazon.titan-text-premier-v1:0", icon="Amazon", tool_calling=True
     ),
-    # Anthropic Models
+    # Anthropic 模型
     create_model_metadata(provider="Amazon Bedrock", name="anthropic.claude-v2", icon="Amazon", tool_calling=True),
     create_model_metadata(provider="Amazon Bedrock", name="anthropic.claude-v2:1", icon="Amazon", tool_calling=True),
     create_model_metadata(
@@ -36,7 +54,7 @@ AWS_MODELS_DETAILED = [
     create_model_metadata(
         provider="Amazon Bedrock", name="anthropic.claude-instant-v1", icon="Amazon", tool_calling=True
     ),
-    # AI21 Labs Models
+    # AI21 Labs 模型
     create_model_metadata(provider="Amazon Bedrock", name="ai21.jamba-instruct-v1:0", icon="Amazon", tool_calling=True),
     create_model_metadata(provider="Amazon Bedrock", name="ai21.j2-mid-v1", icon="Amazon", tool_calling=True),
     create_model_metadata(provider="Amazon Bedrock", name="ai21.j2-ultra-v1", icon="Amazon", tool_calling=True),
@@ -44,7 +62,7 @@ AWS_MODELS_DETAILED = [
         provider="Amazon Bedrock", name="ai21.jamba-1-5-large-v1:0", icon="Amazon", tool_calling=True
     ),
     create_model_metadata(provider="Amazon Bedrock", name="ai21.jamba-1-5-mini-v1:0", icon="Amazon", tool_calling=True),
-    # Cohere Models
+    # Cohere 模型
     create_model_metadata(provider="Amazon Bedrock", name="cohere.command-text-v14", icon="Amazon", tool_calling=True),
     create_model_metadata(
         provider="Amazon Bedrock", name="cohere.command-light-text-v14", icon="Amazon", tool_calling=True
@@ -53,7 +71,7 @@ AWS_MODELS_DETAILED = [
     create_model_metadata(
         provider="Amazon Bedrock", name="cohere.command-r-plus-v1:0", icon="Amazon", tool_calling=True
     ),
-    # Meta Models
+    # Meta 模型
     create_model_metadata(provider="Amazon Bedrock", name="meta.llama2-13b-chat-v1", icon="Amazon", tool_calling=True),
     create_model_metadata(provider="Amazon Bedrock", name="meta.llama2-70b-chat-v1", icon="Amazon", tool_calling=True),
     create_model_metadata(
@@ -83,7 +101,7 @@ AWS_MODELS_DETAILED = [
     create_model_metadata(
         provider="Amazon Bedrock", name="meta.llama3-2-90b-instruct-v1:0", icon="Amazon", tool_calling=True
     ),
-    # Mistral AI Models
+    # Mistral AI 模型
     create_model_metadata(
         provider="Amazon Bedrock", name="mistral.mistral-7b-instruct-v0:2", icon="Amazon", tool_calling=True
     ),
@@ -101,18 +119,19 @@ AWS_MODELS_DETAILED = [
     ),
 ]
 
-# Generate backwards-compatible list from the metadata
+# 兼容列表：保持旧接口依赖的模型名
 AWS_MODEL_IDs = [metadata["name"] for metadata in AWS_MODELS_DETAILED]
 
 AWS_EMBEDDING_MODEL_IDS = [
-    # Amazon Titan Embedding Models
+    # Amazon Titan 嵌入模型
     "amazon.titan-embed-text-v1",
     "amazon.titan-embed-text-v2:0",
-    # Cohere Embedding Models
+    # Cohere 嵌入模型
     "cohere.embed-english-v3",
     "cohere.embed-multilingual-v3",
 ]
 
+# 可选区域列表（用于 UI 选择与校验）
 AWS_REGIONS = [
     "us-west-2",
     "us-west-1",

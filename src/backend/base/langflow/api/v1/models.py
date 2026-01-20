@@ -1,3 +1,15 @@
+"""
+模块名称：模型与提供方管理接口
+
+本模块提供模型目录、启用状态与默认模型配置的管理能力。
+主要功能：
+- 查询模型提供方与模型列表
+- 维护启用/禁用模型集合
+- 设置与清理默认模型
+设计背景：为前端模型选择与权限控制提供统一接口。
+注意事项：变量服务异常会返回 500。
+"""
+
 from __future__ import annotations
 
 import json
@@ -187,6 +199,7 @@ async def list_models(
 
 @router.get("/provider-variable-mapping", status_code=200)
 async def get_model_provider_mapping() -> dict[str, str]:
+    """获取模型提供方与变量名映射。"""
     return get_model_provider_variable_mapping()
 
 

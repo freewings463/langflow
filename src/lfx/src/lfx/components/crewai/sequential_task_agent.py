@@ -1,3 +1,19 @@
+"""
+模块名称：顺序任务与 Agent 组合组件
+
+本模块提供将 CrewAI Agent 与顺序任务打包的组件封装，支持在一个组件中创建
+Agent 与 Task，并进行任务链拼接。主要功能包括：
+- 构建 Agent 并绑定工具与 LLM
+- 构建 Task 并关联 Agent
+- 支持与前序任务链拼接
+
+关键组件：
+- `SequentialTaskAgentComponent`：顺序任务/Agent 组合入口
+
+设计背景：简化顺序任务编排时的 Agent 与 Task 组合配置。
+注意事项：依赖 `crewai` 包，未安装将抛 `ImportError`。
+"""
+
 from lfx.base.agents.crewai.tasks import SequentialTask
 from lfx.custom.custom_component.component import Component
 from lfx.io import BoolInput, DictInput, HandleInput, MultilineInput, Output
@@ -12,7 +28,6 @@ class SequentialTaskAgentComponent(Component):
     replacement = "agents.Agent"
 
     inputs = [
-        # Agent inputs
         MultilineInput(name="role", display_name="Role", info="The role of the agent."),
         MultilineInput(name="goal", display_name="Goal", info="The objective of the agent."),
         MultilineInput(
@@ -68,7 +83,6 @@ class SequentialTaskAgentComponent(Component):
             is_list=True,
             advanced=True,
         ),
-        # Task inputs
         MultilineInput(
             name="task_description",
             display_name="Task Description",
@@ -86,7 +100,6 @@ class SequentialTaskAgentComponent(Component):
             advanced=True,
             info="Boolean flag indicating asynchronous task execution.",
         ),
-        # Chaining input
         HandleInput(
             name="previous_task",
             display_name="Previous Task",
@@ -105,13 +118,22 @@ class SequentialTaskAgentComponent(Component):
     ]
 
     def build_agent_and_task(self) -> list[SequentialTask]:
+        """构建 Agent 与顺序任务并返回任务链。
+
+        契约：输出 `SequentialTask` 列表，包含新建任务与可选前序任务。
+        关键路径（三步）：
+        1) 构建 Agent（含工具/LLM/权限）。
+        2) 构建 Task 并关联 Agent。
+        3) 与 `previous_task` 拼接形成任务链。
+
+        异常流：依赖缺失抛 `ImportError`。
+        """
         try:
             from crewai import Agent, Task
         except ImportError as e:
             msg = "CrewAI is not installed. Please install it with `uv pip install crewai`."
             raise ImportError(msg) from e
 
-        # Build the agent
         agent_kwargs = self.agent_kwargs or {}
         agent = Agent(
             role=self.role,
@@ -126,7 +148,6 @@ class SequentialTaskAgentComponent(Component):
             **agent_kwargs,
         )
 
-        # Build the task
         task = Task(
             description=self.task_description,
             expected_output=self.expected_output,
@@ -134,7 +155,6 @@ class SequentialTaskAgentComponent(Component):
             async_execution=self.async_execution,
         )
 
-        # If there's a previous task, create a list of tasks
         if self.previous_task:
             tasks = [*self.previous_task, task] if isinstance(self.previous_task, list) else [self.previous_task, task]
         else:

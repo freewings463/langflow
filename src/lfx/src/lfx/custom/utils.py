@@ -1,4 +1,17 @@
-# mypy: ignore-errors
+"""
+模块名称：自定义组件工具函数
+
+本模块提供自定义组件模板构建、字段推断、依赖分析与加载的核心工具函数。
+主要功能：
+- 构建组件模板与实例；
+- 处理输入字段与输出类型；
+- 管理组件加载与缓存元数据。
+
+设计背景：集中封装自定义组件处理逻辑，减少分散实现导致的不一致。
+注意事项：涉及动态执行与反射，需确保调用方已完成安全校验。
+"""
+
+# mypy: ignore-errors  # 注意：该文件存在动态执行与反射，关闭 mypy 检查。
 from __future__ import annotations
 
 import ast
@@ -41,19 +54,10 @@ if TYPE_CHECKING:
 
 
 def _generate_code_hash(source_code: str, modname: str) -> str:
-    """Generate a hash of the component source code.
+    """生成组件源码哈希
 
-    Args:
-        source_code: The source code string
-        modname: The module name for context
-
-    Returns:
-        SHA256 hash of the source code
-
-    Raises:
-        ValueError: If source_code is empty or None
-        UnicodeEncodeError: If source_code cannot be encoded
-        TypeError: If source_code is not a string
+    契约：返回源码的 SHA256 短哈希（前 12 位）。
+    异常流：源码为空或类型错误时抛异常。
     """
     if not isinstance(source_code, str):
         msg = "Source code must be a string"
@@ -63,16 +67,20 @@ def _generate_code_hash(source_code: str, modname: str) -> str:
         msg = f"Empty source code for {modname}"
         raise ValueError(msg)
 
-    # Generate SHA256 hash of the source code
-    return hashlib.sha256(source_code.encode("utf-8")).hexdigest()[:12]  # First 12 chars for brevity
+    # 实现：生成源码的 SHA256 哈希，取前 12 位用于简短标识。
+    return hashlib.sha256(source_code.encode("utf-8")).hexdigest()[:12]
 
 
 class UpdateBuildConfigError(Exception):
+    """构建配置更新异常。"""
     pass
 
 
 def add_output_types(frontend_node: CustomComponentFrontendNode, return_types: list[str]) -> None:
-    """Add output types to the frontend node."""
+    """向前端节点追加输出类型
+
+    契约：输入返回类型列表；遇到非法类型抛 HTTP 400。
+    """
     for return_type in return_types:
         if return_type is None:
             raise HTTPException(
@@ -95,21 +103,24 @@ def add_output_types(frontend_node: CustomComponentFrontendNode, return_types: l
 
 
 def reorder_fields(frontend_node: CustomComponentFrontendNode, field_order: list[str]) -> None:
-    """Reorder fields in the frontend node based on the specified field_order."""
+    """按指定顺序重排字段
+
+    契约：字段不存在时跳过；未指定顺序时不做处理。
+    """
     if not field_order:
         return
 
-    # Create a dictionary for O(1) lookup time.
+    # 注意：用字典实现 O(1) 字段查找。
     field_dict = {field.name: field for field in frontend_node.template.fields}
     reordered_fields = [field_dict[name] for name in field_order if name in field_dict]
-    # Add any fields that are not in the field_order list
+    # 注意：追加未在排序列表中的字段。
     reordered_fields.extend(field for field in frontend_node.template.fields if field.name not in field_order)
     frontend_node.template.fields = reordered_fields
     frontend_node.field_order = field_order
 
 
 def add_base_classes(frontend_node: CustomComponentFrontendNode, return_types: list[str]) -> None:
-    """Add base classes to the frontend node."""
+    """向前端节点追加输出基类信息。"""
     for return_type_instance in return_types:
         if return_type_instance is None:
             raise HTTPException(
@@ -129,13 +140,9 @@ def add_base_classes(frontend_node: CustomComponentFrontendNode, return_types: l
 
 
 def extract_type_from_optional(field_type):
-    """Extract the type from a string formatted as "Optional[<type>]".
+    """从 Optional[...] 中提取真实类型
 
-    Parameters:
-    field_type (str): The string from which to extract the type.
-
-    Returns:
-    str: The extracted type, or an empty string if no type was found.
+    契约：若非 Optional 直接返回原字符串。
     """
     if "optional" not in field_type.lower():
         return field_type
@@ -144,13 +151,15 @@ def extract_type_from_optional(field_type):
 
 
 def get_field_properties(extra_field):
-    """Get the properties of an extra field."""
+    """解析额外字段的属性信息
+
+    契约：返回 (name, type, value, required)。
+    关键路径：1) 读取 name/type/default 2) 判断必填 3) 可选解析默认值。
+    """
     field_name = extra_field["name"]
     field_type = extra_field.get("type", "str")
     field_value = extra_field.get("default", "")
-    # a required field is a field that does not contain
-    # optional in field_type
-    # and a field that does not have a default value
+    # 注意：必填字段需满足：类型非 Optional 且无默认值。
     field_required = "optional" not in field_type.lower() and isinstance(field_value, MissingDefault)
     field_value = field_value if not isinstance(field_value, MissingDefault) else None
 
@@ -163,11 +172,14 @@ def get_field_properties(extra_field):
 
 
 def process_type(field_type: str):
+    """规范化字段类型
+
+    契约：列表类型提取 inner type；Prompt/Code 类型转小写。
+    """
     if field_type.startswith(("list", "List")):
         return extract_inner_type(field_type)
 
-    # field_type is a string can be Prompt or Code too
-    # so we just need to lower if it is the case
+    # 注意：Prompt/Code 类型需转为小写以匹配内部约定。
     lowercase_type = field_type.lower()
     if lowercase_type in {"prompt", "code"}:
         return lowercase_type
@@ -183,8 +195,12 @@ def add_new_custom_field(
     field_required: bool,
     field_config: dict,
 ):
-    # Check field_config if any of the keys are in it
-    # if it is, update the value
+    """向前端节点添加新的自定义字段
+
+    契约：根据 field_config 构建 Input 并插入模板；返回更新后的节点。
+    关键路径：1) 合并配置 2) 规范化类型 3) 创建 Input 4) 写入模板。
+    """
+    # 注意：field_config 中存在覆盖项时需优先使用。
     display_name = field_config.pop("display_name", None)
     if not field_type:
         if "type" in field_config and field_config["type"] is not None:
@@ -207,8 +223,7 @@ def add_new_custom_field(
         field_config["load_from_db"] = True
         field_config["input_types"] = ["Text"]
 
-    # If options is a list, then it's a dropdown or multiselect
-    # If options is None, then it's a list of strings
+    # 注意：options 为 list 时视为下拉/多选；为 None 时视为字符串列表。
     is_list = isinstance(field_config.get("options"), list)
     field_config["is_list"] = is_list or field_config.get("list", False) or field_contains_list
 
@@ -236,13 +251,15 @@ def add_new_custom_field(
 
 
 def add_extra_fields(frontend_node, field_config, function_args) -> None:
-    """Add extra fields to the frontend node."""
+    """根据函数签名添加额外字段
+
+    契约：仅在函数参数中存在字段时追加；kwargs 场景补齐额外配置。
+    """
     if not function_args:
         return
     field_config_ = field_config.copy()
     function_args_names = [arg["name"] for arg in function_args]
-    # If kwargs is in the function_args and not all field_config keys are in function_args
-    # then we need to add the extra fields
+    # 注意：若签名包含 kwargs 且存在额外配置字段，则补充额外字段。
 
     for extra_field in function_args:
         if "name" not in extra_field or extra_field["name"] in {
@@ -279,7 +296,7 @@ def add_extra_fields(frontend_node, field_config, function_args) -> None:
 
 
 def get_field_dict(field: Input | dict):
-    """Get the field dictionary from a Input or a dict."""
+    """将 Input 或 dict 统一为 dict。"""
     if isinstance(field, Input):
         return dotdict(field.model_dump(by_alias=True, exclude_none=True))
     return field
@@ -288,37 +305,39 @@ def get_field_dict(field: Input | dict):
 def run_build_inputs(
     custom_component: Component,
 ):
-    """Run the build inputs of a custom component."""
+    """运行组件的 build_inputs 并返回结果
+
+    契约：失败时抛 HTTP 500 并记录日志。
+    """
     try:
         return custom_component.build_inputs()
-        # add_extra_fields(frontend_node, field_config, field_config.values())
+        # 注意：预留扩展点，必要时可启用额外字段填充。
     except Exception as exc:
         logger.exception("Error running build inputs")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def get_component_instance(custom_component: CustomComponent | Component, user_id: str | UUID | None = None):
-    """Returns an instance of a custom component, evaluating its code if necessary.
+    """获取组件实例（必要时动态构造）
 
-    If the input is already an instance of `Component` or `CustomComponent`, it is returned directly.
-    Otherwise, the function evaluates the component's code to create and return an instance. Raises an
-    HTTP 400 error if the code is missing, invalid, or instantiation fails.
+    契约：返回 Component/CustomComponent 实例；失败抛 HTTP 400。
+    关键路径：1) 校验代码类型 2) 动态创建类 3) 实例化。
     """
-    # Fast path: avoid repeated str comparisons
+    # 注意：快速路径避免重复字符串比较。
 
     code = custom_component._code
     if not isinstance(code, str):
-        # Only two failure cases: None, or other non-str
+    # 注意：仅处理 None 或非字符串两类错误。
         error = "Code is None" if code is None else "Invalid code type"
         msg = f"Invalid type conversion: {error}. Please check your code and try again."
         logger.error(msg)
         raise HTTPException(status_code=400, detail={"error": msg})
 
-    # Only now, try to process expensive exception/log traceback only *if needed*
+    # 注意：仅在失败时生成完整 traceback，减少正常路径开销。
     try:
         custom_class = eval_custom_component_code(code)
     except Exception as exc:
-        # Only generate traceback if an error occurs (save time on success)
+        # 注意：仅在异常时生成 traceback。
         tb = traceback.format_exc()
         logger.error("Error while evaluating custom component code\n%s", tb)
         raise HTTPException(
@@ -334,7 +353,7 @@ def get_component_instance(custom_component: CustomComponent | Component, user_i
     except Exception as exc:
         tb = traceback.format_exc()
         logger.error("Error while instantiating custom component\n%s", tb)
-        # Only log inner traceback if present in 'detail'
+        # 注意：仅在 detail 中包含 traceback 时记录。
         detail_tb = getattr(exc, "detail", {}).get("traceback", None)
         if detail_tb is not None:
             logger.error(detail_tb)
@@ -342,9 +361,9 @@ def get_component_instance(custom_component: CustomComponent | Component, user_i
 
 
 def is_a_preimported_component(custom_component: CustomComponent):
-    """Check if the component is a preimported component."""
+    """判断组件是否为预导入组件。"""
     klass = type(custom_component)
-    # This avoids double type lookups, and may speed up the common-case short-circuit
+    # 注意：避免重复类型查找，提高常见路径性能。
     return issubclass(klass, Component) and klass is not Component
 
 
@@ -352,21 +371,13 @@ def run_build_config(
     custom_component: CustomComponent,
     user_id: str | UUID | None = None,
 ) -> tuple[dict, CustomComponent]:
-    """Builds the field configuration dictionary for a custom component.
+    """构建组件字段配置
 
-    If the input is an instance of a subclass of Component (excluding Component itself), returns its
-    build configuration and the instance. Otherwise, evaluates the component's code to create an instance,
-    calls its build_config method, and processes any RangeSpec objects in the configuration. Raises an
-    HTTP 400 error if the code is missing or invalid, or if instantiation or configuration building fails.
-
-    Returns:
-        A tuple containing the field configuration dictionary and the component instance.
+    契约：返回 (build_config, component_instance)；失败抛 HTTP 400。
+    关键路径：1) 预导入组件快速路径 2) 动态实例化 3) 处理 RangeSpec。
     """
-    # Check if the instance's class is a subclass of Component (but not Component itself)
-    # If we have a Component that is a subclass of Component, that means
-    # we have imported it
-    # If not, it means the component was loaded through LANGFLOW_COMPONENTS_PATH
-    # and loaded from a file
+    # 注意：仅当实例类是 Component 子类时走预导入路径。
+    # 注意：预导入组件与路径加载组件的处理路径不同。
     if is_a_preimported_component(custom_component):
         return custom_component.build_config(), custom_component
 
@@ -392,10 +403,9 @@ def run_build_config(
             build_config: dict = custom_instance.build_config()
 
             for field_name, field in build_config.copy().items():
-                # Allow user to build Input as well
-                # as a dict with the same keys as Input
+                # 注意：允许字段以 Input 或等价 dict 表达。
                 field_dict = get_field_dict(field)
-                # Let's check if "rangeSpec" is a RangeSpec object
+                # 注意：rangeSpec 需转换为可序列化结构。
                 if "rangeSpec" in field_dict and isinstance(field_dict["rangeSpec"], RangeSpec):
                     field_dict["rangeSpec"] = field_dict["rangeSpec"].model_dump()
                 build_config[field_name] = field_dict
@@ -416,6 +426,7 @@ def run_build_config(
 
 
 def add_code_field(frontend_node: CustomComponentFrontendNode, raw_code):
+    """向模板追加 code 字段。"""
     code_field = Input(
         dynamic=True,
         required=True,
@@ -434,6 +445,7 @@ def add_code_field(frontend_node: CustomComponentFrontendNode, raw_code):
 
 
 def add_code_field_to_build_config(build_config: dict, raw_code: str):
+    """向 build_config 写入 code 字段。"""
     build_config["code"] = Input(
         dynamic=True,
         required=True,
@@ -450,30 +462,24 @@ def add_code_field_to_build_config(build_config: dict, raw_code: str):
 
 
 def get_module_name_from_display_name(display_name: str):
-    """Get the module name from the display name."""
-    # Convert display name to snake_case for Python module name
-    # e.g., "Custom Component" -> "custom_component"
-    # Remove extra spaces and convert to lowercase
+    """由展示名生成模块名（snake_case）。"""
+    # 注意：display_name 转为 snake_case 模块名，例如 "Custom Component" -> "custom_component"。
+    # 注意：移除多余空格并转小写。
     cleaned_name = re.sub(r"\s+", " ", display_name.strip())
-    # Replace spaces with underscores and convert to lowercase
+    # 注意：空格替换为下划线并转小写。
     module_name = cleaned_name.replace(" ", "_").lower()
-    # Remove any non-alphanumeric characters except underscores
+    # 注意：移除除下划线外的非字母数字字符。
     return re.sub(r"[^a-z0-9_]", "", module_name)
 
 
 def build_custom_component_template_from_inputs(
     custom_component: Component | CustomComponent, user_id: str | UUID | None = None, module_name: str | None = None
 ):
-    # The List of Inputs fills the role of the build_config and the entrypoint_args
-    """Builds a frontend node template from a custom component using its input-based configuration.
+    # 注意：Inputs 列表同时承担 build_config 与 entrypoint_args 的角色。
+    """基于 inputs 构建前端模板
 
-    This function generates a frontend node template by extracting input fields from the component,
-    adding the code field, determining output types from method return types, validating the component,
-    setting base classes, and reordering fields. Returns the frontend node as a dictionary along with
-    the component instance.
-
-    Returns:
-        A tuple containing the frontend node dictionary and the component instance.
+    契约：返回 (frontend_node_dict, component_instance)。
+    关键路径：1) 构建输入字段 2) 添加 code 字段 3) 推断输出类型并校验。
     """
     ctype_name = custom_component.__class__.__name__
     if ctype_name in _COMPONENT_TYPE_NAMES:
@@ -486,7 +492,7 @@ def build_custom_component_template_from_inputs(
         frontend_node = ComponentFrontendNode.from_inputs(**custom_component.template_config)
         cc_instance = custom_component
     frontend_node = add_code_field(frontend_node, custom_component._code)
-    # But we now need to calculate the return_type of the methods in the outputs
+    # 注意：根据输出方法推断返回类型。
     for output in frontend_node.outputs:
         if output.types:
             continue
@@ -494,7 +500,7 @@ def build_custom_component_template_from_inputs(
         return_types = [format_type(return_type) for return_type in return_types]
         output.add_types(return_types)
 
-    # Validate that there is not name overlap between inputs and outputs
+    # 注意：校验输入与输出名称不冲突。
     frontend_node.validate_component()
     # ! This should be removed when we have a better way to handle this
     frontend_node.set_base_classes_from_outputs()
@@ -507,14 +513,18 @@ def build_custom_component_template_from_inputs(
 def build_component_metadata(
     frontend_node: CustomComponentFrontendNode, custom_component: CustomComponent, module_name: str, ctype_name: str
 ):
-    """Build the metadata for a custom component."""
+    """构建组件元数据
+
+    契约：写入 module/code_hash/dependencies 等元信息并返回节点。
+    异常流：依赖分析失败时填充空依赖信息。
+    """
     if module_name:
         frontend_node.metadata["module"] = module_name
     else:
         module_name = get_module_name_from_display_name(frontend_node.display_name)
         frontend_node.metadata["module"] = f"custom_components.{module_name}"
 
-    # Generate code hash for cache invalidation and debugging
+    # 注意：生成代码哈希用于缓存失效与排障。
     try:
         code_hash = _generate_code_hash(custom_component._code, module_name)
         if code_hash:
@@ -522,13 +532,13 @@ def build_component_metadata(
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"Error generating code hash for {custom_component.__class__.__name__}", exc_info=exc)
 
-    # Analyze component dependencies
+    # 注意：分析组件依赖并写入元数据。
     try:
         dependency_info = analyze_component_dependencies(custom_component._code)
         frontend_node.metadata["dependencies"] = dependency_info
     except (SyntaxError, TypeError, ValueError, ImportError) as exc:
         logger.warning(f"Failed to analyze dependencies for component {ctype_name}: {exc}")
-        # Set minimal dependency info on failure
+        # 注意：失败时写入最小依赖信息。
         frontend_node.metadata["dependencies"] = {
             "total_dependencies": 0,
             "dependencies": [],
@@ -542,16 +552,10 @@ def build_custom_component_template(
     user_id: str | UUID | None = None,
     module_name: str | None = None,
 ) -> tuple[dict[str, Any], CustomComponent | Component]:
-    """Builds a frontend node template and instance for a custom component.
+    """构建组件模板与实例
 
-    If the component uses input-based configuration, delegates to the appropriate builder. Otherwise,
-    constructs a frontend node from the component's template configuration, adds extra fields, code,
-    base classes, and output types, reorders fields, and returns the resulting template dictionary
-    along with the component instance.
-
-    Raises:
-        HTTPException: If the component is missing required attributes or if any error occurs during
-                      template construction.
+    契约：返回 (template_dict, component_instance)；失败抛 HTTP 400。
+    关键路径：1) 判断输入型/模板型 2) 构建字段与输出 3) 生成元数据。
     """
     try:
         has_template_config = hasattr(custom_component, "template_config")
@@ -616,11 +620,9 @@ def create_component_template(
     component_extractor: Component | CustomComponent | None = None,
     module_name: str | None = None,
 ):
-    """Creates a component template and instance from either a component dictionary or an existing component extractor.
+    """从组件字典或实例构建模板
 
-    If a component dictionary is provided, a new Component instance is created from its code. If a component
-    extractor is provided, it is used directly. The function returns the generated template and the component
-    instance. Output types are set on the template if missing.
+    契约：返回 (template, instance)；缺失输出类型时回填。
     """
     component_output_types = []
     if component_extractor is None and component is not None:
@@ -639,7 +641,7 @@ def create_component_template(
 
 
 def build_custom_components(components_paths: list[str]):
-    """Build custom components from the specified paths."""
+    """从路径构建自定义组件（同步）。"""
     if not components_paths:
         return {}
 
@@ -665,7 +667,7 @@ def build_custom_components(components_paths: list[str]):
 
 
 async def abuild_custom_components(components_paths: list[str]):
-    """Build custom components from the specified paths."""
+    """从路径构建自定义组件（异步）。"""
     if not components_paths:
         return {}
 
@@ -690,7 +692,8 @@ async def abuild_custom_components(components_paths: list[str]):
 
 
 def sanitize_field_config(field_config: dict | Input):
-    # If any of the already existing keys are in field_config, remove them
+    """清理字段配置中不允许覆盖的键。"""
+    # 注意：移除不允许用户覆盖的字段键。
     field_dict = field_config.to_dict() if isinstance(field_config, Input) else field_config
     for key in [
         "name",
@@ -704,7 +707,7 @@ def sanitize_field_config(field_config: dict | Input):
     ]:
         field_dict.pop(key, None)
 
-    # Remove field_type and type because they were extracted already
+    # 注意：field_type/type 已在上游提取，避免重复。
     field_dict.pop("field_type", None)
     field_dict.pop("type", None)
 
@@ -712,20 +715,21 @@ def sanitize_field_config(field_config: dict | Input):
 
 
 def build_component(component):
-    """Build a single component."""
+    """构建单个组件模板。"""
     component_template, component_instance = create_component_template(component)
     component_name = get_instance_name(component_instance)
     return component_name, component_template
 
 
 def get_function(code):
-    """Get the function."""
+    """从代码中构造函数对象。"""
     function_name = validate.extract_function_name(code)
 
     return validate.create_function(code, function_name)
 
 
 def get_instance_name(instance):
+    """获取实例显示名称。"""
     name = instance.__class__.__name__
     if hasattr(instance, "name") and instance.name:
         name = instance.name
@@ -738,27 +742,28 @@ async def update_component_build_config(
     field_value: Any,
     field_name: str | None = None,
 ):
+    """更新组件构建配置（兼容同步/异步）。"""
     if inspect.iscoroutinefunction(component.update_build_config):
         return await component.update_build_config(build_config, field_value, field_name)
     return await asyncio.to_thread(component.update_build_config, build_config, field_value, field_name)
 
 
 async def get_all_types_dict(components_paths: list[str]):
-    """Get all types dictionary with full component loading."""
-    # This is the async version of the existing function
+    """获取完整组件类型字典（异步）。"""
+    # 注意：这是同步函数的异步版本。
     return await abuild_custom_components(components_paths=components_paths)
 
 
 async def get_single_component_dict(component_type: str, component_name: str, components_paths: list[str]):
-    """Get a single component dictionary."""
-    # For example, if components are loaded by importing Python modules:
+    """按类型与名称加载单个组件模板。"""
+    # 注意：示例路径：按 Python 模块方式加载组件。
     for base_path in components_paths:
         module_path = Path(base_path) / component_type / f"{component_name}.py"
         if module_path.exists():
-            # Try to import the module
+            # 注意：尝试导入模块以获取模板。
             module_name = f"lfx.components.{component_type}.{component_name}"
             try:
-                # This is a simplified example - actual implementation may vary
+                # 注意：这里为简化示例，实际实现可能不同。
                 import importlib.util
 
                 spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -781,27 +786,25 @@ async def get_single_component_dict(component_type: str, component_name: str, co
             except OSError as e:
                 await logger.aerror(f"OS error loading component {module_path}: {e!s}")
 
-    # If we get here, the component wasn't found or couldn't be loaded
+    # 注意：走到这里说明未找到或加载失败。
     return None
 
 
 async def load_custom_component(component_name: str, components_paths: list[str]):
-    """Load a custom component by name.
+    """按名称加载自定义组件模板
 
-    Args:
-        component_name: Name of the component to load
-        components_paths: List of paths to search for components
+    契约：返回组件模板 dict 或 None；失败记录日志。
     """
     from lfx.interface.custom_component import get_custom_component_from_name
 
     try:
-        # First try to get the component from the registered components
+        # 注意：优先从已注册组件中查找。
         component_class = get_custom_component_from_name(component_name)
         if component_class:
-            # Define the function locally if it's not imported
+            # 注意：未导入时在局部定义辅助函数。
             def get_custom_component_template(component_cls):
-                """Get template for a custom component class."""
-                # This is a simplified implementation - adjust as needed
+                """获取自定义组件类的模板。"""
+                # 注意：简化实现，必要时可调整。
                 if hasattr(component_cls, "get_template"):
                     return component_cls.get_template()
                 if hasattr(component_cls, "template"):
@@ -810,17 +813,17 @@ async def load_custom_component(component_name: str, components_paths: list[str]
 
             return get_custom_component_template(component_class)
 
-        # If not found in registered components, search in the provided paths
+        # 注意：注册表未找到时，按路径搜索组件文件。
         for path in components_paths:
-            # Try to find the component in different category directories
+            # 注意：在不同分类目录中查找组件。
             base_path = Path(path)
             if base_path.exists() and base_path.is_dir():
-                # Search for the component in all subdirectories
+                # 注意：遍历子目录以定位组件文件。
                 for category_dir in base_path.iterdir():
                     if category_dir.is_dir():
                         component_file = category_dir / f"{component_name}.py"
                         if component_file.exists():
-                            # Try to import the module
+                            # 注意：尝试导入模块并读取模板。
                             module_name = f"lfx.components.{category_dir.name}.{component_name}"
                             try:
                                 import importlib.util
@@ -869,7 +872,7 @@ async def load_custom_component(component_name: str, components_paths: list[str]
         logger.debug("Full traceback for runtime error", exc_info=True)
         return None
 
-    # If we get here, the component wasn't found in any of the paths
+    # 注意：所有路径都未找到目标组件。
     await logger.awarning(f"Component {component_name} not found in any of the provided paths")
     return None
 

@@ -1,3 +1,20 @@
+"""
+模块名称：AstraDB 组件通用基类
+
+本模块提供 Astra DB 相关组件的通用配置、元数据拉取与 UI 表单联动逻辑，主要用于 Langflow
+中数据库与集合的选择/创建。主要功能包括：
+- 生成数据库与集合创建对话框的输入模板
+- 调用 Astra Data API 拉取数据库、集合与向量化提供方信息
+- 维护 `build_config` 的联动与校验
+
+关键组件：
+- `AstraDBBaseComponent`：封装 Astra DB 交互与配置刷新逻辑
+- `NewDatabaseInput`/`NewCollectionInput`：创建表单的结构模板
+
+设计背景：SDK 组件需要统一 Astra DB 的交互与 UI 行为，避免重复实现
+注意事项：网络调用失败时多以空列表/空字典降级，调用方需容忍空结果
+"""
+
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -18,10 +35,21 @@ from lfx.log.logger import logger
 
 
 class AstraDBBaseComponent(Component):
-    """Base class for AstraDB components with common functionality."""
+    """Astra DB 组件公共基类。
+
+    契约：输入为组件字段与 `build_config`，输出为 Astra DB 元数据与联动后的配置。
+    副作用：会触发 Astra Data API 网络请求与调试日志输出。
+    失败语义：读取类接口多降级为空结果；创建类接口失败会抛 `ValueError`/`ImportError`。
+    """
 
     @dataclass
     class NewDatabaseInput:
+        """新建数据库对话框的输入模板定义。
+
+        契约：输入为字段默认值，输出为 `asdict` 后的对话框模板结构。
+        副作用：无。
+        失败语义：无。
+        """
         functionality: str = "create"
         fields: dict[str, dict] = field(
             default_factory=lambda: {
@@ -61,6 +89,12 @@ class AstraDBBaseComponent(Component):
 
     @dataclass
     class NewCollectionInput:
+        """新建集合对话框的输入模板定义。
+
+        契约：输入为字段默认值，输出为 `asdict` 后的对话框模板结构。
+        副作用：无。
+        失败语义：无。
+        """
         functionality: str = "create"
         fields: dict[str, dict] = field(
             default_factory=lambda: {
@@ -180,19 +214,28 @@ class AstraDBBaseComponent(Component):
 
     @classmethod
     def get_environment(cls, environment: str | None = None) -> str:
+        """获取 Astra API 环境名。
+
+        契约：输入 `environment`，为空时输出 `prod`，否则输出原值。
+        副作用：无。
+        失败语义：无。
+        """
         if not environment:
             return "prod"
         return environment
 
     @classmethod
     def map_cloud_providers(cls, token: str, environment: str | None = None) -> dict[str, dict[str, Any]]:
-        """Fetch all available cloud providers and regions."""
+        """拉取可用云厂商与区域映射。
+
+        契约：输入 `token`/`environment`，输出 {展示名: {id, regions}}，仅包含 `AWS/GCP/Azure`。
+        副作用：访问 Astra Data API 管理端，产生网络请求。
+        失败语义：异常时记录 `Error fetching cloud providers` 并返回 `{}`。
+        """
         try:
-            # Get the admin object
             client = DataAPIClient(environment=cls.get_environment(environment))
             admin_client = client.get_admin(token=token)
 
-            # Get the list of available regions
             available_regions = admin_client.find_available_regions(only_org_enabled_regions=True)
 
             provider_mapping: dict[str, dict[str, str]] = {
@@ -222,26 +265,26 @@ class AstraDBBaseComponent(Component):
 
     @classmethod
     def get_vectorize_providers(cls, token: str, environment: str | None = None, api_endpoint: str | None = None):
+        """获取向量化提供方与模型列表。
+
+        契约：输入 `token`/`environment`/`api_endpoint`，输出 {展示名: [provider_key, models]}。
+        副作用：调用 Astra Data API 获取数据库向量化配置。
+        失败语义：异常时返回 `{}`。
+        """
         try:
-            # Get the admin object
             client = DataAPIClient(environment=cls.get_environment(environment))
             admin_client = client.get_admin()
             db_admin = admin_client.get_database_admin(api_endpoint, token=token)
 
-            # Get the list of embedding providers
             embedding_providers = db_admin.find_embedding_providers()
 
             vectorize_providers_mapping = {}
-            # Map the provider display name to the provider key and models
             for provider_key, provider_data in embedding_providers.embedding_providers.items():
-                # Get the provider display name and models
                 display_name = provider_data.display_name
                 models = [model.name for model in provider_data.models]
 
-                # Build our mapping
                 vectorize_providers_mapping[display_name] = [provider_key, models]
 
-            # Sort the resulting dictionary
             return defaultdict(list, dict(sorted(vectorize_providers_mapping.items())))
         except Exception as _:  # noqa: BLE001
             return {}
@@ -256,21 +299,22 @@ class AstraDBBaseComponent(Component):
         environment: str | None = None,
         keyspace: str | None = None,
     ):
-        # Get the environment, set to prod if null like
+        """创建 Astra DB 数据库。
+
+        契约：输入数据库名称与区域信息，输出创建任务对象。
+        副作用：发起创建请求，`wait_until_active=False` 表示不等待激活完成。
+        失败语义：`new_database_name` 为空抛 `ValueError`，API 异常向上抛出。
+        """
         my_env = cls.get_environment(environment)
 
-        # Initialize the Data API client
         client = DataAPIClient(environment=my_env)
 
-        # Get the admin object
         admin_client = client.get_admin(token=token)
 
-        # Raise a value error if name isn't provided
         if not new_database_name:
             msg = "Database name is required to create a new database."
             raise ValueError(msg)
 
-        # Call the create database function
         return await admin_client.async_create_database(
             name=new_database_name,
             cloud_provider=cls.map_cloud_providers(token=token, environment=my_env)[cloud_provider]["id"],
@@ -291,7 +335,13 @@ class AstraDBBaseComponent(Component):
         embedding_generation_provider: str | None = None,
         embedding_generation_model: str | None = None,
     ):
-        # Build vectorize options, if needed
+        """创建集合并配置向量化选项。
+
+        契约：输入集合名称与向量化参数，输出 `None`（仅触发创建）。
+        副作用：调用 Astra Data API 创建集合。
+        失败语义：`new_collection_name` 为空抛 `ValueError`；缺少 `langchain-astradb`
+        时抛 `ImportError`。
+        """
         vectorize_options = None
         if not dimension:
             try:
@@ -311,12 +361,10 @@ class AstraDBBaseComponent(Component):
                 model_name=embedding_generation_model,
             )
 
-        # Raise a value error if name isn't provided
         if not new_collection_name:
             msg = "Collection name is required to create a new collection."
             raise ValueError(msg)
 
-        # Define the base arguments being passed to the create collection function
         base_args = {
             "collection_name": new_collection_name,
             "token": token,
@@ -331,26 +379,27 @@ class AstraDBBaseComponent(Component):
 
     @classmethod
     def get_database_list_static(cls, token: str, environment: str | None = None):
+        """获取数据库列表与元数据。
+
+        契约：输入 `token`/`environment`，输出 {db_name: {api_endpoints,keyspaces,collections,status,org_id}}。
+        副作用：访问 Astra Data API，并统计集合数量。
+        失败语义：拉取失败返回 `{}`；单库统计失败且 `status=PENDING` 时集合数为 0。
+        排障入口：日志关键字 `Error fetching database list`。
+        """
         try:
             environment = cls.get_environment(environment)
             client = DataAPIClient(environment=environment)
 
-            # Get the admin object
             admin_client = client.get_admin(token=token)
 
-            # Get the list of databases
             db_list = admin_client.list_databases()
 
-            # Generate the api endpoint for each database
             db_info_dict = {}
             for db in db_list:
                 try:
-                    # Get the API endpoint for the database
                     api_endpoints = [db_reg.api_endpoint for db_reg in db.regions]
 
-                    # Get the number of collections
                     try:
-                        # Get the number of collections in the database
                         num_collections = len(
                             client.get_database(
                                 api_endpoints[0],
@@ -362,7 +411,6 @@ class AstraDBBaseComponent(Component):
                             continue
                         num_collections = 0
 
-                    # Add the database to the dictionary
                     db_info_dict[db.name] = {
                         "api_endpoints": api_endpoints,
                         "keyspaces": db.keyspaces,
@@ -379,6 +427,12 @@ class AstraDBBaseComponent(Component):
             return db_info_dict
 
     def get_database_list(self):
+        """实例级数据库列表包装。
+
+        契约：输入使用实例字段，输出数据库元数据字典。
+        副作用：同 `get_database_list_static`。
+        失败语义：同 `get_database_list_static`。
+        """
         return self.get_database_list_static(
             token=self.token,
             environment=self.environment,
@@ -392,29 +446,36 @@ class AstraDBBaseComponent(Component):
         api_endpoint: str | None = None,
         database_name: str | None = None,
     ):
-        # If the api_endpoint is set, return it
+        """解析数据库 API Endpoint。
+
+        契约：输入 `token`/`environment`/`api_endpoint`/`database_name`，输出可用端点或 `None`。
+        副作用：必要时调用 `get_database_list_static` 进行远程解析。
+        失败语义：无法解析时返回 `None`。
+        """
         if api_endpoint:
             return api_endpoint
 
-        # Check if the database_name is like a url
         if database_name and database_name.startswith("https://"):
             return database_name
 
-        # If the database is not set, nothing we can do.
         if not database_name:
             return None
 
-        # Grab the database object
         environment = cls.get_environment(environment)
         db = cls.get_database_list_static(token=token, environment=environment).get(database_name)
         if not db:
             return None
 
-        # Otherwise, get the URL from the database list
         endpoints = db.get("api_endpoints") or []
         return endpoints[0] if endpoints else None
 
     def get_api_endpoint(self):
+        """实例级 API Endpoint 解析包装。
+
+        契约：输入使用实例字段，输出可用端点或 `None`。
+        副作用：同 `get_api_endpoint_static`。
+        失败语义：同 `get_api_endpoint_static`。
+        """
         return self.get_api_endpoint_static(
             token=self.token,
             environment=self.environment,
@@ -424,16 +485,33 @@ class AstraDBBaseComponent(Component):
 
     @classmethod
     def get_database_id_static(cls, api_endpoint: str) -> str | None:
-        # Pattern matches standard UUID format: 8-4-4-4-12 hexadecimal characters
+        """从 `api_endpoint` 提取数据库 UUID。
+
+        契约：输入端点字符串，输出首个 UUID 或 `None`。
+        副作用：无。
+        失败语义：未命中返回 `None`。
+        """
         uuid_pattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
         match = re.search(uuid_pattern, api_endpoint)
 
         return match.group(0) if match else None
 
     def get_database_id(self):
+        """实例级数据库 UUID 提取包装。
+
+        契约：输入使用实例字段，输出 UUID 或 `None`。
+        副作用：可能触发远程解析 API Endpoint。
+        失败语义：无端点或未命中时返回 `None`。
+        """
         return self.get_database_id_static(api_endpoint=self.get_api_endpoint())
 
     def get_keyspace(self):
+        """获取可用 keyspace。
+
+        契约：输入实例 `keyspace`，输出去空格后的值或 `default_keyspace`。
+        副作用：无。
+        失败语义：无。
+        """
         keyspace = self.keyspace
 
         if keyspace:
@@ -442,6 +520,12 @@ class AstraDBBaseComponent(Component):
         return "default_keyspace"
 
     def get_database_object(self, api_endpoint: str | None = None):
+        """获取 `Database` 句柄。
+
+        契约：输入 `api_endpoint`（可选），输出 Astra `Database` 对象。
+        副作用：访问 Astra Data API，产生网络请求。
+        失败语义：异常被包装为 `ValueError` 并包含原始错误信息。
+        """
         try:
             client = DataAPIClient(environment=self.environment)
 
@@ -455,6 +539,12 @@ class AstraDBBaseComponent(Component):
             raise ValueError(msg) from e
 
     def collection_data(self, collection_name: str, database: Database = None):
+        """获取集合估算记录数。
+
+        契约：输入集合名与可选 `database`，输出估算记录数或 `None`。
+        副作用：可能创建新的 `Database` 连接并发起网络请求。
+        失败语义：异常时通过 `self.log` 记录 `Error checking collection data`。
+        """
         try:
             if not database:
                 client = DataAPIClient(environment=self.environment)
@@ -474,6 +564,12 @@ class AstraDBBaseComponent(Component):
             return None
 
     def _initialize_database_options(self):
+        """生成数据库下拉选项与元数据列表。
+
+        契约：输入：无（使用实例字段）；输出包含 `name/status/collections/api_endpoints/keyspaces/org_id` 的列表。
+        副作用：调用 `get_database_list` 触发远程拉取。
+        失败语义：异常时记录调试日志并返回空列表。
+        """
         try:
             db_list = self.get_database_list()
             if not db_list:
@@ -495,7 +591,12 @@ class AstraDBBaseComponent(Component):
 
     @classmethod
     def get_provider_icon(cls, collection=None, provider_name: str | None = None) -> str:
-        # Get the provider name from the collection
+        """解析向量化提供方的图标名。
+
+        契约：输入 `collection` 或 `provider_name`，输出图标名字符串。
+        副作用：无。
+        失败语义：提供方缺失或为 `Bring your own` 时返回 `vectorstores`。
+        """
         provider_name = provider_name or (
             collection.definition.vector.service.provider
             if (
@@ -507,11 +608,9 @@ class AstraDBBaseComponent(Component):
             else None
         )
 
-        # If there is no provider, use the vector store icon
         if not provider_name or provider_name.lower() == "bring your own":
             return "vectorstores"
 
-        # Map provider casings
         case_map = {
             "nvidia": "NVIDIA",
             "openai": "OpenAI",
@@ -524,22 +623,29 @@ class AstraDBBaseComponent(Component):
             "voyage ai": "VoyageAI",
         }
 
-        # Adjust the casing on some like nvidia
         return case_map[provider_name.lower()] if provider_name.lower() in case_map else provider_name.title()
 
     def _initialize_collection_options(self, api_endpoint: str | None = None):
-        # Nothing to generate if we don't have an API endpoint yet
+        """构建集合下拉选项与元数据。
+
+        契约：输入 `api_endpoint`（可选），输出集合元数据列表。
+        关键路径（三步）：
+        1) 解析 `api_endpoint`，不足则返回空列表。
+        2) 获取数据库对象并列出集合清单。
+        3) 组合集合元数据（记录数/提供方/图标/模型）。
+
+        异常流：`get_database_object` 失败将抛出 `ValueError`。
+        性能瓶颈：`list_collections` 与逐个集合统计记录数的网络开销。
+        排障入口：`Error fetching database object`。
+        """
         api_endpoint = api_endpoint or self.get_api_endpoint()
         if not api_endpoint:
             return []
 
-        # Retrieve the database object
         database = self.get_database_object(api_endpoint=api_endpoint)
 
-        # Get the list of collections
         collection_list = database.list_collections(keyspace=self.get_keyspace())
 
-        # Return the list of collections and metadata associated
         return [
             {
                 "name": col.name,
@@ -560,43 +666,41 @@ class AstraDBBaseComponent(Component):
         ]
 
     def reset_provider_options(self, build_config: dict) -> dict:
-        """Reset provider options and related configurations in the build_config dictionary."""
-        # Extract template path for cleaner access
+        """重置向量化提供方选项与依赖字段。
+
+        契约：输入 `build_config`，输出更新后的 `build_config`，仅保留 `Bring your own` 与 `nvidia`。
+        副作用：原地修改 `build_config` 的模板与字段配置。
+        失败语义：`build_config` 结构不完整时可能抛 `KeyError`。
+        """
         template = build_config["collection_name"]["dialog_inputs"]["fields"]["data"]["node"]["template"]
 
-        # Get vectorize providers
         vectorize_providers_api = self.get_vectorize_providers(
             token=self.token,
             environment=self.environment,
             api_endpoint=build_config["api_endpoint"]["value"],
         )
 
-        # Create a new dictionary with "Bring your own" first
         vectorize_providers: dict[str, list[list[str]]] = {"Bring your own": [[], []]}
 
-        # Add the remaining items (only Nvidia) from the original dictionary
+        # 注意：当前仅保留 `nvidia`，扩展其他提供方需同步更新图标映射与模型列表。
         vectorize_providers.update(
             {
                 k: v
                 for k, v in vectorize_providers_api.items()
-                if k.lower() in ["nvidia"]  # TODO: Eventually support more
+                if k.lower() in ["nvidia"]
             }
         )
 
-        # Set provider options
         provider_field = "02_embedding_generation_provider"
         template[provider_field]["options"] = list(vectorize_providers.keys())
 
-        # Add metadata for each provider option
         template[provider_field]["options_metadata"] = [
             {"icon": self.get_provider_icon(provider_name=provider)} for provider in template[provider_field]["options"]
         ]
 
-        # Get selected embedding provider
         embedding_provider = template[provider_field]["value"]
         is_bring_your_own = embedding_provider and embedding_provider == "Bring your own"
 
-        # Configure embedding model field
         model_field = "03_embedding_generation_model"
         template[model_field].update(
             {
@@ -608,22 +712,23 @@ class AstraDBBaseComponent(Component):
             }
         )
 
-        # If this is a bring your own, set dimensions to 0
         return self.reset_dimension_field(build_config)
 
     def reset_dimension_field(self, build_config: dict) -> dict:
-        """Reset dimension field options based on provided configuration."""
-        # Extract template path for cleaner access
+        """根据提供方状态重置维度字段。
+
+        契约：输入 `build_config`，输出更新后的 `build_config`，非 `Bring your own` 时默认维度为 `1024`。
+        副作用：原地更新维度字段的 `placeholder/value/readonly/required`。
+        失败语义：字段结构缺失时可能抛 `KeyError`。
+        """
         template = build_config["collection_name"]["dialog_inputs"]["fields"]["data"]["node"]["template"]
 
-        # Get selected embedding model
         provider_field = "02_embedding_generation_provider"
         embedding_provider = template[provider_field]["value"]
         is_bring_your_own = embedding_provider and embedding_provider == "Bring your own"
 
-        # Configure dimension field
         dimension_field = "04_dimension"
-        dimension_value = 1024 if not is_bring_your_own else None  # TODO: Dynamically figure this out
+        dimension_value = 1024 if not is_bring_your_own else None  # 注意：当前维度占位为固定值，未从模型动态读取。
         template[dimension_field].update(
             {
                 "placeholder": dimension_value,
@@ -636,10 +741,13 @@ class AstraDBBaseComponent(Component):
         return build_config
 
     def reset_collection_list(self, build_config: dict) -> dict:
-        """Reset collection list options based on provided configuration."""
-        # Get collection options
+        """重建集合下拉选项与元数据。
+
+        契约：输入 `build_config`，输出更新后的 `build_config` 并同步集合选项。
+        副作用：调用 `_initialize_collection_options` 触发远程拉取。
+        失败语义：若远程失败，集合选项为空并保持现有选择清空。
+        """
         collection_options = self._initialize_collection_options(api_endpoint=build_config["api_endpoint"]["value"])
-        # Update collection configuration
         collection_config = build_config["collection_name"]
         collection_config.update(
             {
@@ -648,21 +756,22 @@ class AstraDBBaseComponent(Component):
             }
         )
 
-        # Reset selected collection if not in options
         if collection_config["value"] not in collection_config["options"]:
             collection_config["value"] = ""
 
-        # Set advanced status based on database selection
         collection_config["show"] = bool(build_config["database_name"]["value"])
 
         return build_config
 
     def reset_database_list(self, build_config: dict) -> dict:
-        """Reset database list options and related configurations."""
-        # Get database options
+        """重建数据库下拉选项并联动云厂商配置。
+
+        契约：输入 `build_config`，输出更新后的 `build_config`，同步数据库与云厂商选项。
+        副作用：调用 `map_cloud_providers` 与 `_initialize_database_options`。
+        失败语义：远程失败时选项为空，`api_endpoint` 与集合选择被清空。
+        """
         database_options = self._initialize_database_options()
 
-        # Update cloud provider options
         template = build_config["database_name"]["dialog_inputs"]["fields"]["data"]["node"]["template"]
         template["02_cloud_provider"]["options"] = list(
             self.map_cloud_providers(
@@ -671,7 +780,6 @@ class AstraDBBaseComponent(Component):
             ).keys()
         )
 
-        # Update database configuration
         database_config = build_config["database_name"]
         database_config.update(
             {
@@ -680,27 +788,28 @@ class AstraDBBaseComponent(Component):
             }
         )
 
-        # Reset selections if value not in options
         if database_config["value"] not in database_config["options"]:
             database_config["value"] = ""
             build_config["api_endpoint"]["options"] = []
             build_config["api_endpoint"]["value"] = ""
             build_config["collection_name"]["show"] = False
 
-        # Set advanced status based on token presence
         database_config["show"] = bool(build_config["token"]["value"])
 
         return build_config
 
     def reset_build_config(self, build_config: dict) -> dict:
-        """Reset all build configuration options to default empty state."""
-        # Reset database configuration
+        """清空全部构建配置选项。
+
+        契约：输入 `build_config`，输出清空后的 `build_config`。
+        副作用：原地修改 `build_config`。
+        失败语义：无。
+        """
         database_config = build_config["database_name"]
         database_config.update({"options": [], "options_metadata": [], "value": "", "show": False})
         build_config["api_endpoint"]["options"] = []
         build_config["api_endpoint"]["value"] = ""
 
-        # Reset collection configuration
         collection_config = build_config["collection_name"]
         collection_config.update({"options": [], "options_metadata": [], "value": "", "show": False})
 
@@ -712,54 +821,60 @@ class AstraDBBaseComponent(Component):
         field_value: str | dict,
         field_name: str | None = None,
     ) -> dict:
-        """Update build configuration based on field name and value."""
-        # Early return if no token provided
+        """根据字段变化联动刷新 `build_config`。
+
+        契约：输入 `build_config/field_value/field_name`，输出更新后的 `build_config`。
+        关键路径（三步）：
+        1) 无 `token` 时清空配置并直接返回。
+        2) 处理新建数据库/集合与提供方联动逻辑。
+        3) 处理选择变更并刷新数据库/集合列表。
+
+        异常流：创建数据库/集合失败会抛 `ValueError`。
+        性能瓶颈：依赖数据库/集合拉取的网络调用。
+        排障入口：异常消息前缀 `Error creating`。
+        """
         if not self.token:
             return self.reset_build_config(build_config)
 
-        # Database creation callback
         if field_name == "database_name" and isinstance(field_value, dict):
             if "01_new_database_name" in field_value:
                 await self._create_new_database(build_config, field_value)
                 return self.reset_collection_list(build_config)
             return self._update_cloud_regions(build_config, field_value)
 
-        # Collection creation callback
         if field_name == "collection_name" and isinstance(field_value, dict):
-            # Case 1: New collection creation
             if "01_new_collection_name" in field_value:
                 await self._create_new_collection(build_config, field_value)
                 return build_config
 
-            # Case 2: Update embedding provider options
             if "02_embedding_generation_provider" in field_value:
                 return self.reset_provider_options(build_config)
 
-            # Case 3: Update dimension field
             if "03_embedding_generation_model" in field_value:
                 return self.reset_dimension_field(build_config)
 
-        # Initial execution or token/environment change
         first_run = field_name == "collection_name" and not field_value and not build_config["database_name"]["options"]
         if first_run or field_name in {"token", "environment"}:
             return self.reset_database_list(build_config)
 
-        # Database selection change
         if field_name == "database_name" and not isinstance(field_value, dict):
             return self._handle_database_selection(build_config, field_value)
 
-        # Keyspace selection change
         if field_name == "keyspace":
             return self.reset_collection_list(build_config)
 
-        # Collection selection change
         if field_name == "collection_name" and not isinstance(field_value, dict):
             return self._handle_collection_selection(build_config, field_value)
 
         return build_config
 
     async def _create_new_database(self, build_config: dict, field_value: dict) -> None:
-        """Create a new database and update build config options."""
+        """创建数据库并追加到本地选项。
+
+        契约：输入 `build_config/field_value`，输出 `None`，并追加 `PENDING` 元数据。
+        副作用：调用 Astra Data API 创建数据库。
+        失败语义：异常被包装为 `ValueError` 并向上抛出。
+        """
         try:
             await self.create_database_api(
                 new_database_name=field_value["01_new_database_name"],
@@ -785,24 +900,32 @@ class AstraDBBaseComponent(Component):
         )
 
     def _update_cloud_regions(self, build_config: dict, field_value: dict) -> dict:
-        """Update cloud provider regions in build config."""
+        """根据云厂商选择刷新区域选项。
+
+        契约：输入 `build_config/field_value`，输出更新后的 `build_config`。
+        副作用：调用 `map_cloud_providers` 触发远程拉取。
+        失败语义：结构缺失时可能抛 `KeyError`。
+        """
         cloud_provider = field_value["02_cloud_provider"]
 
-        # Update the region options based on the selected cloud provider
         template = build_config["database_name"]["dialog_inputs"]["fields"]["data"]["node"]["template"]
         template["03_region"]["options"] = self.map_cloud_providers(
             token=self.token,
             environment=self.environment,
         )[cloud_provider]["regions"]
 
-        # Reset the the 03_region value if it's not in the new options
         if template["03_region"]["value"] not in template["03_region"]["options"]:
             template["03_region"]["value"] = None
 
         return build_config
 
     async def _create_new_collection(self, build_config: dict, field_value: dict) -> None:
-        """Create a new collection and update build config options."""
+        """创建集合并同步元数据。
+
+        契约：输入 `build_config/field_value`，输出 `None`，并补充集合元数据。
+        副作用：调用 Astra Data API 创建集合。
+        失败语义：异常被包装为 `ValueError` 并向上抛出。
+        """
         embedding_provider = field_value.get("02_embedding_generation_provider")
         try:
             await self.create_collection_api(
@@ -827,7 +950,6 @@ class AstraDBBaseComponent(Component):
             }
         )
 
-        # Update collection metadata
         build_config["collection_name"]["options_metadata"].append(
             {
                 "records": 0,
@@ -838,15 +960,24 @@ class AstraDBBaseComponent(Component):
         )
 
     def _handle_database_selection(self, build_config: dict, field_value: str) -> dict:
-        """Handle database selection and update related configurations."""
+        """响应数据库选择并联动刷新依赖项。
+
+        契约：输入 `build_config/field_value`，输出更新后的 `build_config`。
+        关键路径（三步）：
+        1) 重置数据库列表并校验选中值。
+        2) 回填 `api_endpoint`/`keyspace` 与帮助链接。
+        3) 刷新提供方与集合列表。
+
+        异常流：缺失 `org_id` 时仅返回基础配置。
+        性能瓶颈：数据库列表刷新与集合列表拉取。
+        排障入口：`Error fetching database list`。
+        """
         build_config = self.reset_database_list(build_config)
 
-        # Reset collection list if database selection changes
         if field_value not in build_config["database_name"]["options"]:
             build_config["database_name"]["value"] = ""
             return build_config
 
-        # Get the api endpoint for the selected database
         index = build_config["database_name"]["options"].index(field_value)
         build_config["api_endpoint"]["options"] = build_config["database_name"]["options_metadata"][index][
             "api_endpoints"
@@ -855,12 +986,10 @@ class AstraDBBaseComponent(Component):
             "api_endpoints"
         ][0]
 
-        # Get the org_id for the selected database
         org_id = build_config["database_name"]["options_metadata"][index]["org_id"]
         if not org_id:
             return build_config
 
-        # Update the list of keyspaces based on the db info
         build_config["keyspace"]["options"] = build_config["database_name"]["options_metadata"][index]["keyspaces"]
         build_config["keyspace"]["value"] = (
             build_config["keyspace"]["options"] and build_config["keyspace"]["options"][0]
@@ -868,11 +997,9 @@ class AstraDBBaseComponent(Component):
             else build_config["keyspace"]["value"]
         )
 
-        # Get the database id for the selected database
         db_id = self.get_database_id_static(api_endpoint=build_config["api_endpoint"]["value"])
         keyspace = self.get_keyspace()
 
-        # Update the helper text for the embedding provider field
         template = build_config["collection_name"]["dialog_inputs"]["fields"]["data"]["node"]["template"]
         template["02_embedding_generation_provider"]["helper_text"] = (
             "To create collections with more embedding provider options, go to "
@@ -881,17 +1008,26 @@ class AstraDBBaseComponent(Component):
             "your database in Astra DB</a>."
         )
 
-        # Reset provider options
         build_config = self.reset_provider_options(build_config)
 
         return self.reset_collection_list(build_config)
 
     def _handle_collection_selection(self, build_config: dict, field_value: str) -> dict:
-        """Handle collection selection and update embedding options."""
+        """响应集合选择并联动向量化选项。
+
+        契约：输入 `build_config/field_value`，输出更新后的 `build_config`。
+        关键路径（三步）：
+        1) 重置集合列表并开启自动探测。
+        2) 将未识别集合加入选项并标记为非自动。
+        3) 返回更新后的 `build_config`。
+
+        异常流：无显式异常分支，错误由上游结构决定。
+        性能瓶颈：集合列表重建时的远程调用。
+        排障入口：`Error checking collection data`。
+        """
         build_config["autodetect_collection"]["value"] = True
         build_config = self.reset_collection_list(build_config)
 
-        # Reset embedding model if collection selection changes
         if field_value and field_value not in build_config["collection_name"]["options"]:
             build_config["collection_name"]["options"].append(field_value)
             build_config["collection_name"]["options_metadata"].append(

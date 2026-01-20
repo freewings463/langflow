@@ -1,3 +1,10 @@
+"""Data 合并组件。
+
+本模块支持将多条 Data 以拼接、追加、合并、连接等方式组合为 DataFrame。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：输入至少两条 Data，否则返回空 DataFrame。
+"""
+
 from enum import Enum
 from typing import cast
 
@@ -15,6 +22,12 @@ class DataOperation(str, Enum):
 
 
 class MergeDataComponent(Component):
+    """Data 合并组件封装。
+
+    契约：输入为 Data 列表与操作类型；输出为 DataFrame。
+    副作用：更新 `self.status`。
+    失败语义：操作异常会被抛出并记录日志。
+    """
     display_name = "Combine Data"
     description = "Combines data using different operations"
     icon = "merge"
@@ -34,6 +47,13 @@ class MergeDataComponent(Component):
     outputs = [Output(display_name="DataFrame", name="combined_data", method="combine_data")]
 
     def combine_data(self) -> DataFrame:
+        """根据指定操作合并 Data。
+
+        关键路径（三步）：
+        1) 校验输入数量；
+        2) 调用具体合并策略；
+        3) 写入状态并返回 DataFrame。
+        """
         if not self.data_inputs or len(self.data_inputs) < self.MIN_INPUTS_REQUIRED:
             empty_dataframe = DataFrame()
             self.status = empty_dataframe
@@ -50,6 +70,7 @@ class MergeDataComponent(Component):
             return combined_dataframe
 
     def _process_operation(self, operation: DataOperation) -> DataFrame:
+        """执行具体合并策略。"""
         if operation == DataOperation.CONCATENATE:
             combined_data: dict[str, str | object] = {}
             for data_input in self.data_inputs:

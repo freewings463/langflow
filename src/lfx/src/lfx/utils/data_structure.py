@@ -1,3 +1,16 @@
+"""模块名称：数据结构与类型推断
+
+模块目的：从任意数据结构中提取“类型结构摘要”。
+主要功能：
+- 列表/字典结构的类型推断与样例抽取
+- 递归深度控制与异常回退
+- 针对 `Data` 对象的统一入口
+使用场景：前端结构预览、调试与数据探索。
+关键组件：`analyze_value`、`get_data_structure`
+设计背景：需要结构化摘要而非完整数据传输。
+注意事项：默认会截断递归深度并对异常进行字符串化回退。
+"""
+
 import json
 from collections import Counter
 from typing import Any
@@ -6,33 +19,31 @@ from lfx.schema.data import Data
 
 
 def infer_list_type(items: list, max_samples: int = 5) -> str:
-    """Infer the type of a list by sampling its items.
+    """对列表元素做抽样类型推断。
 
-    Handles mixed types and provides more detailed type information.
+    契约：最多抽样 `max_samples` 个元素；混合类型会用 `|` 连接。
+    失败语义：空列表返回 `list(unknown)`。
     """
     if not items:
         return "list(unknown)"
 
-    # Sample items (use all if less than max_samples)
+    # 注意：避免全量遍历，减少大列表的成本。
     samples = items[:max_samples]
     types = [get_type_str(item) for item in samples]
 
-    # Count type occurrences
+    # 统计类型出现次数
     type_counter = Counter(types)
 
     if len(type_counter) == 1:
-        # Single type
+        # 单一类型
         return f"list({types[0]})"
-    # Mixed types - show all found types
+    # 混合类型：显示所有已发现类型
     type_str = "|".join(sorted(type_counter.keys()))
     return f"list({type_str})"
 
 
 def get_type_str(value: Any) -> str:
-    """Get a detailed string representation of the type of a value.
-
-    Handles special cases and provides more specific type information.
-    """
+    """返回值的类型描述字符串（包含特判）。"""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -42,10 +53,10 @@ def get_type_str(value: Any) -> str:
     if isinstance(value, float):
         return "float"
     if isinstance(value, str):
-        # Check if string is actually a date/datetime
+        # 注意：字符串可能是日期/时间标识（启发式判断）
         if any(date_pattern in value.lower() for date_pattern in ["date", "time", "yyyy", "mm/dd", "dd/mm", "yyyy-mm"]):
             return "str(possible_date)"
-        # Check if it's a JSON string
+        # 检测是否为 JSON 字符串
         try:
             json.loads(value)
             return "str(json)"
@@ -57,7 +68,7 @@ def get_type_str(value: Any) -> str:
         return infer_list_type(list(value))
     if isinstance(value, dict):
         return "dict"
-    # Handle custom objects
+    # 自定义对象：返回类名
     return type(value).__name__
 
 
@@ -70,15 +81,15 @@ def analyze_value(
     size_hints: bool = True,
     include_samples: bool = True,
 ) -> str | dict:
-    """Analyze a value and return its structure with additional metadata.
+    """分析值的结构并返回类型描述/结构树。
 
-    Args:
-        value: The value to analyze
-        max_depth: Maximum recursion depth
-        current_depth: Current recursion depth
-        path: Current path in the structure
-        size_hints: Whether to include size information for collections
-        include_samples: Whether to include sample structure for lists
+    关键路径：
+    1) 深度上限判断
+    2) 处理 list/tuple/set/dict
+    3) 回退为类型字符串或错误描述
+
+    契约：递归深度超过 `max_depth` 时返回 `max_depth_reached(...)`。
+    副作用：无。
     """
     if current_depth >= max_depth:
         return f"max_depth_reached(depth={max_depth})"
@@ -92,7 +103,7 @@ def analyze_value(
             type_info = infer_list_type(list(value))
             size_info = f"[size={length}]" if size_hints else ""
 
-            # For lists of complex objects, include a sample of the structure
+            # 注意：列表元素为复杂结构时，附带首元素结构样例。
             if (
                 include_samples
                 and length > 0
@@ -126,6 +137,7 @@ def analyze_value(
                         include_samples=include_samples,
                     )
                 except Exception as e:  # noqa: BLE001
+                    # 注意：结构分析失败时降级为错误字符串，避免整体中断。
                     result[k] = f"error({e!s})"
             return result
 
@@ -144,51 +156,17 @@ def get_data_structure(
     include_sample_values: bool = False,
     include_sample_structure: bool = True,
 ) -> dict:
-    """Convert a Data object or dictionary into a detailed schema representation.
+    """将 `Data` 或字典转换为结构化的类型摘要。
 
-    Args:
-        data_obj: The Data object or dictionary to analyze
-        max_depth: Maximum depth for nested structures
-        size_hints: Include size information for collections
-        include_sample_values: Whether to include sample values in the output
-        include_sample_structure: Whether to include sample structure for lists
-        max_sample_size: Maximum number of sample values to include
+    关键路径：
+    1) 规范输入对象为字典
+    2) 递归分析结构
+    3) 按需附加样例值
 
-    Returns:
-        dict: A dictionary containing:
-            - structure: The structure of the data
-            - samples: (optional) Sample values from the data
-
-    Example:
-        >>> data = {
-        ...     "name": "John",
-        ...     "scores": [1, 2, 3, 4, 5],
-        ...     "details": {
-        ...         "age": 30,
-        ...         "cities": ["NY", "LA", "SF", "CHI"],
-        ...         "metadata": {
-        ...             "created": "2023-01-01",
-        ...             "tags": ["user", "admin", 123]
-        ...         }
-        ...     }
-        ... }
-        >>> result = get_data_structure(data)
-        {
-            "structure": {
-                "name": "str",
-                "scores": "list(int)[size=5]",
-                "details": {
-                    "age": "int",
-                    "cities": "list(str)[size=4]",
-                    "metadata": {
-                        "created": "str(possible_date)",
-                        "tags": "list(str|int)[size=3]"
-                    }
-                }
-            }
-        }
+    契约：返回字典包含 `structure`，可选 `samples`。
+    副作用：无。
     """
-    # Handle both Data objects and dictionaries
+    # 注意：统一兼容 `Data` 与普通字典输入。
     data = data_obj.data if isinstance(data_obj, Data) else data_obj
 
     result = {
@@ -204,7 +182,7 @@ def get_data_structure(
 
 
 def get_sample_values(data: Any, max_items: int = 3) -> Any:
-    """Get sample values from a data structure, handling nested structures."""
+    """递归提取样例值（用于展示，默认最多 3 个）。"""
     if isinstance(data, list | tuple | set):
         return [get_sample_values(item) for item in list(data)[:max_items]]
     if isinstance(data, dict):

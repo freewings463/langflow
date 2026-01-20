@@ -1,3 +1,16 @@
+"""
+模块名称：MultiQueryRetriever 组件（已停用）
+
+本模块提供基于 LLM 的多查询检索器构建能力，主要用于通过多视角问题提高召回。主要功能包括：
+- 使用默认或自定义 Prompt 构建 `MultiQueryRetriever`
+
+关键组件：
+- `MultiQueryRetrieverComponent`：多查询检索组件
+
+设计背景：历史上用于增强检索召回率，现标记为 legacy。
+注意事项：依赖 LangChain `MultiQueryRetriever`。
+"""
+
 from langchain.prompts import PromptTemplate
 from langchain.retrievers import MultiQueryRetriever
 
@@ -7,6 +20,12 @@ from lfx.inputs.inputs import HandleInput, StrInput
 
 
 class MultiQueryRetrieverComponent(CustomComponent):
+    """多查询检索器组件。
+
+    契约：必须提供 `llm` 与 `retriever`。
+    失败语义：输入类型不兼容时由底层 LangChain 抛异常。
+    副作用：无。
+    """
     display_name = "MultiQueryRetriever"
     description = "Initialize from llm using default template."
     documentation = "https://python.langchain.com/docs/modules/data_connection/retrievers/how_to/MultiQueryRetriever"
@@ -53,6 +72,17 @@ class MultiQueryRetrieverComponent(CustomComponent):
         prompt: Text | None = None,
         parser_key: str = "lines",
     ) -> MultiQueryRetriever:
+        """构建 `MultiQueryRetriever`。
+
+        契约：`prompt` 为空时使用默认模板。
+        失败语义：模板构造或检索器创建失败时抛异常。
+        副作用：无。
+
+        关键路径（三步）：
+        1) 判断是否使用自定义 Prompt
+        2) 构造 `PromptTemplate`（如需）
+        3) 创建并返回 `MultiQueryRetriever`
+        """
         if not prompt:
             return MultiQueryRetriever.from_llm(llm=llm, retriever=retriever, parser_key=parser_key)
         prompt_template = PromptTemplate.from_template(prompt)

@@ -1,3 +1,15 @@
+"""
+模块名称：MCP 全局服务接口
+
+本模块提供全局 MCP Server 的 SSE 与 Streamable HTTP 传输入口，并封装工具调用。
+主要功能：
+- 提供 MCP 资源/工具列表与调用入口
+- 建立 SSE 与 Streamable HTTP 传输通道
+- 管理会话生命周期与错误处理
+设计背景：统一 MCP 服务暴露与传输层实现。
+注意事项：部分传输在 Astra Cloud 环境中被禁用。
+"""
+
 import asyncio
 
 import pydantic
@@ -27,51 +39,47 @@ server = Server("langflow-mcp-server")
 
 @server.list_prompts()
 async def handle_list_prompts():
+    """返回 MCP Prompt 列表（当前为空）。"""
     return []
 
 
 @server.list_resources()
 async def handle_global_resources():
-    """Handle listing resources for global MCP server."""
+    """获取全局 MCP 资源列表。"""
     return await handle_list_resources()
 
 
 @server.read_resource()
 async def handle_global_read_resource(uri: str) -> bytes:
-    """Handle resource read requests for global MCP server."""
+    """读取全局 MCP 资源内容。"""
     return await handle_read_resource(uri)
 
 
 @server.list_tools()
 async def handle_global_tools():
-    """Handle listing tools for global MCP server."""
+    """获取全局 MCP 工具列表。"""
     return await handle_list_tools()
 
 
 @server.call_tool()
 @handle_mcp_errors
 async def handle_global_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    """Handle tool execution requests for global MCP server."""
+    """执行全局 MCP 工具调用。"""
     return await handle_call_tool(name, arguments, server)
 
 
-########################################################
-# The transports handle the full ASGI response.
-# FastAPI still expects the endpoint to return
-# a Response, while Starlette's middleware
-# stream validation panics when
-# a http.response.start message
-# is encountered twice within the same stream.
-# This class nullifies the redundant
-# response to end streams gracefully.
-########################################################
+# 设计说明：传输层已接管 ASGI 响应，但 FastAPI 仍要求返回 `Response`，
+# 而 Starlette 在重复 `http.response.start` 时会报错。
+# `ResponseNoOp` 用于吞掉冗余响应，确保流式连接正常结束。
 class ResponseNoOp(Response):
+    """吞掉重复响应头的空响应，用于 SSE 兼容。"""
+
     async def __call__(self, scope, receive, send) -> None:  # noqa: ARG002
         return
 
 
 def find_validation_error(exc):
-    """Searches for a pydantic.ValidationError in the exception chain."""
+    """从异常链中查找 `pydantic.ValidationError`。"""
     while exc:
         if isinstance(exc, pydantic.ValidationError):
             return exc
@@ -92,6 +100,7 @@ sse = SseServerTransport("/api/v1/mcp/")
     dependencies=[Depends(raise_error_if_astra_cloud_env)],
 )
 async def im_alive():
+    """SSE 存活探测。"""
     return Response()
 
 
@@ -101,6 +110,7 @@ async def im_alive():
     dependencies=[Depends(raise_error_if_astra_cloud_env)],
 )
 async def handle_sse(request: Request, current_user: CurrentActiveMCPUser):
+    """建立 MCP SSE 连接并运行事件循环。"""
     msg = f"Starting SSE connection, server name: {server.name}"
     await logger.ainfo(msg)
     token = current_user_ctx.set(current_user)
@@ -146,6 +156,7 @@ async def handle_sse(request: Request, current_user: CurrentActiveMCPUser):
 
 @router.post("/", dependencies=[Depends(raise_error_if_astra_cloud_env)])
 async def handle_messages(request: Request):
+    """处理 MCP POST 消息入口。"""
     try:
         await sse.handle_post_message(request.scope, request.receive, request._send)  # noqa: SLF001
     except (BrokenResourceError, BrokenPipeError) as e:
@@ -160,6 +171,8 @@ async def handle_messages(request: Request):
 # Streamable HTTP Transport
 ################################################################################
 class StreamableHTTP:
+    """Streamable HTTP 传输会话管理器。"""
+
     def __init__(self):
         self.session_manager: StreamableHTTPSessionManager | None = None
         self._started = False
@@ -172,7 +185,7 @@ class StreamableHTTP:
         self._mgr_close: asyncio.Event | None = None
 
     async def _start_session_manager(self) -> None:
-        """Create and enter the Streamable HTTP session manager lifecycle."""
+        """启动 Streamable HTTP 会话管理器生命周期。"""
         try:
             async with self.session_manager.run():  # type: ignore[union-attr]
                 self._started = True
@@ -186,7 +199,7 @@ class StreamableHTTP:
             self._started = False
 
     async def start(self, *, stateless: bool = True) -> None:
-        """Create and enter the Streamable HTTP session manager lifecycle."""
+        """启动 Streamable HTTP 会话管理器。"""
         async with self._start_stop_lock:
             if self._started:
                 await logger.adebug("Streamable HTTP session manager already running; skipping start")
@@ -205,13 +218,13 @@ class StreamableHTTP:
                 raise
 
     def get_manager(self) -> StreamableHTTPSessionManager:
-        """Fetch the active Streamable HTTP session manager or raise if it is unavailable."""
+        """获取可用的 Streamable HTTP 会话管理器。"""
         if not self._started or self.session_manager is None:
             raise HTTPException(status_code=503, detail="MCP Streamable HTTP transport is not initialized")
         return self.session_manager
 
     async def stop(self) -> None:
-        """Close the Streamable HTTP session manager context."""
+        """关闭 Streamable HTTP 会话管理器。"""
         async with self._start_stop_lock:
             if not self._started:
                 return
@@ -238,14 +251,17 @@ _streamable_http = StreamableHTTP()
 
 
 async def start_streamable_http_manager(stateless: bool = True) -> None:  # noqa: FBT001, FBT002
+    """启动 Streamable HTTP 会话管理器。"""
     await _streamable_http.start(stateless=stateless)
 
 
 def get_streamable_http_manager() -> StreamableHTTPSessionManager:
+    """获取当前 Streamable HTTP 会话管理器。"""
     return _streamable_http.get_manager()
 
 
 async def stop_streamable_http_manager() -> None:
+    """停止 Streamable HTTP 会话管理器。"""
     await _streamable_http.stop()
 
 
@@ -257,6 +273,7 @@ streamable_http_route_config = {  # use for all streamable http routes (except f
 
 @router.head("/streamable", include_in_schema=False)
 async def streamable_health():
+    """Streamable HTTP 健康检查。"""
     return Response()
 
 

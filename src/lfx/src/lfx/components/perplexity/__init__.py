@@ -1,3 +1,20 @@
+"""
+模块名称：Perplexity 组件导出门面
+
+模块目的：提供 Perplexity 组件的延迟导入与统一导出。
+使用场景：组件发现/注册阶段仅需导出符号而不立即加载依赖。
+主要功能包括：
+- 通过 `__getattr__` 按需导入并缓存组件类
+- 维护 `__all__`/`__dir__` 的稳定导出集合
+
+关键组件：
+- `_dynamic_imports`：导入映射表
+- `__getattr__`：按需导入入口
+
+设计背景：组件扫描与运行时解耦，避免启动阶段拉起全部依赖。
+注意：导入失败会统一转为 `AttributeError`，调用方应捕获并降级处理。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -17,7 +34,11 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import perplexity components on attribute access."""
+    """契约：仅支持 `_dynamic_imports` 中声明的属性名并返回对应组件类。
+
+    失败语义：未注册或导入异常时抛 `AttributeError`。
+    副作用：首次访问会导入模块并写入 `globals()` 缓存。
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)

@@ -1,3 +1,19 @@
+"""
+模块名称：Traceloop Tracer 适配
+
+本模块实现 Traceloop tracing 适配，使用 OTEL spans 记录流程与组件信息。
+主要功能包括：
+- 初始化 Traceloop SDK 与 root span
+- 记录组件级 spans 与输出/错误
+- 转换输入输出为 OTEL 兼容结构
+
+关键组件：
+- `TraceloopTracer`
+
+设计背景：为 Langflow 提供 Traceloop 观测链路。
+注意事项：未配置 `TRACELOOP_API_KEY` 时自动禁用。
+"""
+
 from __future__ import annotations
 
 import json
@@ -42,6 +58,12 @@ class TraceloopTracer(BaseTracer):
         user_id: str | None = None,
         session_id: str | None = None,
     ):
+        """初始化 Traceloop tracer。
+
+        契约：初始化失败时 `ready=False`。
+        副作用：调用 Traceloop SDK 初始化并创建 root span。
+        失败语义：配置非法或 SDK 异常时禁用。
+        """
         self.trace_id = trace_id
         self.trace_name = trace_name
         self.trace_type = trace_type
@@ -82,9 +104,11 @@ class TraceloopTracer(BaseTracer):
 
     @property
     def ready(self) -> bool:
+        """指示 tracer 是否可用。"""
         return self._ready
 
     def _validate_configuration(self) -> bool:
+        """校验 Traceloop 必要配置。"""
         api_key = os.getenv("TRACELOOP_API_KEY", "").strip()
         if not api_key:
             return False
@@ -98,7 +122,7 @@ class TraceloopTracer(BaseTracer):
         return True
 
     def _convert_to_traceloop_type(self, value):
-        """Recursively converts a value to a Traceloop compatible type."""
+        """递归转换为 Traceloop 兼容类型。"""
         from langchain.schema import BaseMessage, Document, HumanMessage, SystemMessage
 
         from langflow.schema.message import Message
@@ -132,7 +156,7 @@ class TraceloopTracer(BaseTracer):
             return value
 
     def _convert_to_traceloop_dict(self, io_dict: Any) -> dict[str, Any]:
-        """Ensure values are OTel-compatible. Dicts stay dicts, lists get JSON-serialized."""
+        """将输入包装为 OTEL 兼容字典。"""
         if isinstance(io_dict, dict):
             return {str(k): self._convert_to_traceloop_type(v) for k, v in io_dict.items()}
         if isinstance(io_dict, list):
@@ -150,6 +174,7 @@ class TraceloopTracer(BaseTracer):
         metadata: dict[str, Any] | None = None,
         vertex: Vertex | None = None,
     ) -> None:
+        """创建组件级 span 并写入输入/元数据。"""
         if not self.ready:
             return
 
@@ -183,6 +208,7 @@ class TraceloopTracer(BaseTracer):
         error: Exception | None = None,
         logs: Sequence[Log | dict] = (),
     ) -> None:
+        """结束组件级 span 并写入输出/错误。"""
         if not self._ready or trace_id not in self.child_spans:
             return
 
@@ -205,6 +231,7 @@ class TraceloopTracer(BaseTracer):
         error: Exception | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """结束 root span 并写入输出/错误。"""
         if not self.ready:
             return
 
@@ -226,13 +253,16 @@ class TraceloopTracer(BaseTracer):
 
     @staticmethod
     def _get_current_timestamp() -> int:
+        """获取 UTC 纳秒时间戳。"""
         return int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
 
     @override
     def get_langchain_callback(self) -> BaseCallbackHandler | None:
+        """Traceloop 不提供 LangChain callback。"""
         return None
 
     def close(self):
+        """强制 flush spans。"""
         try:
             provider = trace.get_tracer_provider()
             if hasattr(provider, "force_flush"):
@@ -241,4 +271,5 @@ class TraceloopTracer(BaseTracer):
             logger.warning(f"Error flushing spans: {e}")
 
     def __del__(self):
+        """对象销毁前确保 flush。"""
         self.close()

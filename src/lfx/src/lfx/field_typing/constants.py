@@ -1,10 +1,26 @@
-"""Constants for field typing used throughout lfx package."""
+"""
+模块名称：字段类型常量与别名
+
+本模块集中定义字段类型相关的常量、类型别名与默认导入字符串。
+主要功能包括：
+- 尝试导入 LangChain 相关类型，失败时提供占位类型
+- 定义 `NestedDict`、`LanguageModel` 等类型别名
+- 维护组件支持类型映射与默认导入模板
+
+关键组件：
+- `LANGCHAIN_BASE_TYPES`
+- `CUSTOM_COMPONENT_SUPPORTED_TYPES`
+- `DEFAULT_IMPORT_STRING`
+
+设计背景：组件生成与类型校验需要统一的类型集合，且需兼容无 LangChain 环境。
+注意事项：LangChain 不可用时会创建空占位类型。
+"""
 
 import importlib.util
 from collections.abc import Callable
 from typing import Text, TypeAlias, TypeVar
 
-# Safe imports that don't create circular dependencies
+# 注意：安全导入，避免循环依赖
 try:
     from langchain.agents.agent import AgentExecutor
     from langchain.chains.base import Chain
@@ -24,7 +40,7 @@ try:
     from langchain_core.vectorstores import VectorStore, VectorStoreRetriever
     from langchain_text_splitters import TextSplitter
 except ImportError:
-    # Create stub types if langchain is not available
+    # 注意：LangChain 不可用时创建占位类型
     class AgentExecutor:
         pass
 
@@ -95,10 +111,10 @@ except ImportError:
         pass
 
 
-# Import lfx schema types (avoid circular deps)
+# 注意：导入 lfx schema 类型（避免循环依赖）
 from lfx.schema.data import Data
 
-# Type aliases
+# 类型别名
 NestedDict: TypeAlias = dict[str, str | dict]
 LanguageModel = TypeVar("LanguageModel", BaseLanguageModel, BaseLLM, BaseChatModel)
 ToolEnabledLanguageModel = TypeVar("ToolEnabledLanguageModel", BaseLanguageModel, BaseLLM, BaseChatModel)
@@ -117,14 +133,14 @@ OutputParser = TypeVar(
 
 
 class Object:
-    """Generic object type for custom components."""
+    """自定义组件的通用对象类型占位。"""
 
 
 class Code:
-    """Code type for custom components."""
+    """自定义组件的代码类型占位。"""
 
 
-# Langchain base types mapping
+# LangChain 基础类型映射
 LANGCHAIN_BASE_TYPES = {
     "Chain": Chain,
     "AgentExecutor": AgentExecutor,
@@ -149,19 +165,19 @@ LANGCHAIN_BASE_TYPES = {
     "BaseDocumentCompressor": BaseDocumentCompressor,
 }
 
-# Langchain base types plus Python base types
+# LangChain 基础类型 + Python 内建类型
 CUSTOM_COMPONENT_SUPPORTED_TYPES = {
     **LANGCHAIN_BASE_TYPES,
     "NestedDict": NestedDict,
     "Data": Data,
-    "Text": Text,  # noqa: UP019
+    "Text": Text,  # noqa: UP019  # 注意：兼容 `typing.Text` 的历史用法
     "Object": Object,
     "Callable": Callable,
     "LanguageModel": LanguageModel,
     "Retriever": Retriever,
 }
 
-# Default import string for component code generation
+# 组件代码生成的默认导入字符串
 LANGCHAIN_IMPORT_STRING = """from langchain.agents.agent import AgentExecutor
 from langchain.chains.base import Chain
 from langchain.memory.chat_memory import BaseChatMemory

@@ -1,3 +1,19 @@
+"""
+模块名称：`Icosa` 组合推理组件
+
+本模块通过 `Icosa CR API` 调用组合优化服务，为输入提示词生成优化版本并输出原因列表。
+主要功能包括：
+- 向 `Icosa` 服务提交提示词与模型配置
+- 返回优化后的提示词
+- 提取并输出原因列表
+
+关键组件：
+- `CombinatorialReasonerComponent`
+
+设计背景：将组合优化的提示词构造能力封装为 LangFlow 组件。
+注意事项：需要 `OpenAI` Key 与 `Icosa` 账户凭证；请求失败会抛异常。
+"""
+
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -10,6 +26,14 @@ from lfx.schema.message import Message
 
 
 class CombinatorialReasonerComponent(Component):
+    """`Icosa` 组合推理组件
+
+    契约：
+    - 输入：提示词、`OpenAI` Key、`Icosa` 账号与模型名
+    - 输出：优化提示词 `Message` 与原因列表 `Data`
+    - 副作用：调用外部 `Icosa` 服务
+    - 失败语义：请求失败时抛出异常
+    """
     display_name = "Combinatorial Reasoner"
     description = "Uses Combinatorial Optimization to construct an optimal prompt with embedded reasons. Sign up here:\nhttps://forms.gle/oWNv2NKjBNaqqvCx6"
     icon = "Icosa"
@@ -58,6 +82,23 @@ class CombinatorialReasonerComponent(Component):
     ]
 
     def build_prompt(self) -> Message:
+        """调用 `Icosa` 服务生成优化提示词
+
+        关键路径（三步）：
+        1) 组装请求参数与凭证
+        2) 发起 `POST` 请求并校验响应
+        3) 提取优化提示词与原因列表
+
+        异常流：请求失败或响应格式异常时抛异常。
+        性能瓶颈：外部请求延迟。
+        排障入口：`requests` 异常信息。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`Message` 或字符串（取决于服务响应）
+        - 副作用：更新 `self.reasons`
+        - 失败语义：请求失败时抛异常
+        """
         params = {
             "prompt": self.prompt,
             "apiKey": self.openai_api_key,
@@ -79,6 +120,14 @@ class CombinatorialReasonerComponent(Component):
         return prompt
 
     def build_reasons(self) -> Data:
-        # list of selected reasons
+        """输出组合推理原因列表
+
+        契约：
+        - 输入：无（使用 `self.reasons`）
+        - 输出：`Data`（原因列表）
+        - 副作用：无
+        - 失败语义：`self.reasons` 为空时返回空列表
+        """
+        # 注意：仅提取每条原因的首元素
         final_reasons = [reason[0] for reason in self.reasons]
         return Data(value=final_reasons)

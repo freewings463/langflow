@@ -1,3 +1,21 @@
+"""
+模块名称：`Pinecone` 向量库组件
+
+本模块封装 `Pinecone` 向量库的构建与检索，提供统一的向量存储与相似度搜索能力。
+主要功能包括：
+- 选择距离策略并初始化 `Pinecone` 索引
+- 可选写入文档并进行相似度检索
+- 使用 `Float32Embeddings` 统一向量精度
+
+关键组件：
+- `PineconeVectorStoreComponent.build_vector_store`：构建/写入向量库
+- `PineconeVectorStoreComponent.search_documents`：相似度检索输出
+- `Float32Embeddings`：向量精度适配
+
+设计背景：对接托管向量库，保证检索流程一致。
+注意事项：`langchain-pinecone` 未安装会直接失败，需要显式依赖。
+"""
+
 import numpy as np
 from langchain_core.vectorstores import VectorStore
 
@@ -8,6 +26,15 @@ from lfx.schema.data import Data
 
 
 class PineconeVectorStoreComponent(LCVectorStoreComponent):
+    """`Pinecone` 向量库组件入口。
+
+    契约：输入索引名、`embedding` 与 API Key，输出可查询的向量库实例。
+    决策：用 `Float32Embeddings` 包装嵌入以保证向量精度一致。
+    问题：不同嵌入实现可能输出非 `float32`，影响存储或检索。
+    方案：统一转为 `float32` 后传入向量库。
+    代价：额外一次类型转换开销。
+    重评：当上游嵌入统一输出 `float32` 时可移除包装。
+    """
     display_name = "Pinecone"
     description = "Pinecone Vector Store with search capabilities"
     name = "Pinecone"
@@ -43,7 +70,14 @@ class PineconeVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> VectorStore:
-        """Build and return a Pinecone vector store instance."""
+        """构建并返回 `Pinecone` 向量库实例。
+
+        关键路径（三步）：
+        1) 校验依赖并准备距离策略
+        2) 初始化向量库实例
+        3) 可选写入文档
+        异常流：依赖缺失或初始化失败抛 `ValueError`。
+        """
         try:
             from langchain_pinecone import PineconeVectorStore
         except ImportError as e:
@@ -53,14 +87,14 @@ class PineconeVectorStoreComponent(LCVectorStoreComponent):
         try:
             from langchain_pinecone._utilities import DistanceStrategy
 
-            # Wrap the embedding model to ensure float32 output
+            # 决策：包装嵌入，确保输出 `float32`。
             wrapped_embeddings = Float32Embeddings(self.embedding)
 
-            # Convert distance strategy
+            # 实现：将距离策略映射为枚举值。
             distance_strategy = self.distance_strategy.replace(" ", "_").upper()
             distance_strategy = DistanceStrategy[distance_strategy]
 
-            # Initialize Pinecone instance with wrapped embeddings
+            # 实现：初始化向量库实例。
             pinecone = PineconeVectorStore(
                 index_name=self.index_name,
                 embedding=wrapped_embeddings,  # Use wrapped embeddings
@@ -75,11 +109,9 @@ class PineconeVectorStoreComponent(LCVectorStoreComponent):
         else:
             self.ingest_data = self._prepare_ingest_data()
 
-            # Process documents if any
+            # 实现：将输入转为 `Document` 后写入索引。
             documents = []
             if self.ingest_data:
-                # Convert DataFrame to Data if needed using parent's method
-
                 for doc in self.ingest_data:
                     if isinstance(doc, Data):
                         documents.append(doc.to_lc_document())
@@ -92,7 +124,11 @@ class PineconeVectorStoreComponent(LCVectorStoreComponent):
             return pinecone
 
     def search_documents(self) -> list[Data]:
-        """Search documents in the vector store."""
+        """执行相似度检索并返回 `Data` 列表。
+
+        契约：当 `search_query` 为空或仅空白时返回空列表。
+        排障入口：`status` 会写入检索结果，便于前端展示。
+        """
         try:
             if not self.search_query or not isinstance(self.search_query, str) or not self.search_query.strip():
                 return []
@@ -112,23 +148,25 @@ class PineconeVectorStoreComponent(LCVectorStoreComponent):
 
 
 class Float32Embeddings:
-    """Wrapper class to ensure float32 embeddings."""
+    """将嵌入输出统一为 `float32` 的包装器。"""
 
     def __init__(self, base_embeddings):
         self.base_embeddings = base_embeddings
 
     def embed_documents(self, texts):
+        """批量文本嵌入，确保返回 `float32`。"""
         embeddings = self.base_embeddings.embed_documents(texts)
         if isinstance(embeddings, np.ndarray):
             return [[self._force_float32(x) for x in vec] for vec in embeddings]
         return [[self._force_float32(x) for x in vec] for vec in embeddings]
 
     def embed_query(self, text):
+        """单条查询嵌入，确保返回 `float32`。"""
         embedding = self.base_embeddings.embed_query(text)
         if isinstance(embedding, np.ndarray):
             return [self._force_float32(x) for x in embedding]
         return [self._force_float32(x) for x in embedding]
 
     def _force_float32(self, value):
-        """Convert any numeric type to Python float."""
+        """将任意数值类型强制转换为 `float`。"""
         return float(np.float32(value))

@@ -1,3 +1,19 @@
+"""
+模块名称：cleanlab_remediator
+
+本模块提供 Cleanlab 可信度修复组件，用于基于分数进行响应治理。
+主要功能包括：
+- 功能1：根据阈值判断回复是否可信。
+- 功能2：对不可信回复进行警告或替换。
+
+使用场景：在评估组件之后对低可信度回复进行处置。
+关键组件：
+- 类 `CleanlabRemediator`
+
+设计背景：将治理策略组件化，便于流程中统一接入。
+注意事项：阈值与展示策略会直接影响用户可见结果。
+"""
+
 from lfx.custom import Component
 from lfx.field_typing.range_spec import RangeSpec
 from lfx.io import BoolInput, FloatInput, HandleInput, MessageTextInput, Output, PromptInput
@@ -5,35 +21,20 @@ from lfx.schema.message import Message
 
 
 class CleanlabRemediator(Component):
-    """Remediates potentially untrustworthy LLM responses based on trust scores computed by the Cleanlab Evaluator.
+    """基于可信度分数对回复进行治理的组件。
 
-    This component takes a response and its associated trust score,
-    and applies remediation strategies based on configurable thresholds and settings.
-
-    Inputs:
-        - response (MessageTextInput): The original LLM-generated response to be evaluated and possibly remediated.
-          The CleanlabEvaluator passes this response through.
-        - score (HandleInput): The trust score output from CleanlabEvaluator (expected to be a float between 0 and 1).
-        - explanation (MessageTextInput): Optional textual explanation for the trust score, to be included in the
-          output.
-        - threshold (Input[float]): Minimum trust score required to accept the response. If the score is lower, the
-          response is remediated.
-        - show_untrustworthy_response (BoolInput): If true, returns the original response with a warning; if false,
-          returns fallback text.
-        - untrustworthy_warning_text (PromptInput): Text warning to append to responses deemed untrustworthy (when
-          showing them).
-        - fallback_text (PromptInput): Replacement message returned if the response is untrustworthy and should be
-          hidden.
-
-    Outputs:
-        - remediated_response (Message): Either:
-            • the original response,
-            • the original response with appended warning, or
-            • the fallback response,
-          depending on the trust score and configuration.
-
-    This component is typically used downstream of CleanlabEvaluator or CleanlabRagValidator
-    to take appropriate action on low-trust responses and inform users accordingly.
+    契约：输入 `response/score/threshold` 等；输出 `remediated_response`。
+    关键路径：
+    1) 分数与阈值比较；
+    2) 选择透传、警告追加或替换策略；
+    3) 返回最终消息。
+    异常流：分数缺失或类型异常由上游输入保证。
+    排障入口：`self.status` 记录阈值判断与处置结果。
+    决策：
+    问题：低可信度回复需要统一治理策略。
+    方案：基于阈值提供警告或替换两种模式。
+    代价：可能隐藏部分有价值但低分的内容。
+    重评：当引入更细粒度的治理策略或分级提示时。
     """
 
     display_name = "Cleanlab Remediator"
@@ -109,6 +110,16 @@ class CleanlabRemediator(Component):
     ]
 
     def remediate_response(self) -> Message:
+        """根据可信度分数生成最终回复。
+
+        契约：当分数 >= 阈值时透传；否则按配置警告或替换。
+        关键路径：阈值比较 -> 分支构建消息 -> 返回。
+        决策：
+        问题：同一评分需要统一输出规则避免用户困惑。
+        方案：阈值驱动的二分策略。
+        代价：无法区分“稍低”和“极低”的细微差异。
+        重评：当需要多级阈值与分级提示时。
+        """
         if self.score >= self.threshold:
             self.status = f"Score {self.score:.2f} ≥ threshold {self.threshold:.2f} → accepted"
             return Message(

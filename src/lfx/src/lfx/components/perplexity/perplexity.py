@@ -1,3 +1,19 @@
+"""
+模块名称：Perplexity 文本生成组件
+
+模块目的：提供可在 Langflow 运行时调用的 Perplexity 语言模型组件。
+使用场景：在流程中配置 Perplexity LLM 节点并生成文本。
+主要功能包括：
+- 定义 Perplexity 相关输入参数（模型名、采样参数、输出长度）
+- 使用 `ChatPerplexity` 创建模型实例
+
+关键组件：
+- `PerplexityComponent`：模型组件入口
+
+设计背景：复用 LangChain 社区实现以降低维护成本。
+注意：`api_key` 缺失或无效会导致构建或后续调用失败，调用方需提示配置问题。
+"""
+
 from langchain_community.chat_models import ChatPerplexity
 from pydantic.v1 import SecretStr
 
@@ -8,6 +24,17 @@ from lfx.io import DropdownInput, FloatInput, IntInput, SecretStrInput, SliderIn
 
 
 class PerplexityComponent(LCModelComponent):
+    """Perplexity 文本生成组件。
+
+    契约：基于组件输入返回 `LanguageModel`，输入需包含 `api_key` 与 `model_name`。
+    关键路径：由 `build_model` 完成参数整理与客户端构建。
+
+    决策：通过 `ChatPerplexity` 适配 LangChain 接口
+    问题：需要与 `LCModelComponent` 生态保持一致
+    方案：复用 `langchain_community` 的封装能力
+    代价：受其参数支持范围与版本稳定性影响
+    重评：当上游接口变更或需原生 API 特性时
+    """
     display_name = "Perplexity"
     description = "Generate text using Perplexity LLMs."
     documentation = "https://python.langchain.com/v0.2/docs/integrations/chat/perplexity/"
@@ -58,6 +85,20 @@ class PerplexityComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建可运行的 Perplexity 模型实例。
+
+        契约：读取组件字段并返回 `LanguageModel`。
+        副作用：创建外部 API 客户端（网络 I/O 在后续调用阶段发生）。
+
+        关键路径（三步）：
+        1) 解密 `api_key` 并整理输入参数
+        2) 初始化 `ChatPerplexity`
+        3) 返回模型实例供运行时调用
+
+        注意：`api_key` 为空或无效会导致构建或调用阶段抛异常。
+        性能：远端推理耗时，吞吐受模型与请求并发影响。
+        排障：关注上游异常堆栈与 API 返回错误信息。
+        """
         api_key = SecretStr(self.api_key).get_secret_value()
         temperature = self.temperature
         model = self.model_name

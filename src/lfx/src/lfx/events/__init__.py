@@ -1,1 +1,5 @@
-# Event management for lfx package
+"""事件管理模块入口。
+
+本模块作为 lfx 事件系统的包入口，提供事件相关子模块的组织说明。
+注意事项：实际事件逻辑在 `event_manager.py` 与 `observability` 子模块中实现。
+"""

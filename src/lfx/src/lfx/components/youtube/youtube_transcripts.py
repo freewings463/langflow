@@ -1,3 +1,19 @@
+"""模块名称：YouTube 字幕转写组件
+
+本模块提供 YouTube 视频字幕的获取与分块能力。
+使用场景：获取视频字幕，用于摘要、检索或对话上下文。
+主要功能包括：
+- 解析视频 ID 并拉取字幕
+- 可选翻译字幕并按时间分块
+- 输出 DataFrame、Message 或 Data
+
+关键组件：
+- YouTubeTranscriptsComponent：字幕组件入口
+
+设计背景：统一字幕输出格式并支持多种下游消费方式
+注意事项：视频无字幕或受限会抛出可读错误
+"""
+
 import re
 
 import pandas as pd
@@ -12,7 +28,16 @@ from lfx.template.field.base import Output
 
 
 class YouTubeTranscriptsComponent(Component):
-    """A component that extracts spoken content from YouTube videos as transcripts."""
+    """YouTube 字幕组件。
+
+    契约：输入视频 URL 与分块/翻译配置，输出字幕 DataFrame/Message/Data
+    关键路径：1) 解析视频 ID 2) 拉取/翻译字幕 3) 按需分块或合并
+    副作用：调用 YouTube Transcript API，可能被限流
+    异常流：字幕禁用/未找到抛 `RuntimeError` 或返回错误信息
+    决策：默认优先英文字幕，缺失时回退自动生成；问题：多语言与可用性不确定；
+    方案：find_transcript 优先 en，失败则 find_generated_transcript；代价：非英文视频可能丢失信息；
+    重评：当可配置首选语言或提供语言检测时
+    """
 
     display_name: str = "YouTube Transcripts"
     description: str = "Extracts spoken content from YouTube videos with multiple output options."
@@ -49,7 +74,7 @@ class YouTubeTranscriptsComponent(Component):
     ]
 
     def _extract_video_id(self, url: str) -> str:
-        """Extract video ID from YouTube URL."""
+        """从视频 URL 中提取视频 ID。"""
         patterns = [
             r"(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)",
             r"youtube\.com\/watch\?.*?v=([^&\n?#]+)",
@@ -62,7 +87,15 @@ class YouTubeTranscriptsComponent(Component):
         raise ValueError(msg)
 
     def _load_transcripts(self, *, as_chunks: bool = True):
-        """Internal method to load transcripts from YouTube."""
+        """加载字幕并根据需要分块。
+
+        关键路径（三步）：
+        1) 解析视频 ID
+        2) 拉取字幕（可选翻译）
+        3) 按需分块或返回连续结果
+
+        异常流：字幕禁用/未找到抛 `RuntimeError`
+        """
         try:
             video_id = self._extract_video_id(self.url)
         except ValueError as e:
@@ -70,24 +103,20 @@ class YouTubeTranscriptsComponent(Component):
             raise ValueError(msg) from e
 
         try:
-            # Use new v1.0+ API - create instance
+            # 注意：使用 v1+ API 需要先创建实例。
             api = YouTubeTranscriptApi()
             transcript_list = api.list(video_id)
 
-            # Get transcript in specified language or default to English
+            # 注意：未指定翻译时优先英文字幕，失败则回退自动生成字幕。
             if self.translation:
-                # Get any available transcript and translate it
                 transcript = transcript_list.find_transcript(["en"])
                 transcript = transcript.translate(self.translation)
             else:
-                # Try to get transcript in available languages
                 try:
                     transcript = transcript_list.find_transcript(["en"])
                 except NoTranscriptFound:
-                    # Try auto-generated English
                     transcript = transcript_list.find_generated_transcript(["en"])
 
-            # Fetch the transcript data
             transcript_data = api.fetch(transcript.video_id, [transcript.language_code])
 
         except (TranscriptsDisabled, NoTranscriptFound) as e:
@@ -113,22 +142,19 @@ class YouTubeTranscriptsComponent(Component):
             raise RuntimeError(msg) from e
 
         if as_chunks:
-            # Group into chunks based on chunk_size_seconds
             return self._chunk_transcript(transcript_data)
-        # Return as continuous text
         return transcript_data
 
     def _chunk_transcript(self, transcript_data):
-        """Group transcript segments into time-based chunks."""
+        """按时间窗口将字幕分块。"""
         chunks = []
         current_chunk = []
         chunk_start = 0
 
         for segment in transcript_data:
-            # Handle both dict (old API) and object (new API) formats
+            # 注意：兼容旧版 dict 与新版对象格式。
             segment_start = segment.start if hasattr(segment, "start") else segment["start"]
 
-            # If this segment starts beyond the current chunk window, start a new chunk
             if segment_start - chunk_start >= self.chunk_size_seconds and current_chunk:
                 chunk_text = " ".join(s.text if hasattr(s, "text") else s["text"] for s in current_chunk)
                 chunks.append({"start": chunk_start, "text": chunk_text})
@@ -137,7 +163,6 @@ class YouTubeTranscriptsComponent(Component):
 
             current_chunk.append(segment)
 
-        # Add the last chunk
         if current_chunk:
             chunk_text = " ".join(s.text if hasattr(s, "text") else s["text"] for s in current_chunk)
             chunks.append({"start": chunk_start, "text": chunk_text})
@@ -145,11 +170,10 @@ class YouTubeTranscriptsComponent(Component):
         return chunks
 
     def get_dataframe_output(self) -> DataFrame:
-        """Provides transcript output as a DataFrame with timestamp and text columns."""
+        """输出按时间分块的字幕 DataFrame。"""
         try:
             chunks = self._load_transcripts(as_chunks=True)
 
-            # Create DataFrame with timestamp and text columns
             data = []
             for chunk in chunks:
                 start_seconds = int(chunk["start"])
@@ -165,10 +189,9 @@ class YouTubeTranscriptsComponent(Component):
             return DataFrame(pd.DataFrame({"error": [error_msg]}))
 
     def get_message_output(self) -> Message:
-        """Provides transcript output as continuous text."""
+        """输出连续文本字幕 Message。"""
         try:
             transcript_data = self._load_transcripts(as_chunks=False)
-            # Handle both dict (old API) and object (new API) formats
             result = " ".join(
                 segment.text if hasattr(segment, "text") else segment["text"] for segment in transcript_data
             )
@@ -179,13 +202,10 @@ class YouTubeTranscriptsComponent(Component):
             return Message(text=error_msg)
 
     def get_data_output(self) -> Data:
-        """Creates a structured data object with transcript and metadata.
+        """输出结构化 Data（字幕+元信息）。
 
-        Returns a Data object containing transcript text, video URL, and any error
-        messages that occurred during processing. The object includes:
-        - 'transcript': continuous text from the entire video (concatenated if multiple parts)
-        - 'video_url': the input YouTube URL
-        - 'error': error message if an exception occurs
+        契约：返回包含 `transcript`/`video_url`/`error` 的 Data
+        失败语义：异常时将错误信息写入 `error`
         """
         default_data = {"transcript": "", "video_url": self.url, "error": None}
 
@@ -195,7 +215,6 @@ class YouTubeTranscriptsComponent(Component):
                 default_data["error"] = "No transcripts found."
                 return Data(data=default_data)
 
-            # Combine all transcript segments - handle both dict and object formats
             full_transcript = " ".join(
                 segment.text if hasattr(segment, "text") else segment["text"] for segment in transcript_data
             )

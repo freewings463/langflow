@@ -1,3 +1,15 @@
+"""
+模块名称：用户管理接口
+
+本模块提供用户创建、查询、更新、重置密码与删除等管理操作。
+主要功能：
+- 管理员创建用户并初始化默认项目
+- 查询当前用户与用户列表
+- 更新用户资料与重置密码
+设计背景：集中用户管理能力并区分管理员权限。
+注意事项：涉及权限校验，未授权请求会返回 403/401。
+"""
+
 from typing import Annotated
 from uuid import UUID
 
@@ -28,9 +40,9 @@ async def add_user(
     session: DbSession,
     current_user: Annotated[User, Depends(get_current_active_superuser)],  # noqa: ARG001
 ) -> User:
-    """Add a new user to the database.
+    """创建新用户（仅管理员可用）。
 
-    Requires superuser authentication to prevent unauthorized account creation.
+    失败语义：用户名冲突返回 400；默认项目创建失败返回 500。
     """
     new_user = User.model_validate(user, from_attributes=True)
     try:
@@ -52,7 +64,7 @@ async def add_user(
 async def read_current_user(
     current_user: CurrentActiveUser,
 ) -> User:
-    """Retrieve the current user's data."""
+    """获取当前登录用户信息。"""
     return current_user
 
 
@@ -63,7 +75,7 @@ async def read_all_users(
     limit: int = 10,
     session: DbSession,
 ) -> UsersResponse:
-    """Retrieve a list of users from the database with pagination."""
+    """分页获取用户列表（仅管理员可用）。"""
     query: SelectOfScalar = select(User).offset(skip).limit(limit)
     users = (await session.exec(query)).fetchall()
 
@@ -83,7 +95,7 @@ async def patch_user(
     user: CurrentActiveUser,
     session: DbSession,
 ) -> User:
-    """Update an existing user's data."""
+    """更新用户信息（含权限校验）。"""
     update_password = bool(user_update.password)
 
     if not user.is_superuser and user_update.is_superuser:
@@ -110,7 +122,7 @@ async def reset_password(
     user: CurrentActiveUser,
     session: DbSession,
 ) -> User:
-    """Reset a user's password."""
+    """重置用户密码（仅本人）。"""
     if user_id != user.id:
         raise HTTPException(status_code=400, detail="You can't change another user's password")
 
@@ -135,7 +147,7 @@ async def delete_user(
     current_user: Annotated[User, Depends(get_current_active_superuser)],
     session: DbSession,
 ) -> dict:
-    """Delete a user from the database."""
+    """删除用户（仅管理员）。"""
     if current_user.id == user_id:
         raise HTTPException(status_code=400, detail="You can't delete your own user account")
     if not current_user.is_superuser:

@@ -1,3 +1,16 @@
+"""
+模块名称：Couchbase 组件包入口
+
+本模块提供 Couchbase 相关组件的懒加载入口，主要用于在未使用组件时避免导入开销。主要功能包括：
+- 动态导入 `CouchbaseVectorStoreComponent`
+
+关键组件：
+- `__getattr__`：按需导入组件类
+
+设计背景：组件数量较多时，按需导入可缩短 CLI/UI 启动时间。
+注意事项：仅导出 `__all__` 中声明的组件名称。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -17,7 +30,12 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import Couchbase components on attribute access."""
+    """按需导入 Couchbase 组件。
+
+    契约：仅允许 `_dynamic_imports` 中声明的属性名。
+    失败语义：导入失败或属性不存在时抛 `AttributeError`。
+    副作用：首次访问时触发模块导入并缓存到 `globals()`。
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
@@ -31,4 +49,5 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """返回可导出的公共属性列表。"""
     return list(__all__)

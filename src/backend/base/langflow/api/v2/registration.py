@@ -1,3 +1,21 @@
+"""
+模块名称：注册与遥测 API
+
+本模块提供单用户注册信息的写入与查询，并异步发送邮箱遥测事件。
+主要功能包括：
+- 写入/读取本地注册文件（单条覆盖）
+- 发送邮箱注册遥测（best-effort）
+- 提供受保护的查询接口
+
+关键组件：
+- `save_registration` / `load_registration`
+- `register_user` / `get_registration`
+- `_send_email_telemetry`
+
+设计背景：部署形态中无需账号系统，仅保留单一注册邮箱用于统计。
+注意事项：注册信息存储在本地文件，覆盖写入，非多用户设计。
+"""
+
 import json
 from asyncio import to_thread
 from datetime import datetime, timezone
@@ -14,7 +32,7 @@ from langflow.services.telemetry.schema import EmailPayload
 router = APIRouter(tags=["Registration API"], prefix="/registration")
 
 
-# Data model for registration
+# 注意：仅用于单用户注册场景，字段保持最小化
 class RegisterRequest(BaseModel):
     email: EmailStr
 
@@ -23,31 +41,40 @@ class RegisterResponse(BaseModel):
     email: str
 
 
-# File to store registrations
+# 注意：本地文件仅保存一条记录，写入时覆盖
 REGISTRATION_FILE = Path("data/user/registration.json")
 
 
 def _ensure_registration_file():
-    """Ensure registration file and directory exist with proper permissions."""
+    """确保注册文件目录存在并设置安全权限。
+
+    契约：目录不存在时创建，并尝试设置为 `0o700`。
+    副作用：创建目录、修改权限。
+    失败语义：异常向上抛出并记录日志。
+    """
     try:
-        # Ensure the directory exists with secure permissions
         REGISTRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Set directory permissions to owner read/write/execute only (if possible)
+        # 注意：限制目录权限为仅 owner 读写执行
         REGISTRATION_FILE.parent.chmod(0o700)
     except Exception as e:
         logger.error(f"Failed to create registration file/directory: {e}")
         raise
 
 
-# TODO: Move functions to a separate service module
+# TODO：迁移到独立的服务模块
 
 
 def load_registration() -> dict | None:
-    """Load the single registration from file."""
+    """读取本地注册信息。
+
+    契约：返回注册字典或 `None`（文件不存在/为空/损坏）。
+    副作用：读取本地文件。
+    失败语义：JSON 解码失败返回 `None` 并记录错误。
+    """
     if not REGISTRATION_FILE.exists() or REGISTRATION_FILE.stat().st_size == 0:
         return None
     try:
-        with REGISTRATION_FILE.open("rb") as f:  # using binary mode for faster file IO
+        with REGISTRATION_FILE.open("rb") as f:
             content = f.read()
         return json.loads(content)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -56,32 +83,26 @@ def load_registration() -> dict | None:
 
 
 def save_registration(email: str) -> bool:
-    """Save the single registration to file.
+    """保存注册邮箱（覆盖写入）。
 
-    Args:
-        email: Email to register
-
-    Returns:
-        True if saved successfully
+    契约：成功返回 `True`。
+    副作用：写入本地文件并记录日志。
+    失败语义：异常向上抛出。
     """
     try:
-        # Ensure the registration file and directory exist
         _ensure_registration_file()
 
-        # Check if registration already exists
         existing = load_registration()
 
-        # Create new registration (replaces any existing)
+        # 注意：仅保留一条注册信息，写入时覆盖
         registration = {
             "email": email,
             "registered_at": datetime.now(tz=timezone.utc).isoformat(),
         }
 
-        # Log if replacing
         if existing:
             logger.info(f"Replacing registration: {existing.get('email')} -> {email}")
 
-        # Save to file
         with REGISTRATION_FILE.open("w") as f:
             json.dump(registration, f, indent=2)
 
@@ -96,13 +117,21 @@ def save_registration(email: str) -> bool:
 
 @router.post("/", response_model=RegisterResponse)
 async def register_user(request: RegisterRequest):
-    """Register the single user with email.
+    """注册邮箱（单用户覆盖式）。
 
-    Note: Only one registration is allowed.
+    契约：注册成功返回 `RegisterResponse`。
+    副作用：写文件并发送遥测（best-effort）。
+    失败语义：保存失败返回 500。
+
+    决策：注册信息以本地单文件覆盖保存
+    问题：部署场景无完整账号系统但需记录邮箱
+    方案：本地 JSON 文件覆盖写入
+    代价：不支持多用户与并发写入
+    重评：引入账号系统或数据库时迁移存储
     """
     try:
         email = request.email
-        # Save to local file (replace existing) not dealing with 201 status for simplicity.
+        # 注意：文件 IO 使用线程池避免阻塞事件循环
         if await to_thread(save_registration, email):
             await _send_email_telemetry(email=email)
             return RegisterResponse(email=email)
@@ -114,7 +143,7 @@ async def register_user(request: RegisterRequest):
 
 
 async def _send_email_telemetry(email: str) -> None:
-    """Send the telemetry event for the registered email address."""
+    """发送邮箱注册遥测事件（尽力而为）。"""
     payload: EmailPayload | None = None
 
     try:
@@ -138,7 +167,17 @@ async def _send_email_telemetry(email: str) -> None:
 
 @router.get("/", dependencies=[Depends(get_current_active_user)])
 async def get_registration():
-    """Get the registered user (if any)."""
+    """获取已注册邮箱（如有）。
+
+    契约：有注册信息时返回记录；否则返回提示消息。
+    失败语义：读取失败返回 500。
+
+    决策：无注册时返回提示消息而非 404
+    问题：前端需要区分“未注册”与“请求失败”
+    方案：返回固定 message
+    代价：接口响应结构不完全一致
+    重评：若需要统一响应结构时改为显式状态字段
+    """
     try:
         registration = await to_thread(load_registration)
         if registration:

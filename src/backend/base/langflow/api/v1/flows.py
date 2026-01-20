@@ -1,3 +1,15 @@
+"""
+模块名称：流程管理接口
+
+本模块提供流程的创建、导入导出与文件系统存储能力。
+主要功能：
+- 创建/更新/删除流程
+- 导入导出流程数据与附件
+- 将流程保存到受限文件路径
+设计背景：统一流程持久化与文件系统交互逻辑。
+注意事项：路径校验严格限制在用户目录内。
+"""
+
 from __future__ import annotations
 
 import io
@@ -41,7 +53,7 @@ from langflow.services.deps import get_settings_service, get_storage_service
 from langflow.services.storage.service import StorageService
 from langflow.utils.compression import compress_response
 
-# build router
+# 实现：统一挂载 `/flows` 路由。
 router = APIRouter(prefix="/flows", tags=["Flows"])
 
 
@@ -162,11 +174,10 @@ async def _new_flow(
     user_id: UUID,
     storage_service: StorageService,
 ):
+    """创建新流程并处理名称/端点冲突。"""
     try:
         # Validate fs_path if provided (will raise HTTPException if invalid)
         await _verify_fs_path(flow.fs_path, user_id, storage_service)
-
-        """Create a new flow."""
         if flow.user_id is None:
             flow.user_id = user_id
 
@@ -258,6 +269,7 @@ async def create_flow(
     current_user: CurrentActiveUser,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
+    """创建流程并写入持久化存储。"""
     try:
         db_flow = await _new_flow(session=session, flow=flow, user_id=current_user.id, storage_service=storage_service)
         await session.flush()

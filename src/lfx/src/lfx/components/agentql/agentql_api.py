@@ -1,3 +1,19 @@
+"""
+模块名称：agentql_api
+
+本模块提供 AgentQL 组件实现，通过外部 API 从网页抽取结构化数据。
+主要功能包括：
+- 组装请求参数并调用 AgentQL REST API
+- 解析返回数据并输出为 Langflow `Data`
+
+关键组件：
+- `AgentQL`：面向用户的 Web 数据抽取组件
+
+设计背景：需要将 AgentQL 能力接入 Langflow 组件体系
+使用场景：在流程中以 URL + Query/Prompt 抽取页面数据
+注意事项：查询与提示语只能二选一，否则直接报错
+"""
+
 import httpx
 
 from lfx.custom.custom_component.component import Component
@@ -8,6 +24,14 @@ from lfx.schema.data import Data
 
 
 class AgentQL(Component):
+    """AgentQL Web 数据抽取组件。
+
+    契约：需提供 `api_key` 与 `url`，并在 `query`/`prompt` 中二选一。
+    副作用：向外部 AgentQL API 发起网络请求。
+    失败语义：HTTP 异常或参数冲突会抛 `ValueError` 并写入 `status`。
+    排障入口：错误日志关键字 `Failure response` + `status` 提示。
+    """
+
     display_name = "Extract Web Data"
     description = "Extracts structured data from a web page using an AgentQL query or a Natural Language description."
     documentation: str = "https://docs.agentql.com/rest-api/api-reference"
@@ -94,6 +118,21 @@ class AgentQL(Component):
     ]
 
     def build_output(self) -> Data:
+        """执行 AgentQL 请求并返回结构化数据。
+
+        契约：必须提供 `url`，且 `query`/`prompt` 只能选其一；返回 `Data`。
+        副作用：发送 HTTP POST；失败时写 `self.status`。
+        失败语义：参数冲突抛 `ValueError`；HTTP 失败转为 `ValueError`。
+        关键路径（三步）：1) 构造 headers/payload 2) 发起请求并校验 3) 解析为 `Data`。
+        异常流：401 转为“无效 API Key”，其余按响应体拼接错误信息。
+        性能瓶颈：网络 RTT 与目标页面解析耗时（受 `timeout` 影响）。
+        排障入口：日志关键字 `Failure response`，响应体含 `error_info/detail`。
+        决策：要求 `query` 与 `prompt` 互斥。
+        问题：两者同时存在会导致服务端语义不确定。
+        方案：本地校验并提前拒绝。
+        代价：调用方需要在前端做额外校验。
+        重评：当服务端支持同时合并策略时。
+        """
         endpoint = "https://api.agentql.com/v1/query-data"
         headers = {
             "X-API-Key": self.api_key,

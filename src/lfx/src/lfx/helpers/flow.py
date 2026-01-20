@@ -1,4 +1,8 @@
-"""Flow helper functions for lfx package."""
+"""Flow 辅助函数。
+
+本模块提供图流程输入构建与运行的轻量实现，适用于无数据库场景。
+注意事项：在 lfx 环境中多为占位实现，会返回空列表或抛出未实现错误。
+"""
 
 from __future__ import annotations
 
@@ -18,26 +22,23 @@ if TYPE_CHECKING:
 
 
 def get_flow_inputs(graph: Graph) -> list[Vertex]:
-    """Retrieves the flow inputs from the given graph.
+    """获取图中的输入节点列表。
 
-    Args:
-        graph (Graph): The graph object representing the flow.
-
-    Returns:
-        List[Vertex]: A list of input vertices.
+    关键路径（三步）：
+    1) 遍历图中所有顶点；
+    2) 筛选 `is_input` 为 True 的节点；
+    3) 返回输入节点列表。
     """
     return [vertex for vertex in graph.vertices if vertex.is_input]
 
 
 def build_schema_from_inputs(name: str, inputs: list[Vertex]) -> type[BaseModel]:
-    """Builds a schema from the given inputs.
+    """根据输入节点生成 Pydantic Schema。
 
-    Args:
-        name (str): The name of the schema.
-        inputs (List[Vertex]): A list of Vertex objects representing the inputs.
-
-    Returns:
-        BaseModel: The schema model.
+    关键路径（三步）：
+    1) 归一化输入显示名为字段名；
+    2) 采集描述并设置默认值；
+    3) 动态创建并返回模型。
     """
     fields = {}
     for input_ in inputs:
@@ -48,14 +49,12 @@ def build_schema_from_inputs(name: str, inputs: list[Vertex]) -> type[BaseModel]
 
 
 def get_arg_names(inputs: list[Vertex]) -> list[dict[str, str]]:
-    """Returns a list of dictionaries containing the component name and its corresponding argument name.
+    """返回组件名与参数名映射列表。
 
-    Args:
-        inputs (List[Vertex]): A list of Vertex objects representing the inputs.
-
-    Returns:
-        List[dict[str, str]]: A list of dictionaries, where each dictionary contains the component name and its
-            argument name.
+    关键路径（三步）：
+    1) 遍历输入节点；
+    2) 生成组件名与参数名；
+    3) 返回映射列表。
     """
     return [
         {"component_name": input_.display_name, "arg_name": input_.display_name.lower().replace(" ", "_")}
@@ -64,23 +63,18 @@ def get_arg_names(inputs: list[Vertex]) -> list[dict[str, str]]:
 
 
 async def list_flows(*, user_id: str | None = None) -> list[Data]:
-    """List flows for a user.
+    """列出用户可用的 flows（lfx 占位实现）。
 
-    In lfx, this is a stub that returns an empty list since we don't have
-    a database backend by default.
-
-    Args:
-        user_id: The user ID to list flows for.
-
-    Returns:
-        List of flow data objects.
+    关键路径（三步）：
+    1) 校验用户会话；
+    2) 记录占位警告；
+    3) 返回空列表。
     """
     if not user_id:
         msg = "Session is invalid"
         raise ValueError(msg)
 
-    # In lfx, we don't have a database backend by default
-    # This is a stub implementation
+    # 注意：lfx 默认无数据库，实现为占位
     logger.warning("list_flows called but lfx doesn't have database backend by default")
     return []
 
@@ -91,32 +85,12 @@ async def list_flows_by_flow_folder(
     flow_id: str | None = None,
     order_params: dict | None = {"column": "updated_at", "direction": "desc"},  # noqa: B006, ARG001
 ) -> list[Data]:
-    """Lists flows for the given user and in the same folder as the specified flow.
+    """列出与指定 flow 同目录的 flows（lfx 占位实现）。
 
-    Retrieves all flows belonging to the given user and identified by user_id
-    that belong to the same folder as the flow identified by flow_id if the flow belongs to the user.
-
-    Optionally accepts a dictionary of order parameters
-    to order the flows by the specified column and direction.
-    Default order column is "updated_at" and default order direction is "desc".
-
-    In lfx, this is a stub that returns an empty list since we don't have
-    a database backend by default.
-
-    Args:
-        user_id (str | None, optional): The user ID to list flows for. Defaults to None.
-        flow_id (str | None, optional): The flow ID to list flows in the same folder as. Defaults to None.
-        order_params (dict | None, optional): Parameters for ordering the flows.
-        Defaults to {"column": "updated_at", "direction": "desc"}.
-            - column: The column to order by. Defaults to "updated_at".
-            - direction: The direction to order by. Defaults to "desc".
-
-    Returns:
-        list[Data]: List of flows in the same folder as the flow identified by flow_id.
-
-    Raises:
-        ValueError: If user_id is not provided.
-        ValueError: If Flow ID is not provided.
+    关键路径（三步）：
+    1) 校验用户与 flow ID；
+    2) 记录占位警告；
+    3) 返回空列表。
     """
     if not user_id:
         msg = "Session is invalid"
@@ -125,8 +99,7 @@ async def list_flows_by_flow_folder(
         msg = "Flow ID is required"
         raise ValueError(msg)
 
-    # In lfx, we don't have a database backend by default
-    # This is a stub implementation
+    # 注意：lfx 默认无数据库，实现为占位
     logger.warning("list_flows_by_flow_folder called but lfx doesn't have database backend by default")
     return []
 
@@ -136,25 +109,12 @@ async def list_flows_by_folder_id(
     user_id: str | None = None,
     folder_id: str | None = None,
 ) -> list[Data]:
-    """Lists flows for the given user and in the same folder as the specified folder.
+    """列出指定目录下的 flows（lfx 占位实现）。
 
-    Retrieves all flows belonging to the user identified by user_id
-    that belong to the same folder as the folder identified by folder_id
-    if the folder belongs to the user.
-
-    In lfx, this is a stub that returns an empty list since we don't have
-    a database backend by default.
-
-    Args:
-        user_id (str | None, optional): The user ID to list flows for. Defaults to None.
-        folder_id (str | None, optional): The folder ID to list flows in the same folder as. Defaults to None.
-
-    Returns:
-        list[Data]: List of flows in the same folder as the folder identified by folder_id.
-
-    Raises:
-        ValueError: If user_id is not provided.
-        ValueError: If Folder ID is not provided.
+    关键路径（三步）：
+    1) 校验用户与目录 ID；
+    2) 记录占位警告；
+    3) 返回空列表。
     """
     if not user_id:
         msg = "Session is invalid"
@@ -163,8 +123,7 @@ async def list_flows_by_folder_id(
         msg = "Folder ID is required"
         raise ValueError(msg)
 
-    # In lfx, we don't have a database backend by default
-    # This is a stub implementation
+    # 注意：lfx 默认无数据库，实现为占位
     logger.warning("list_flows_by_folder_id called but lfx doesn't have database backend by default")
     return []
 
@@ -174,20 +133,12 @@ async def get_flow_by_id_or_name(
     flow_id: str | None = None,
     flow_name: str | None = None,
 ) -> Data | None:
-    """Get a flow by ID or name.
+    """按 ID 或名称获取 flow（lfx 占位实现）。
 
-    Retrieves a flow by ID or name. If both are provided, flow_id is used.
-
-    In lfx, this is a stub that returns None since we don't have
-    a database backend by default.
-
-    Args:
-        user_id (str): The user ID to get the flow for.
-        flow_id (str | None, optional): The flow ID. Defaults to None.
-        flow_name (str | None, optional): The flow name. Defaults to None.
-
-    Returns:
-        Data | None: The flow data or None if not found.
+    关键路径（三步）：
+    1) 校验用户与查询条件；
+    2) 记录占位警告；
+    3) 返回 None。
     """
     if not user_id:
         msg = "Session is invalid"
@@ -196,8 +147,7 @@ async def get_flow_by_id_or_name(
         msg = "Flow ID or Flow Name is required"
         raise ValueError(msg)
 
-    # In lfx, we don't have a database backend by default
-    # This is a stub implementation
+    # 注意：lfx 默认无数据库，实现为占位
     logger.warning("get_flow_by_id_or_name called but lfx doesn't have database backend by default")
     return None
 
@@ -208,26 +158,18 @@ async def load_flow(
     flow_name: str | None = None,
     tweaks: dict | None = None,  # noqa: ARG001
 ) -> Graph:
-    """Load a flow by ID or name.
+    """加载 flow（lfx 占位实现，直接抛错）。
 
-    In lfx, this is a stub that raises an error since we don't have
-    a database backend by default.
-
-    Args:
-        user_id: The user ID.
-        flow_id: The flow ID to load.
-        flow_name: The flow name to load.
-        tweaks: Optional tweaks to apply to the flow.
-
-    Returns:
-        The loaded flow graph.
+    关键路径（三步）：
+    1) 校验 flow 标识；
+    2) 构造未实现错误；
+    3) 抛出异常。
     """
     if not flow_id and not flow_name:
         msg = "Flow ID or Flow Name is required"
         raise ValueError(msg)
 
-    # In lfx, we don't have a database backend by default
-    # This is a stub implementation
+    # 注意：lfx 默认无数据库，实现为占位
     msg = f"load_flow not implemented in lfx - cannot load flow {flow_id or flow_name}"
     raise NotImplementedError(msg)
 
@@ -243,28 +185,19 @@ async def run_flow(
     session_id: str | None = None,
     graph: Graph | None = None,
 ) -> list[RunOutputs]:
-    """Run a flow with given inputs.
+    """运行 flow（要求提供 graph）。
 
-    Args:
-        inputs: Input values for the flow.
-        tweaks: Optional tweaks to apply.
-        flow_id: The flow ID to run.
-        flow_name: The flow name to run.
-        output_type: The type of output to return.
-        user_id: The user ID.
-        run_id: Optional run ID.
-        session_id: Optional session ID.
-        graph: Optional pre-loaded graph.
-
-    Returns:
-        List of run outputs.
+    关键路径（三步）：
+    1) 校验用户与图对象；
+    2) 组装输入与输出节点；
+    3) 调用 `graph.arun` 返回结果。
     """
     if user_id is None:
         msg = "Session is invalid"
         raise ValueError(msg)
 
     if graph is None:
-        # In lfx, we can't load flows from database
+        # 注意：lfx 无数据库，必须显式传入 graph
         msg = "run_flow requires a graph parameter in lfx"
         raise ValueError(msg)
 
@@ -296,7 +229,7 @@ async def run_flow(
         or (vertex.is_output and (output_type == "any" or (output_type and output_type in str(vertex.id).lower())))
     ]
 
-    # In lfx, we don't have settings service, so use False as default
+    # 注意：lfx 无 settings service，默认 False
     fallback_to_env_vars = False
 
     return await graph.arun(

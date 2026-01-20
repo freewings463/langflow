@@ -1,3 +1,19 @@
+"""
+模块名称：AstraDB 向量库组件
+
+本模块提供 Astra DB Vector Store 的组件封装，支持写入、检索与混合搜索配置。主要功能包括：
+- 构建 AstraDBVectorStore 并写入文档
+- 支持混合检索/重排与元数据过滤
+- 输出标准化 `Data` 结果
+
+关键组件：
+- `AstraDBVectorStoreComponent`
+
+设计背景：需要在 LFX 组件体系内统一接入 AstraDB 向量库。
+使用场景：文档向量化检索与混合搜索。
+注意事项：依赖 `langchain-astradb` 与 Astra API，错误会抛 `ValueError`。
+"""
+
 from astrapy import DataAPIClient
 from langchain_core.documents import Document
 
@@ -13,6 +29,18 @@ from lfx.utils.version import get_version_info
 
 @vector_store_connection
 class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
+    """AstraDB 向量库组件
+
+    契约：输入连接参数、检索配置与 `ingest_data`；输出 `list[Data]`/`DataFrame`；
+    副作用：写入向量库、记录日志、更新 `self.status`；
+    失败语义：依赖缺失抛 `ImportError`，搜索/写入失败抛 `ValueError`。
+    关键路径：1) 构建向量库 2) 写入文档 3) 执行检索并转换为 `Data`。
+    决策：支持自动检测集合能力并动态调整 UI 配置。
+    问题：不同集合支持的混合检索能力不一致。
+    方案：在 `update_build_config` 中动态配置显示与默认值。
+    代价：构建配置时需要额外请求元数据。
+    重评：当集合能力信息可缓存或预先配置时。
+    """
     display_name: str = "Astra DB"
     description: str = "Ingest and search documents in Astra DB"
     documentation: str = "https://docs.langflow.org/bundles-datastax"
@@ -64,7 +92,7 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
                 "and Hybrid Search (suggested) combines both approaches "
                 "with a reranker."
             ),
-            options=["Hybrid Search", "Vector Search"],  # TODO: Restore Lexical Search?
+            options=["Hybrid Search", "Vector Search"],  # TODO：恢复 Lexical Search？
             options_metadata=[{"icon": "SearchHybrid"}, {"icon": "SearchVector"}],
             value="Vector Search",
             advanced=True,
@@ -123,15 +151,23 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
         field_value: str | dict,
         field_name: str | None = None,
     ) -> dict:
-        """Update build configuration with proper handling of embedding and search options."""
-        # Handle base astra db build config updates
+        """更新构建配置并同步检索相关显示逻辑
+
+        契约：输入构建配置并返回更新后的配置；副作用：可能触发集合能力探测；
+        失败语义：底层查询异常会中断构建配置。
+        关键路径：1) 调用基类更新 2) 设置 embedding 可见性 3) 配置检索选项。
+        决策：当集合使用 Vectorize 时隐藏 embedding 输入。
+        问题：服务端向量化不需要本地 embedding。
+        方案：根据 provider 显示/隐藏 embedding 字段。
+        代价：依赖集合元数据准确性。
+        重评：当 embedding 选择逻辑改为显式输入时。
+        """
         build_config = await super().update_build_config(
             build_config,
             field_value=field_value,
             field_name=field_name,
         )
 
-        # Set embedding model display based on provider selection
         if isinstance(field_value, dict) and "02_embedding_generation_provider" in field_value:
             embedding_provider = field_value.get("02_embedding_generation_provider")
             is_custom_provider = embedding_provider and embedding_provider != "Bring your own"
@@ -140,36 +176,39 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             build_config["embedding_model"]["show"] = not bool(provider)
             build_config["embedding_model"]["required"] = not bool(provider)
 
-        # Early return if no API endpoint is configured
         if not self.get_api_endpoint():
             return build_config
 
-        # Configure search method and related options
         return self._configure_search_options(build_config)
 
     def _configure_search_options(self, build_config: dict) -> dict:
-        """Configure hybrid search, reranker, and vector search options."""
-        # Detect available hybrid search capabilities
+        """配置混合检索与重排相关选项
+
+        契约：输入构建配置并返回更新后的配置；
+        副作用：可能调用集合能力探测；
+        失败语义：探测异常将回退为禁用混合检索。
+        关键路径：1) 探测能力 2) 调整检索方法与重排配置 3) 同步字段显隐。
+        决策：当集合不支持混合检索时强制 Vector Search。
+        问题：不支持的能力会导致运行时失败。
+        方案：在构建阶段隐藏相关选项。
+        代价：用户无法选择不支持的模式。
+        重评：当服务端能力稳定且可缓存时。
+        """
         hybrid_capabilities = self._detect_hybrid_capabilities()
 
-        # Return if we haven't selected a collection
         if not build_config["collection_name"]["options"] or not build_config["collection_name"]["value"]:
             return build_config
 
-        # Get collection options
         collection_options = self._get_collection_options(build_config)
 
-        # Get the selected collection index
         index = build_config["collection_name"]["options"].index(build_config["collection_name"]["value"])
         provider = build_config["collection_name"]["options_metadata"][index]["provider"]
         build_config["embedding_model"]["show"] = not bool(provider)
         build_config["embedding_model"]["required"] = not bool(provider)
 
-        # Determine search configuration
         is_vector_search = build_config["search_method"]["value"] == "Vector Search"
         is_autodetect = build_config["autodetect_collection"]["value"]
 
-        # Apply hybrid search configuration
         if hybrid_capabilities["available"]:
             build_config["search_method"]["show"] = True
             build_config["search_method"]["options"] = ["Hybrid Search", "Vector Search"]
@@ -186,7 +225,6 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             build_config["reranker"]["options"] = []
             build_config["reranker"]["options_metadata"] = []
 
-        # Configure reranker visibility and state
         hybrid_enabled = (
             collection_options["rerank_enabled"] and build_config["search_method"]["value"] == "Hybrid Search"
         )
@@ -195,23 +233,31 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
         build_config["reranker"]["toggle_value"] = hybrid_enabled
         build_config["reranker"]["toggle_disable"] = is_vector_search
 
-        # Configure lexical terms
         lexical_visible = collection_options["lexical_enabled"] and not is_vector_search
         build_config["lexical_terms"]["show"] = lexical_visible
         build_config["lexical_terms"]["value"] = "" if is_vector_search else build_config["lexical_terms"]["value"]
 
-        # Configure search type and score threshold
         build_config["search_type"]["show"] = is_vector_search
         build_config["search_score_threshold"]["show"] = is_vector_search
 
-        # Force similarity search for hybrid mode or autodetect
         if hybrid_enabled or is_autodetect:
             build_config["search_type"]["value"] = "Similarity"
 
         return build_config
 
     def _detect_hybrid_capabilities(self) -> dict:
-        """Detect available hybrid search and reranking capabilities."""
+        """探测混合检索与重排能力
+
+        契约：返回能力字典，包含可用性与模型列表；
+        副作用：访问 Astra Admin API；
+        失败语义：异常时返回不可用并记录日志。
+        关键路径：1) 获取 admin client 2) 查询 reranker provider 3) 构建模型列表。
+        决策：探测失败时降级为不可用。
+        问题：能力探测失败不应阻断组件加载。
+        方案：捕获异常并返回不可用。
+        代价：隐藏可能可用的功能。
+        重评：当探测结果可缓存或可配置时。
+        """
         environment = self.get_environment(self.environment)
         client = DataAPIClient(environment=environment)
         admin_client = client.get_admin()
@@ -242,7 +288,12 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             }
 
     def _get_collection_options(self, build_config: dict) -> dict:
-        """Retrieve collection-level search options."""
+        """获取集合级检索配置
+
+        契约：返回 `rerank_enabled` 与 `lexical_enabled`；
+        副作用：访问集合元数据；
+        失败语义：异常透传。
+        """
         database = self.get_database_object(api_endpoint=build_config["api_endpoint"]["value"])
         collection = database.get_collection(
             name=build_config["collection_name"]["value"],
@@ -258,6 +309,20 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self):
+        """构建 AstraDBVectorStore 实例
+
+        契约：返回向量库实例；副作用：可能创建集合并写入文档；
+        失败语义：依赖缺失抛 `ImportError`，初始化失败抛 `ValueError`。
+        关键路径（三步）：1) 组装参数 2) 创建 `AstraDBVectorStore` 3) 写入文档。
+        异常流：参数不兼容或 API 初始化失败。
+        性能瓶颈：写入文档与集合自动检测。
+        排障入口：日志与异常消息。
+        决策：在服务端向量化时可不提供本地 embedding。
+        问题：Vectorize 集合不需要本地嵌入模型。
+        方案：按 provider 判断 embedding 是否必须。
+        代价：自动检测逻辑依赖集合元数据。
+        重评：当统一采用显式配置时。
+        """
         try:
             from langchain_astradb import AstraDBVectorStore
             from langchain_astradb.utils.astradb import HybridSearchMode
@@ -268,23 +333,16 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             )
             raise ImportError(msg) from e
 
-        # Get the embedding model and additional params
         embedding_params = {"embedding": self.embedding_model} if self.embedding_model else {}
 
-        # Get the additional parameters
         additional_params = self.astradb_vectorstore_kwargs or {}
 
-        # Get Langflow version and platform information
         __version__ = get_version_info()["version"]
         langflow_prefix = ""
-        # if os.getenv("AWS_EXECUTION_ENV") == "AWS_ECS_FARGATE":  # TODO: More precise way of detecting
-        #     langflow_prefix = "ds-"
 
-        # Get the database object
         database = self.get_database_object()
         autodetect = self.collection_name in database.list_collection_names() and self.autodetect_collection
 
-        # Bundle up the auto-detect parameters
         autodetect_params = {
             "autodetect_collection": autodetect,
             "content_field": (
@@ -300,23 +358,17 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             "ignore_invalid_documents": self.ignore_invalid_documents,
         }
 
-        # Choose HybridSearchMode based on the selected param
         hybrid_search_mode = HybridSearchMode.DEFAULT if self.search_method == "Hybrid Search" else HybridSearchMode.OFF
 
-        # Attempt to build the Vector Store object
         try:
             vector_store = AstraDBVectorStore(
-                # Astra DB Authentication Parameters
                 token=self.token,
                 api_endpoint=database.api_endpoint,
                 namespace=database.keyspace,
                 collection_name=self.collection_name,
                 environment=self.environment,
-                # Hybrid Search Parameters
                 hybrid_search=hybrid_search_mode,
-                # Astra DB Usage Tracking Parameters
                 ext_callers=[(f"{langflow_prefix}langflow", __version__)],
-                # Astra DB Vector Store Parameters
                 **autodetect_params,
                 **embedding_params,
                 **additional_params,
@@ -325,12 +377,22 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             msg = f"Error initializing AstraDBVectorStore: {e}"
             raise ValueError(msg) from e
 
-        # Add documents to the vector store
         self._add_documents_to_vector_store(vector_store)
 
         return vector_store
 
     def _add_documents_to_vector_store(self, vector_store) -> None:
+        """写入文档到 AstraDB 向量库
+
+        契约：读取 `ingest_data` 并写入 `vector_store`；副作用：可能删除旧文档并写入新文档；
+        失败语义：非 `Data` 输入抛 `TypeError`，写入失败抛 `ValueError`。
+        关键路径：1) 规范化输入 2) 处理删除策略 3) 批量写入。
+        决策：当 `deletion_field` 设置时先删除匹配文档。
+        问题：需要保证幂等写入或覆盖旧数据。
+        方案：基于元数据字段进行删除。
+        代价：删除操作增加额外成本。
+        重评：当支持 upsert 或版本化写入时。
+        """
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -368,6 +430,10 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
             self.log("No documents to add to the Vector Store.")
 
     def _map_search_type(self) -> str:
+        """映射搜索类型到后端枚举
+
+        契约：返回后端 search_type；副作用：无；失败语义：未知类型回退 `similarity`。
+        """
         search_type_mapping = {
             "Similarity with score threshold": "similarity_score_threshold",
             "MMR (Max Marginal Relevance)": "mmr",
@@ -376,11 +442,19 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
         return search_type_mapping.get(self.search_type, "similarity")
 
     def _build_search_args(self):
-        # Clean up the search query
+        """构建搜索参数
+
+        契约：返回搜索参数字典或空字典；
+        副作用：无；失败语义：无。
+        决策：无有效查询且无过滤时返回空。
+        问题：避免在无查询时发起搜索。
+        方案：空参数即跳过搜索。
+        代价：需要调用方判断空返回。
+        重评：当需要默认检索行为时。
+        """
         query = self.search_query if isinstance(self.search_query, str) and self.search_query.strip() else None
         lexical_terms = self.lexical_terms or None
 
-        # Check if we have a search query, and if so set the args
         if query:
             args = {
                 "query": query,
@@ -403,6 +477,14 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
         return args
 
     def search_documents(self, vector_store=None) -> list[Data]:
+        """执行检索并返回 `Data` 列表
+
+        契约：使用 `vector_store` 或构建新实例；输出 `list[Data]`；
+        副作用：记录日志并更新 `self.status`；
+        失败语义：搜索异常抛 `ValueError`。
+        关键路径：1) 构建搜索参数 2) 调用 search/metadata_search 3) 转换为 `Data`。
+        排障入口：日志 `Calling vector_store...` 与 `Retrieved documents`。
+        """
         vector_store = vector_store or self.build_vector_store()
 
         self.log(f"Search input: {self.search_query}")
@@ -441,6 +523,10 @@ class AstraDBVectorStoreComponent(AstraDBBaseComponent, LCVectorStoreComponent):
         return data
 
     def get_retriever_kwargs(self):
+        """返回检索器参数
+
+        契约：返回 `search_type` 与 `search_kwargs`；副作用：无；失败语义：无。
+        """
         search_args = self._build_search_args()
 
         return {

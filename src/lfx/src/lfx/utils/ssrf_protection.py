@@ -1,27 +1,14 @@
-"""SSRF (Server-Side Request Forgery) protection utilities.
+"""模块名称：SSRF 防护校验
 
-This module provides validation to prevent SSRF attacks by blocking requests to:
-- Private IP ranges (RFC 1918)
-- Loopback addresses
-- Cloud metadata endpoints (169.254.169.254)
-- Other internal/special-use addresses
-
-IMPORTANT: HTTP Redirects
-    According to OWASP SSRF Prevention Cheat Sheet, HTTP redirects should be DISABLED
-    to prevent bypass attacks where a public URL redirects to internal resources.
-    The API Request component has (as of v1.7.0) follow_redirects=False by default.
-    See: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
-
-Configuration:
-    LANGFLOW_SSRF_PROTECTION_ENABLED: Enable/disable SSRF protection (default: false)
-        TODO: Change default to true in next major version (2.0)
-    LANGFLOW_SSRF_ALLOWED_HOSTS: Comma-separated list of allowed hosts/CIDR ranges
-        Examples: "192.168.1.0/24,internal-api.company.local,10.0.0.5"
-
-TODO: In next major version (2.0):
-    - Change LANGFLOW_SSRF_PROTECTION_ENABLED default to "true"
-    - Remove warning-only mode and enforce blocking
-    - Update documentation to reflect breaking change
+模块目的：阻止对内网/环回/云元数据等敏感地址的请求。
+主要功能：
+- 校验 URL scheme 与 hostname
+- 解析 DNS 并检查 IP 是否落入阻断范围
+- 允许通过白名单放行
+使用场景：对外 URL 请求组件的安全校验。
+关键组件：`validate_url_for_ssrf`、`is_ip_blocked`、`get_allowed_hosts`
+设计背景：防止 SSRF 访问内部资源或元数据端点。
+注意事项：当前默认 warn-only，下一主版本计划改为强制阻断；应禁用重定向以避免绕过。
 """
 
 import functools
@@ -34,165 +21,124 @@ from lfx.services.deps import get_settings_service
 
 
 class SSRFProtectionError(ValueError):
-    """Raised when a URL is blocked due to SSRF protection."""
+    """URL 被 SSRF 防护阻断时抛出。"""
 
 
 @functools.cache
 def get_blocked_ip_ranges() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-    """Get the list of blocked IP ranges, initializing lazily on first access.
+    """获取阻断 IP 段列表（首次访问时惰性初始化）。
 
-    This lazy loading avoids the startup cost of creating all ip_network objects
-    at module import time.
-
-    Returns:
-        list: List of blocked IPv4 and IPv6 network ranges.
+    性能：避免模块导入时创建大量 `ip_network` 对象。
     """
     return [
-        # IPv4 ranges
-        ipaddress.ip_network("0.0.0.0/8"),  # Current network (only valid as source)
-        ipaddress.ip_network("10.0.0.0/8"),  # Private network (RFC 1918)
-        ipaddress.ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
-        ipaddress.ip_network("127.0.0.0/8"),  # Loopback
-        ipaddress.ip_network("169.254.0.0/16"),  # Link-local / AWS metadata
-        ipaddress.ip_network("172.16.0.0/12"),  # Private network (RFC 1918)
-        ipaddress.ip_network("192.0.0.0/24"),  # IETF Protocol Assignments
-        ipaddress.ip_network("192.0.2.0/24"),  # Documentation (TEST-NET-1)
-        ipaddress.ip_network("192.168.0.0/16"),  # Private network (RFC 1918)
-        ipaddress.ip_network("198.18.0.0/15"),  # Benchmarking
-        ipaddress.ip_network("198.51.100.0/24"),  # Documentation (TEST-NET-2)
-        ipaddress.ip_network("203.0.113.0/24"),  # Documentation (TEST-NET-3)
-        ipaddress.ip_network("224.0.0.0/4"),  # Multicast
-        ipaddress.ip_network("240.0.0.0/4"),  # Reserved
-        ipaddress.ip_network("255.255.255.255/32"),  # Broadcast
-        # IPv6 ranges
-        ipaddress.ip_network("::1/128"),  # Loopback
-        ipaddress.ip_network("::/128"),  # Unspecified address
-        ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped IPv6 addresses
-        ipaddress.ip_network("100::/64"),  # Discard prefix
-        ipaddress.ip_network("2001::/23"),  # IETF Protocol Assignments
-        ipaddress.ip_network("2001:db8::/32"),  # Documentation
-        ipaddress.ip_network("fc00::/7"),  # Unique local addresses (ULA)
-        ipaddress.ip_network("fe80::/10"),  # Link-local
-        ipaddress.ip_network("ff00::/8"),  # Multicast
+        # `IPv4` 网段
+        ipaddress.ip_network("0.0.0.0/8"),  # 当前网络（仅作源地址有效）
+        ipaddress.ip_network("10.0.0.0/8"),  # 私有网段（RFC 1918）
+        ipaddress.ip_network("100.64.0.0/10"),  # `CGNAT`（RFC 6598）
+        ipaddress.ip_network("127.0.0.0/8"),  # 回环
+        ipaddress.ip_network("169.254.0.0/16"),  # 本地链路/AWS 元数据
+        ipaddress.ip_network("172.16.0.0/12"),  # 私有网段（RFC 1918）
+        ipaddress.ip_network("192.0.0.0/24"),  # `IETF` 协议分配
+        ipaddress.ip_network("192.0.2.0/24"),  # 文档地址（TEST-NET-1）
+        ipaddress.ip_network("192.168.0.0/16"),  # 私有网段（RFC 1918）
+        ipaddress.ip_network("198.18.0.0/15"),  # 基准测试
+        ipaddress.ip_network("198.51.100.0/24"),  # 文档地址（TEST-NET-2）
+        ipaddress.ip_network("203.0.113.0/24"),  # 文档地址（TEST-NET-3）
+        ipaddress.ip_network("224.0.0.0/4"),  # 组播
+        ipaddress.ip_network("240.0.0.0/4"),  # 保留
+        ipaddress.ip_network("255.255.255.255/32"),  # 广播
+        # `IPv6` 网段
+        ipaddress.ip_network("::1/128"),  # 回环
+        ipaddress.ip_network("::/128"),  # 未指定地址
+        ipaddress.ip_network("::ffff:0:0/96"),  # `IPv4` 映射 `IPv6`
+        ipaddress.ip_network("100::/64"),  # 丢弃前缀
+        ipaddress.ip_network("2001::/23"),  # `IETF` 协议分配
+        ipaddress.ip_network("2001:db8::/32"),  # 文档地址
+        ipaddress.ip_network("fc00::/7"),  # `ULA`
+        ipaddress.ip_network("fe80::/10"),  # 本地链路
+        ipaddress.ip_network("ff00::/8"),  # 组播
     ]
 
 
 def is_ssrf_protection_enabled() -> bool:
-    """Check if SSRF protection is enabled in settings.
-
-    Returns:
-        bool: True if SSRF protection is enabled, False otherwise.
-    """
+    """从配置读取 SSRF 防护开关。"""
     return get_settings_service().settings.ssrf_protection_enabled
 
 
 def get_allowed_hosts() -> list[str]:
-    """Get list of allowed hosts and/or CIDR ranges for SSRF protection.
-
-    Returns:
-        list[str]: Stripped hostnames or CIDR blocks from settings, or empty list if unset.
-    """
+    """获取允许的主机名/CIDR 白名单列表。"""
     allowed_hosts = get_settings_service().settings.ssrf_allowed_hosts
     if not allowed_hosts:
         return []
-    # ssrf_allowed_hosts is already a list[str], just clean and filter entries
+    # 注意：配置已是 list[str]，这里只做清洗。
     return [host.strip() for host in allowed_hosts if host and host.strip()]
 
 
 def is_host_allowed(hostname: str, ip: str | None = None) -> bool:
-    """Check if a hostname or IP is in the allowed hosts list.
-
-    Args:
-        hostname: Hostname to check
-        ip: Optional IP address to check
-
-    Returns:
-        bool: True if hostname or IP is in the allowed list, False otherwise.
-    """
+    """判断主机名或 IP 是否在白名单中。"""
     allowed_hosts = get_allowed_hosts()
     if not allowed_hosts:
         return False
 
-    # Check hostname match
+    # 主机名精确匹配
     if hostname in allowed_hosts:
         return True
 
-    # Check if hostname matches any wildcard patterns
+    # 通配符域名匹配（*.example.com）
     for allowed in allowed_hosts:
         if allowed.startswith("*."):
-            # Wildcard domain matching
-            domain_suffix = allowed[1:]  # Remove the *
+            domain_suffix = allowed[1:]  # 去掉 '*'
             if hostname.endswith(domain_suffix) or hostname == domain_suffix[1:]:
                 return True
 
-    # Check IP-based matching if IP is provided
+    # 如果提供 `IP`，则尝试 `CIDR` 或精确 `IP` 匹配
     if ip:
         try:
             ip_obj = ipaddress.ip_address(ip)
 
-            # Check exact IP match
+            # 精确 IP
             if ip in allowed_hosts:
                 return True
 
-            # Check CIDR range match
+            # `CIDR` 范围
             for allowed in allowed_hosts:
                 try:
-                    # Try to parse as CIDR network
                     if "/" in allowed:
                         network = ipaddress.ip_network(allowed, strict=False)
                         if ip_obj in network:
                             return True
                 except (ValueError, ipaddress.AddressValueError):
-                    # Not a valid CIDR, skip
                     continue
 
         except (ValueError, ipaddress.AddressValueError):
-            # Invalid IP, skip IP-based checks
             pass
 
     return False
 
 
 def is_ip_blocked(ip: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Check if an IP address is in a blocked range.
-
-    Args:
-        ip: IP address to check (string or ipaddress object)
-
-    Returns:
-        bool: True if IP is in a blocked range, False otherwise.
-    """
+    """判断 IP 是否落入阻断网段。"""
     try:
         ip_obj = ipaddress.ip_address(ip) if isinstance(ip, str) else ip
 
-        # Check against all blocked ranges
+        # 与所有阻断网段做包含判断
         return any(ip_obj in blocked_range for blocked_range in get_blocked_ip_ranges())
     except (ValueError, ipaddress.AddressValueError):
-        # If we can't parse the IP, treat it as blocked for safety
+        # 安全：无法解析的 IP 视为阻断
         return True
 
 
 def resolve_hostname(hostname: str) -> list[str]:
-    """Resolve a hostname to its IP addresses.
-
-    Args:
-        hostname: Hostname to resolve
-
-    Returns:
-        list[str]: List of resolved IP addresses
-
-    Raises:
-        SSRFProtectionError: If hostname cannot be resolved
-    """
+    """解析主机名到 IP 列表。"""
     try:
-        # Get address info for both IPv4 and IPv6
+        # 同时获取 IPv4/IPv6
         addr_info = socket.getaddrinfo(hostname, None)
 
-        # Extract unique IP addresses
+        # 去重后的 IP 列表
         ips = []
         for info in addr_info:
             ip = info[4][0]
-            # Remove IPv6 zone ID if present (e.g., "fe80::1%eth0" -> "fe80::1")
+            # 去除 IPv6 zone id
             if "%" in ip:
                 ip = ip.split("%")[0]
             if ip not in ips:
@@ -212,31 +158,14 @@ def resolve_hostname(hostname: str) -> list[str]:
 
 
 def _validate_url_scheme(scheme: str) -> None:
-    """Validate that URL scheme is http or https.
-
-    Args:
-        scheme: URL scheme to validate
-
-    Raises:
-        SSRFProtectionError: If scheme is invalid
-    """
+    """校验 URL scheme 仅允许 http/https。"""
     if scheme not in ("http", "https"):
         msg = f"Invalid URL scheme '{scheme}'. Only http and https are allowed."
         raise SSRFProtectionError(msg)
 
 
 def _validate_hostname_exists(hostname: str | None) -> str:
-    """Validate that hostname exists in the URL.
-
-    Args:
-        hostname: Hostname to validate (may be None)
-
-    Returns:
-        str: The validated hostname
-
-    Raises:
-        SSRFProtectionError: If hostname is missing
-    """
+    """校验 URL 中必须包含 hostname。"""
     if not hostname:
         msg = "URL must contain a valid hostname"
         raise SSRFProtectionError(msg)
@@ -244,26 +173,14 @@ def _validate_hostname_exists(hostname: str | None) -> str:
 
 
 def _validate_direct_ip_address(hostname: str) -> bool:
-    """Validate a direct IP address in the URL.
-
-    Args:
-        hostname: Hostname that may be an IP address
-
-    Returns:
-        bool: True if hostname is a direct IP and validation passed,
-              False if hostname is not an IP (caller should continue with DNS resolution)
-
-    Raises:
-        SSRFProtectionError: If IP is blocked
-    """
+    """校验 URL 中的直连 IP 是否允许。"""
     try:
         ip_obj = ipaddress.ip_address(hostname)
     except ValueError:
-        # Not an IP address, it's a hostname - caller should continue with DNS resolution
+        # 非 IP：交由 DNS 解析流程
         return False
 
-    # It's a direct IP address
-    # Check if IP is in allowlist
+    # 直连 IP：先检查白名单
     if is_host_allowed(hostname, str(ip_obj)):
         logger.debug("IP address %s is in allowlist, bypassing SSRF checks", hostname)
         return True
@@ -276,33 +193,25 @@ def _validate_direct_ip_address(hostname: str) -> bool:
         )
         raise SSRFProtectionError(msg)
 
-    # Direct IP is allowed (public IP)
+    # 直连公网 IP 允许访问
     return True
 
 
 def _validate_hostname_resolution(hostname: str) -> None:
-    """Resolve hostname and validate resolved IPs are not blocked.
-
-    Args:
-        hostname: Hostname to resolve and validate
-
-    Raises:
-        SSRFProtectionError: If resolved IPs are blocked
-    """
-    # Resolve hostname to IP addresses
+    """解析主机名并校验解析 IP 是否被阻断。"""
+    # 先解析 DNS
     try:
         resolved_ips = resolve_hostname(hostname)
     except SSRFProtectionError:
-        # Re-raise SSRF errors as-is
         raise
     except Exception as e:
         msg = f"Failed to resolve hostname {hostname}: {e}"
         raise SSRFProtectionError(msg) from e
 
-    # Check if any resolved IP is blocked
+    # 检查解析出的 IP 是否在阻断范围
     blocked_ips = []
     for ip in resolved_ips:
-        # Check if this specific IP is in the allowlist
+        # `IP` 级别白名单优先
         if is_host_allowed(hostname, ip):
             logger.debug("Resolved IP %s for hostname %s is in allowlist, bypassing SSRF checks", ip, hostname)
             return
@@ -322,29 +231,20 @@ def _validate_hostname_resolution(hostname: str) -> None:
 
 
 def validate_url_for_ssrf(url: str, *, warn_only: bool = True) -> None:
-    """Validate a URL to prevent SSRF attacks.
+    """对 URL 执行 SSRF 防护校验。
 
-    This function performs the following checks:
-    1. Validates the URL scheme (only http/https allowed)
-    2. Validates hostname exists
-    3. Checks if hostname/IP is in allowlist
-    4. If direct IP: validates it's not in blocked ranges
-    5. If hostname: resolves to IPs and validates they're not in blocked ranges
+    关键路径：
+    1) 校验 scheme/hostname
+    2) 白名单命中则直接放行
+    3) 直连 IP 或 DNS 解析后进行阻断判断
 
-    Args:
-        url: URL to validate
-        warn_only: If True, only log warnings instead of raising errors (default: True)
-            TODO: Change default to False in next major version (2.0)
-
-    Raises:
-        SSRFProtectionError: If the URL is blocked due to SSRF protection (only if warn_only=False)
-        ValueError: If the URL is malformed
+    契约：`warn_only=True` 仅记录告警；为 False 时阻断并抛错。
     """
-    # Skip validation if SSRF protection is disabled
+    # `SSRF` 关闭时直接放行
     if not is_ssrf_protection_enabled():
         return
 
-    # Parse URL
+    # 解析 URL
     try:
         parsed = urlparse(url)
     except Exception as e:
@@ -352,26 +252,26 @@ def validate_url_for_ssrf(url: str, *, warn_only: bool = True) -> None:
         raise ValueError(msg) from e
 
     try:
-        # Validate scheme
+        # 校验 scheme
         _validate_url_scheme(parsed.scheme)
         if parsed.scheme not in ("http", "https"):
             return
 
-        # Validate hostname exists
+        # 校验 hostname 存在
         hostname = _validate_hostname_exists(parsed.hostname)
 
-        # Check if hostname/IP is in allowlist (early return if allowed)
+        # 白名单命中则直接放行
         if is_host_allowed(hostname):
             logger.debug("Hostname %s is in allowlist, bypassing SSRF checks", hostname)
             return
 
-        # Validate direct IP address or resolve hostname
+        # 校验直连 IP 或进行 DNS 解析
         is_direct_ip = _validate_direct_ip_address(hostname)
         if is_direct_ip:
-            # Direct IP was handled (allowed or exception raised)
+            # 直连 IP 已处理完毕
             return
 
-        # Not a direct IP, resolve hostname and validate
+        # 主机名解析并校验
         _validate_hostname_resolution(hostname)
     except SSRFProtectionError as e:
         if warn_only:

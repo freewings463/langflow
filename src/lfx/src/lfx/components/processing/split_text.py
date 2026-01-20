@@ -1,3 +1,13 @@
+"""文本切分组件。
+
+本模块将 Data/DataFrame/Message 中的文本按分隔符切分为多个块。
+主要功能包括：
+- 统一转换为 LangChain 文档
+- 可配置块大小与重叠
+
+注意事项：输入为空会抛 `TypeError`。
+"""
+
 from langchain_text_splitters import CharacterTextSplitter
 
 from lfx.custom.custom_component.component import Component
@@ -9,6 +19,12 @@ from lfx.utils.util import unescape_string
 
 
 class SplitTextComponent(Component):
+    """文本切分组件封装。
+
+    契约：输入为 Data/DataFrame/Message；输出为 DataFrame（每行一个块）。
+    副作用：无。
+    失败语义：输入类型不支持或为空时抛 `TypeError`。
+    """
     display_name: str = "Split Text"
     description: str = "Split text into chunks based on specified criteria."
     documentation: str = "https://docs.langflow.org/split-text"
@@ -70,10 +86,11 @@ class SplitTextComponent(Component):
     ]
 
     def _docs_to_data(self, docs) -> list[Data]:
+        """将 LangChain 文档转换为 Data 列表。"""
         return [Data(text=doc.page_content, data=doc.metadata) for doc in docs]
 
     def _fix_separator(self, separator: str) -> str:
-        """Fix common separator issues and convert to proper format."""
+        """修正常见分隔符写法。"""
         if separator == "/n":
             return "\n"
         if separator == "/t":
@@ -81,6 +98,13 @@ class SplitTextComponent(Component):
         return separator
 
     def split_text_base(self):
+        """执行文本切分并返回 LangChain 文档列表。
+
+        关键路径（三步）：
+        1) 规范化分隔符并准备文档输入；
+        2) 构建切分器并执行切分；
+        3) 返回切分后的文档列表。
+        """
         separator = self._fix_separator(self.separator)
         separator = unescape_string(separator)
 
@@ -117,14 +141,14 @@ class SplitTextComponent(Component):
                     msg = f"Invalid input type in collection: {e}"
                     raise TypeError(msg) from e
         try:
-            # Convert string 'False'/'True' to boolean
+            # 实现：将字符串布尔值转换为 bool
             keep_sep = self.keep_separator
             if isinstance(keep_sep, str):
                 if keep_sep.lower() == "false":
                     keep_sep = False
                 elif keep_sep.lower() == "true":
                     keep_sep = True
-                # 'start' and 'end' are kept as strings
+                # 注意：start/end 保持为字符串
 
             splitter = CharacterTextSplitter(
                 chunk_overlap=self.chunk_overlap,
@@ -138,4 +162,5 @@ class SplitTextComponent(Component):
             raise TypeError(msg) from e
 
     def split_text(self) -> DataFrame:
+        """将切分结果转换为 DataFrame。"""
         return DataFrame(self._docs_to_data(self.split_text_base()))

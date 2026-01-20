@@ -1,7 +1,17 @@
-"""Unified Web Search Component.
+"""
+模块名称：统一搜索组件
 
-This component consolidates Web Search, News Search, and RSS Reader into a single
-component with tabs for different search modes.
+本模块将网页搜索、新闻搜索与 `RSS` 读取合并为一个组件，通过模式切换实现不同检索能力。
+主要功能包括：
+- `Web` 模式：`DuckDuckGo` 网页搜索
+- `News` 模式：`Google News` `RSS` 检索
+- `RSS` 模式：直接解析订阅源
+
+关键组件：
+- `WebSearchComponent`
+
+设计背景：降低组件数量，统一入口并提升配置一致性。
+注意事项：不同模式下输入字段含义不同，需关注 `search_mode`。
 """
 
 import re
@@ -19,6 +29,14 @@ from lfx.utils.request_utils import get_user_agent
 
 
 class WebSearchComponent(Component):
+    """统一搜索组件
+
+    契约：
+    - 输入：搜索模式与对应参数
+    - 输出：`DataFrame`
+    - 副作用：发起外部请求并记录日志
+    - 失败语义：请求失败时返回错误 `DataFrame`
+    """
     display_name = "Web Search"
     description = "Search the web, news, or RSS feeds."
     documentation: str = "https://docs.langflow.org/web-search"
@@ -104,30 +122,43 @@ class WebSearchComponent(Component):
         super().__init__(**kwargs)
 
     def update_build_config(self, build_config: dict, field_value: Any, field_name: str | None = None) -> dict:
-        """Update input visibility based on search mode."""
+        """根据搜索模式更新输入字段
+
+        契约：
+        - 输入：构建配置、字段值与字段名
+        - 输出：更新后的构建配置
+        - 副作用：更新字段描述与显示名
+        - 失败语义：无
+        """
         if field_name == "search_mode":
-            # Show/hide inputs based on search mode
+            # 注意：根据模式控制字段信息
             is_news = field_value == "News"
             is_rss = field_value == "RSS"
 
-            # Update query field info based on mode
+            # 注意：按模式更新查询字段说明
             if is_rss:
                 build_config["query"]["info"] = "RSS feed URL to parse"
                 build_config["query"]["display_name"] = "RSS Feed URL"
             elif is_news:
                 build_config["query"]["info"] = "Search keywords for news articles."
                 build_config["query"]["display_name"] = "Search Query"
-            else:  # Web
+            else:  # `Web` 模式
                 build_config["query"]["info"] = "Keywords to search for"
                 build_config["query"]["display_name"] = "Search Query"
 
-            # Keep news-specific fields as advanced (matching original News Search component)
-            # They remain advanced=True in all modes, just like in the original component
+            # 注意：新闻相关字段保持 `advanced=True`，与原组件一致
 
         return build_config
 
     def validate_url(self, string: str) -> bool:
-        """Validate URL format."""
+        """校验 `URL` 格式
+
+        契约：
+        - 输入：字符串
+        - 输出：`bool`
+        - 副作用：无
+        - 失败语义：无
+        """
         url_regex = re.compile(
             r"^(https?:\/\/)?" r"(www\.)?" r"([a-zA-Z0-9.-]+)" r"(\.[a-zA-Z]{2,})?" r"(:\d+)?" r"(\/[^\s]*)?$",
             re.IGNORECASE,
@@ -135,7 +166,14 @@ class WebSearchComponent(Component):
         return bool(url_regex.match(string))
 
     def ensure_url(self, url: str) -> str:
-        """Ensure URL has proper protocol."""
+        """确保 `URL` 具有协议前缀
+
+        契约：
+        - 输入：`URL` 字符串
+        - 输出：规范化 `URL`
+        - 副作用：无
+        - 失败语义：无效 `URL` 时抛 `ValueError`
+        """
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
         if not self.validate_url(url):
@@ -144,15 +182,45 @@ class WebSearchComponent(Component):
         return url
 
     def _sanitize_query(self, query: str) -> str:
-        """Sanitize search query."""
+        """清理搜索词中的危险字符
+
+        契约：
+        - 输入：搜索词
+        - 输出：清理后的搜索词
+        - 副作用：无
+        - 失败语义：无
+        """
         return re.sub(r'[<>"\']', "", query.strip())
 
     def clean_html(self, html_string: str) -> str:
-        """Remove HTML tags from text."""
+        """移除 `HTML` 标签并返回纯文本
+
+        契约：
+        - 输入：`HTML` 字符串
+        - 输出：纯文本
+        - 副作用：无
+        - 失败语义：无
+        """
         return BeautifulSoup(html_string, "html.parser").get_text(separator=" ", strip=True)
 
     def perform_web_search(self) -> DataFrame:
-        """Perform DuckDuckGo web search."""
+        """执行 `DuckDuckGo` 网页搜索
+
+        关键路径（三步）：
+        1) 清理查询词并构建请求
+        2) 解析搜索结果页
+        3) 拉取目标页面并返回内容
+
+        异常流：请求失败时返回错误 `DataFrame`。
+        性能瓶颈：多次网络请求。
+        排障入口：`self.status` 与异常信息。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`DataFrame`
+        - 副作用：发起外部请求
+        - 失败语义：请求失败时返回错误 `DataFrame`
+        """
         query = self._sanitize_query(self.query)
         if not query:
             msg = "Empty search query"
@@ -208,7 +276,14 @@ class WebSearchComponent(Component):
         return DataFrame(pd.DataFrame(results))
 
     def perform_news_search(self) -> DataFrame:
-        """Perform Google News search."""
+        """执行 `Google News` 搜索
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`DataFrame`
+        - 副作用：发起外部请求
+        - 失败语义：请求失败时返回错误 `DataFrame`
+        """
         query = getattr(self, "query", "")
         hl = getattr(self, "hl", "en-US") or "en-US"
         gl = getattr(self, "gl", "US") or "US"
@@ -217,19 +292,19 @@ class WebSearchComponent(Component):
 
         ceid = f"{gl}:{hl.split('-')[0]}"
 
-        # Build RSS URL based on parameters
+        # 根据参数构建 `RSS` `URL`
         if topic:
-            # Topic-based feed
+            # 主题订阅
             base_url = f"https://news.google.com/rss/headlines/section/topic/{quote_plus(topic.upper())}"
             params = f"?hl={hl}&gl={gl}&ceid={ceid}"
             rss_url = base_url + params
         elif location:
-            # Location-based feed
+            # 地理位置订阅
             base_url = f"https://news.google.com/rss/headlines/section/geo/{quote_plus(location)}"
             params = f"?hl={hl}&gl={gl}&ceid={ceid}"
             rss_url = base_url + params
         elif query:
-            # Keyword search feed
+            # 关键词搜索订阅
             base_url = "https://news.google.com/rss/search?q="
             query_encoded = quote_plus(query)
             params = f"&hl={hl}&gl={gl}&ceid={ceid}"
@@ -270,7 +345,14 @@ class WebSearchComponent(Component):
         return DataFrame(pd.DataFrame(articles))
 
     def perform_rss_read(self) -> DataFrame:
-        """Read RSS feed."""
+        """读取 `RSS` 订阅
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`DataFrame`
+        - 副作用：发起外部请求
+        - 失败语义：请求失败时返回错误 `DataFrame`
+        """
         rss_url = getattr(self, "query", "")
         if not rss_url:
             return DataFrame(
@@ -284,7 +366,7 @@ class WebSearchComponent(Component):
                 msg = "Empty response received"
                 raise ValueError(msg)
 
-            # Validate XML
+            # 校验 `XML` 有效性
             try:
                 BeautifulSoup(response.content, "xml")
             except Exception as e:
@@ -307,13 +389,20 @@ class WebSearchComponent(Component):
             for item in items
         ]
 
-        # Ensure DataFrame has correct columns even if empty
+        # 注意：即使为空也保持固定列结构
         df_articles = pd.DataFrame(articles, columns=["title", "link", "published", "summary"])
         self.log(f"Fetched {len(df_articles)} articles.")
         return DataFrame(df_articles)
 
     def perform_search(self) -> DataFrame:
-        """Main search method that routes to appropriate search function based on mode."""
+        """根据模式路由到对应搜索实现
+
+        契约：
+        - 输入：无
+        - 输出：`DataFrame`
+        - 副作用：发起外部请求
+        - 失败语义：未知模式回退到网页搜索
+        """
         search_mode = getattr(self, "search_mode", "Web")
 
         if search_mode == "Web":
@@ -322,5 +411,5 @@ class WebSearchComponent(Component):
             return self.perform_news_search()
         if search_mode == "RSS":
             return self.perform_rss_read()
-        # Fallback to web search
+        # 兜底回退到网页搜索
         return self.perform_web_search()

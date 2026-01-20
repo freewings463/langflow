@@ -1,3 +1,21 @@
+"""
+模块名称：base_file
+
+本模块提供文件类组件的通用基类与处理流程，统一路径解析、bundle 解包与结果汇总。
+主要功能包括：
+- 功能1：处理本地与对象存储（如 `s3`）文件路径的解析与校验。
+- 功能2：递归解包 `zip/tar/tgz` 等文件包并过滤不可用文件。
+- 功能3：将文件处理结果汇总为 `Data`/`DataFrame`/`Message` 输出。
+
+使用场景：文件输入类组件需要复用同一解析/解包流程时。
+关键组件：
+- 类 `BaseFileComponent`：文件处理流程的标准化基类。
+- 类 `BaseFile`：文件与 `Data` 元数据的轻量封装。
+
+设计背景：多种文件组件共享同一处理链路，降低重复实现与行为偏差。
+注意事项：对象存储路径不做本地 `exists()` 校验；bundle 解包需防路径穿越。
+"""
+
 import ast
 import shutil
 import tarfile
@@ -26,17 +44,31 @@ if TYPE_CHECKING:
 
 
 class BaseFileComponent(Component, ABC):
-    """Base class for handling file processing components.
+    """文件类组件基类，封装解析、校验、解包与结果汇总流程。
 
-    This class provides common functionality for resolving, validating, and
-    processing file paths. Child classes must define valid file extensions
-    and implement the `process_files` method.
-
-    # TODO: May want to subclass for local and remote files
+    契约：子类必须声明 `VALID_EXTENSIONS` 并实现 `process_files`；输入来自 `path`/`file_path`，输出为 `Data`/`Message`/`DataFrame`。
+    关键路径：
+    1) `_validate_and_resolve_paths` 构建 `BaseFile`；
+    2) `_unpack_and_collect_files` 递归解包与收集；
+    3) `process_files` 产出 `Data` 并由 `load_files_*` 汇总。
+    决策：
+    问题：文件组件重复实现路径与解包逻辑导致行为不一致。
+    方案：提供统一基类与扩展点（仅由子类实现解析）。
+    代价：子类需遵守固定输入/输出约束。
+    重评：当新增存储类型或流程阶段超出当前扩展点时。
     """
 
     class BaseFile:
-        """Internal class to represent a file with additional metadata."""
+        """文件与 `Data` 元数据的轻量封装。
+
+        契约：`data` 必须是 `Data` 或 `Data` 列表；`path` 为待处理文件路径。
+        关键路径：封装 `data/path` 并在合并阶段使用 `merge_data`。
+        决策：
+        问题：处理链路需要在单个对象中携带路径与多份 `Data`。
+        方案：封装为 `BaseFile` 并在合并阶段使用 `merge_data`。
+        代价：额外的封装对象与拷贝成本。
+        重评：当 `Data` 结构改为流式或分页返回时。
+        """
 
         def __init__(
             self,
@@ -46,6 +78,16 @@ class BaseFileComponent(Component, ABC):
             delete_after_processing: bool = False,
             silent_errors: bool = False,
         ):
+            """初始化文件封装对象。
+
+            契约：`data` 仅接受 `Data` 或其列表；`delete_after_processing` 为 True 时由外层清理。
+            关键路径：标准化 `data` 列表并记录删除与静默错误策略。
+            决策：
+            问题：处理阶段需携带删除策略与静默错误开关。
+            方案：在对象内保存 `delete_after_processing` 与 `_silent_errors`。
+            代价：生命周期由调用方负责，需确保清理时机一致。
+            重评：当删除策略迁移到统一资源管理器时。
+            """
             self._data = data if isinstance(data, list) else [data]
             self.path = path
             self.delete_after_processing = delete_after_processing
@@ -53,10 +95,30 @@ class BaseFileComponent(Component, ABC):
 
         @property
         def data(self) -> list[Data]:
+            """获取当前文件关联的 `Data` 列表。
+
+            契约：始终返回列表；为空时返回空列表。
+            关键路径：直接暴露内部 `_data` 列表。
+            决策：
+            问题：调用方需要统一遍历语义。
+            方案：使用列表作为唯一返回形态。
+            代价：单条数据需进行列表包装。
+            重评：当 `Data` 统一为惰性迭代器时。
+            """
             return self._data or []
 
         @data.setter
         def data(self, value: Data | list[Data]):
+            """设置 `Data` 列表并强制类型约束。
+
+            契约：仅接受 `Data` 或其列表；非法类型在 `silent_errors=False` 时抛 `ValueError`。
+            关键路径：类型收敛 -> 验证 -> 赋值。
+            决策：
+            问题：避免混入非 `Data` 对象导致下游序列化失败。
+            方案：在 setter 中做类型收敛与验证。
+            代价：运行期增加一次类型检查。
+            重评：当引入静态类型检查并覆盖运行期边界时。
+            """
             if isinstance(value, Data):
                 self._data = [value]
             elif isinstance(value, list) and all(isinstance(item, Data) for item in value):
@@ -67,14 +129,15 @@ class BaseFileComponent(Component, ABC):
                     raise ValueError(msg)
 
         def merge_data(self, new_data: Data | list[Data] | None) -> list[Data]:
-            r"""Generate a new list of Data objects by merging `new_data` into the current `data`.
+            """合并新 `Data` 到当前 `data`，生成组合后的列表。
 
-            Args:
-                new_data (Data | list[Data] | None): The new Data object(s) to merge into each existing Data object.
-                    If None, the current `data` is returned unchanged.
-
-            Returns:
-                list[Data]: A new list of Data objects with `new_data` merged.
+            契约：`new_data` 为 `Data`/列表/None；返回列表长度为笛卡尔积或原始列表。
+            关键路径：标准化 `new_data` -> 逐项合并字典。
+            决策：
+            问题：需要在保留原始 `Data` 的同时叠加新字段。
+            方案：对每个原始 `Data` 与新 `Data` 做字典合并。
+            代价：在数据量大时产生额外对象与内存占用。
+            重评：当 `Data` 支持增量合并或视图模式时。
             """
             if new_data is None:
                 return self.data
@@ -94,6 +157,16 @@ class BaseFileComponent(Component, ABC):
             ]
 
         def __str__(self):
+            """生成用于日志与调试的摘要字符串。
+
+            契约：不抛异常；文本预览最多 50 字符。
+            关键路径：根据 `data` 数量选择不同预览策略。
+            决策：
+            问题：需要在日志中快速定位文件及数据规模。
+            方案：短预览 + 数量摘要。
+            代价：可能截断导致信息不完整。
+            重评：当日志系统支持结构化字段展示时。
+            """
             if len(self.data) == 0:
                 text_preview = ""
             elif len(self.data) == 1:
@@ -106,16 +179,26 @@ class BaseFileComponent(Component, ABC):
                 text_preview = f"{len(self.data)} data objects"
             return f"BaseFile(path={self.path}, delete_after_processing={self.delete_after_processing}, {text_preview}"
 
-    # Subclasses can override these class variables
-    VALID_EXTENSIONS: list[str] = []  # To be overridden by child classes
+    # 注意：子类通过覆写类变量定义支持的扩展名集合。
+    VALID_EXTENSIONS: list[str] = []  # 注意：由子类覆写
     IGNORE_STARTS_WITH = [".", "__MACOSX"]
 
     SERVER_FILE_PATH_FIELDNAME = "file_path"
     SUPPORTED_BUNDLE_EXTENSIONS = ["zip", "tar", "tgz", "bz2", "gz"]
 
     def __init__(self, *args, **kwargs):
+        """初始化基类并同步输入提示。
+
+        契约：基于 `valid_extensions` 更新 `FileInput.file_types/info`。
+        关键路径：读取扩展名 -> 更新输入类型 -> 更新提示文案。
+        决策：
+        问题：不同子类的扩展名需反映到 UI 提示。
+        方案：在实例化时动态填充 `FileInput` 的类型与说明。
+        代价：运行期修改输入描述，需保持与 `VALID_EXTENSIONS` 一致。
+        重评：当 UI 提示改为静态配置或注册表驱动时。
+        """
         super().__init__(*args, **kwargs)
-        # Dynamically update FileInput to include valid extensions and bundles
+        # 实现：根据子类扩展名动态更新 `FileInput` 的文件类型提示。
         self.get_base_inputs()[0].file_types = [
             *self.valid_extensions,
             *self.SUPPORTED_BUNDLE_EXTENSIONS,
@@ -131,8 +214,8 @@ class BaseFileComponent(Component, ABC):
         FileInput(
             name="path",
             display_name="Files",
-            fileTypes=[],  # Dynamically set in __init__
-            info="",  # Dynamically set in __init__
+            fileTypes=[],  # 注意：在 `__init__` 动态设置
+            info="",  # 注意：在 `__init__` 动态设置
             required=False,
             list=True,
             value=[],
@@ -193,44 +276,57 @@ class BaseFileComponent(Component, ABC):
 
     @abstractmethod
     def process_files(self, file_list: list[BaseFile]) -> list[BaseFile]:
-        """Processes a list of files.
+        """处理文件列表并回填解析结果。
 
-        Args:
-            file_list (list[BaseFile]): A list of file objects.
-
-        Returns:
-            list[BaseFile]: A list of BaseFile objects with updated `data`.
+        契约：输入/输出均为 `BaseFile` 列表；子类需更新 `BaseFile.data`。
+        关键路径：
+        1) 读取 `BaseFile.path`；
+        2) 解析并生成 `Data`；
+        3) 返回更新后的列表。
+        异常流：解析失败可抛异常；`silent_errors=True` 时建议返回空 `Data`。
+        排障入口：建议在子类记录 `file_path` 与解析阶段关键字。
+        决策：
+        问题：不同文件格式解析差异大，难以在基类内统一。
+        方案：保留扩展点，仅由子类实现具体解析。
+        代价：子类必须遵循 `BaseFile` 协议与错误语义。
+        重评：当解析策略可统一到插件化框架时。
         """
 
     def load_files_base(self) -> list[Data]:
-        """Loads and parses file(s), including unpacked file bundles.
+        """加载文件并处理 bundle，返回解析后的 `Data` 列表。
 
-        Returns:
-            list[Data]: Parsed data from the processed files.
+        契约：读取 `path`/`file_path`，输出 `Data` 列表；副作用：创建临时目录、可能删除源文件。
+        关键路径：
+        1) 校验路径并生成 `BaseFile`；
+        2) 递归解包与过滤文件；
+        3) 调用 `process_files` 并扁平化输出。
+        异常流：路径不存在/扩展不支持/解析失败会抛异常。
+        性能瓶颈：大目录递归与压缩包解包。
+        排障入口：日志关键字 `Resolved storage path`、`Unpacked bundle`。
+        决策：
+        问题：临时目录与删除策略容易在异常路径中泄漏。
+        方案：统一在 `finally` 中清理与删除。
+        代价：必须保证 `final_files` 初始化以免清理逻辑报错。
+        重评：当引入统一资源管理器时。
         """
         self._temp_dirs: list[TemporaryDirectory] = []
-        final_files = []  # Initialize to avoid UnboundLocalError
+        final_files = []  # 注意：提前初始化，避免异常路径触发 `UnboundLocalError`。
         try:
-            # Step 1: Validate the provided paths
             files = self._validate_and_resolve_paths()
 
-            # Step 2: Handle bundles recursively
             all_files = self._unpack_and_collect_files(files)
 
-            # Step 3: Final validation of file types
             final_files = self._filter_and_mark_files(all_files)
 
-            # Step 4: Process files
             processed_files = self.process_files(final_files)
 
-            # Extract and flatten Data objects to return
+            # 实现：扁平化 `Data` 列表返回给下游。
             return [data for file in processed_files for data in file.data if file.data]
 
         finally:
-            # Delete temporary directories
+            # 实现：集中清理临时目录与删除标记文件，避免异常路径泄漏资源。
             for temp_dir in self._temp_dirs:
                 temp_dir.cleanup()
-            # Delete files marked for deletion
             for file in final_files:
                 if file.delete_after_processing and file.path.exists():
                     if file.path.is_dir():
@@ -239,10 +335,15 @@ class BaseFileComponent(Component, ABC):
                         file.path.unlink()
 
     def load_files_core(self) -> list[Data]:
-        """Load files and return as Data objects.
+        """加载文件并保证至少返回一条 `Data`。
 
-        Returns:
-            list[Data]: List of Data objects from all files
+        契约：输出非空列表；若无数据则返回包含空 `Data()` 的列表。
+        关键路径：调用 `load_files_base` 并在空结果时补位。
+        决策：
+        问题：下游组件默认期望至少一条 `Data`。
+        方案：为空时返回 `Data()` 占位。
+        代价：可能掩盖真正的“无输入”场景。
+        重评：当下游可显式处理空列表时。
         """
         data_list = self.load_files_base()
         if not data_list:
@@ -250,7 +351,20 @@ class BaseFileComponent(Component, ABC):
         return data_list
 
     def _extract_file_metadata(self, data_item) -> dict:
-        """Extract metadata from a data item with file_path."""
+        """从带 `file_path` 的数据对象中抽取文件元数据。
+
+        契约：输入需包含 `file_path` 属性；输出包含 `filename`/`file_size`/`mimetype` 等字段。
+        关键路径：
+        1) 根据存储类型获取大小；
+        2) 由扩展名推断 `mimetype`；
+        3) 合并 `data` 内同名字段。
+        异常流：获取大小失败时返回 0，不抛异常。
+        决策：
+        问题：文件元信息可能来自路径与 `Data.data` 两处。
+        方案：先推断基础元信息，再允许 `data` 覆盖。
+        代价：调用方提供的字段可能覆盖自动推断结果。
+        重评：当 metadata 统一由存储服务提供时。
+        """
         metadata: dict[str, Any] = {}
         if not hasattr(data_item, "file_path"):
             return metadata
@@ -264,7 +378,7 @@ class BaseFileComponent(Component, ABC):
             try:
                 file_size = get_file_size(file_path)
             except (FileNotFoundError, ValueError):
-                # If we can't get file size, set to 0 or omit
+                # 注意：无法获取大小时回退为 0，避免阻断主流程。
                 file_size = 0
         else:
             try:
@@ -273,16 +387,16 @@ class BaseFileComponent(Component, ABC):
             except OSError:
                 file_size = 0
 
-        # Basic file metadata
+        # 实现：基础元信息字段。
         metadata["filename"] = filename
         metadata["file_size"] = file_size
 
-        # Add MIME type from extension
+        # 实现：基于扩展名推断 `mimetype`。
         extension = filename.split(".")[-1]
         if extension:
             metadata["mimetype"] = build_content_type_from_extension(extension)
 
-        # Copy additional metadata from data if available
+        # 注意：允许 `data` 内字段覆盖推断结果。
         if hasattr(data_item, "data") and isinstance(data_item.data, dict):
             metadata_fields = ["mimetype", "file_size", "created_time", "modified_time"]
             for field in metadata_fields:
@@ -292,23 +406,42 @@ class BaseFileComponent(Component, ABC):
         return metadata
 
     def _extract_text(self, data_item) -> str:
-        """Extract text content from a data item."""
+        """从 `Data` 或类 Data 对象提取文本内容。
+
+        契约：返回字符串；优先 `get_text()`，其次 `data['text']`，最后 `str()`。
+        关键路径：`get_text()` -> `data['text']` -> `str()`。
+        决策：
+        问题：不同 `Data` 实现的文本入口不一致。
+        方案：按优先级尝试多种来源。
+        代价：`str()` 可能包含非用户可读内容。
+        重评：当 `Data` 接口统一暴露 `text` 属性时。
+        """
         if isinstance(data_item.data, dict):
             text = getattr(data_item, "get_text", lambda: None)() or data_item.data.get("text")
             return text if text is not None else str(data_item)
         return str(data_item)
 
     def load_files_message(self) -> Message:
-        """Load files and return as Message.
+        """加载文件并拼接为单个 `Message`。
 
-        Returns:
-          Message: Message containing all file data
+        契约：返回 `Message`；`text` 为多文件内容拼接；metadata 取首条 `Data`。
+        关键路径：
+        1) `load_files_core` 获取 `Data` 列表；
+        2) 抽取首条元数据；
+        3) 拼接文本与降级序列化。
+        异常流：单条转换失败会降级为 `str()`；核心加载异常会向上抛出。
+        排障入口：可检查 `Message` 的 `metadata` 字段。
+        决策：
+        问题：多文件 metadata 冲突难以合并。
+        方案：仅使用首条 `Data` 的 metadata。
+        代价：可能丢失其他文件的元信息。
+        重评：当需要多文件聚合元数据时。
         """
         data_list = self.load_files_core()
         if not data_list:
             return Message()
 
-        # Extract metadata from the first data item
+        # 注意：元信息只取首条，避免多文件冲突导致字段覆盖。
         metadata = self._extract_file_metadata(data_list[0])
 
         sep: str = getattr(self, "separator", "\n\n") or "\n\n"
@@ -319,33 +452,34 @@ class BaseFileComponent(Component, ABC):
                 if data_text and isinstance(data_text, str):
                     parts.append(data_text)
                 elif data_text:
-                    # get_text() returned non-string, convert it
+                    # 注意：`get_text()` 返回非字符串时统一转为 `str()` 以避免拼接失败。
                     parts.append(str(data_text))
                 elif isinstance(d.data, dict):
-                    # convert the data dict to a readable string
+                    # 注意：无文本字段时序列化 `data`，便于排障定位结构内容。
                     parts.append(orjson.dumps(d.data, option=orjson.OPT_INDENT_2, default=str).decode())
                 else:
                     parts.append(str(d))
             except Exception:  # noqa: BLE001
-                # Final fallback - just try to convert to string
-                # TODO: Consider downstream error case more. Should this raise an error?
+                # 排障：单条异常不阻断整体输出，降级为 `str()` 保留最小可见性。
                 parts.append(str(d))
 
         return Message(text=sep.join(parts), **metadata)
 
     def load_files_path(self) -> Message:
-        """Returns a Message containing file paths from loaded files.
+        """返回包含文件路径的 `Message`。
 
-        Returns:
-            Message: Message containing file paths
+        契约：`Message.text` 为路径列表换行拼接；仅返回可用路径。
+        关键路径：解析路径 -> 按存储类型筛选 -> 拼接输出。
+        决策：
+        问题：对象存储路径在本地不可 `exists()` 校验。
+        方案：`s3` 模式跳过本地存在性检查。
+        代价：路径可能在输出时已失效。
+        重评：当存储服务提供批量存在性校验接口时。
         """
         files = self._validate_and_resolve_paths()
         settings = get_settings_service().settings
 
-        # For S3 storage, paths are virtual storage keys that don't exist on the local filesystem.
-        # Skip the exists() check for S3 files to preserve them in the output.
-        # Validation of S3 file existence is deferred until file processing (see _validate_and_resolve_paths).
-        # If a file was removed from S3, it will fail when attempting to read/process it later.
+        # 决策：`s3` 路径是虚拟 key，不走本地 `exists()`；存在性校验延迟到读取阶段。
         if settings.storage_type == "s3":
             paths = [file.path.as_posix() for file in files]
         else:
@@ -354,20 +488,32 @@ class BaseFileComponent(Component, ABC):
         return Message(text="\n".join(paths) if paths else "")
 
     def load_files_structured_helper(self, file_path: str) -> list[dict] | None:
+        """读取结构化文件并返回行级字典列表。
+
+        契约：仅支持 `.csv/.xlsx/.parquet`；返回 `list[dict]` 或 `None`。
+        关键路径：
+        1) 判断存储类型与扩展名；
+        2) 使用 pandas 读取（S3 使用 `BytesIO`）；
+        3) `to_dict("records")` 输出。
+        异常流：读取失败会由 pandas 抛异常。
+        决策：
+        问题：对象存储文件无法直接走路径 API。
+        方案：先下载字节再用 `BytesIO` 读取。
+        代价：大文件会占用内存并增加延迟。
+        重评：当存储服务支持流式读取时。
+        """
         if not file_path:
             return None
 
-        # Get file extension in lowercase
+        # 注意：只依据扩展名选择读取器，无法识别伪装类型。
         ext = Path(file_path).suffix.lower()
 
         settings = get_settings_service().settings
 
-        # For S3 storage, download file bytes first
+        # 决策：`s3` 模式先下载字节流，避免依赖本地路径。
         if settings.storage_type == "s3":
-            # Download file content from S3
             content = run_until_complete(read_file_bytes(file_path))
 
-            # Map file extensions to pandas read functions that support BytesIO
             if ext == ".csv":
                 result = pd.read_csv(BytesIO(content))
             elif ext == ".xlsx":
@@ -379,42 +525,48 @@ class BaseFileComponent(Component, ABC):
 
             return result.to_dict("records")
 
-        # Local storage - read directly from filesystem
+        # 实现：本地存储直接走 pandas 读取路径，避免重复拷贝。
         file_readers: dict[str, Callable[[str], pd.DataFrame]] = {
             ".csv": pd.read_csv,
             ".xlsx": pd.read_excel,
             ".parquet": pd.read_parquet,
-            # TODO: sqlite and json support?
+            # TODO：补充 sqlite/json 等结构化读取支持。
         }
 
-        # Get the appropriate reader function or None
         reader = file_readers.get(ext)
 
         if reader:
-            result = reader(file_path)  # MyPy now knows reader is callable
+            result = reader(file_path)  # 注意：`reader` 在此已被类型收敛为可调用。
             return result.to_dict("records")
 
         return None
 
     def load_files_structured(self) -> DataFrame:
-        """Load files and return as DataFrame with structured content.
+        """加载结构化文件并返回 `DataFrame`。
 
-        Returns:
-            DataFrame: DataFrame containing structured content from all files
+        契约：仅首条 `Data` 的 `file_path` 会触发结构化读取；否则返回首条 `data` 字典。
+        关键路径：
+        1) `load_files_core` 获取 `Data`；
+        2) 若 `file_path` 指向表格文件则走 pandas 读取；
+        3) 否则直接使用 `data` 字典。
+        异常流：pandas 解析异常向上抛出。
+        决策：
+        问题：结构化解析成本高，且多文件合并语义不明确。
+        方案：仅处理首条文件并返回行级结果。
+        代价：忽略后续文件内容。
+        重评：当需要多文件合并与 schema 对齐时。
         """
         data_list = self.load_files_core()
         if not data_list:
             return DataFrame()
 
-        # Get the file path from the first Data object
+        # 注意：只取首条 `Data` 的 `file_path` 作为结构化读取入口。
         file_path = data_list[0].data.get(self.SERVER_FILE_PATH_FIELDNAME, None)
 
-        # If file_path is provided and is a CSV, read it directly
         if file_path and str(file_path).lower().endswith((".csv", ".xlsx", ".parquet")):
             rows = self.load_files_structured_helper(file_path)
         else:
-            # Convert Data objects to a list of dictionaries
-            # TODO: Parse according to docling standards
+            # 注意：非结构化文件默认直接输出 `data` 字段。
             rows = [data_list[0].data]
 
         self.status = DataFrame(rows)
@@ -422,7 +574,17 @@ class BaseFileComponent(Component, ABC):
         return DataFrame(rows)
 
     def parse_string_to_dict(self, s: str) -> dict:
-        # Try JSON first (handles true/false/null)
+        """将字符串解析为字典，兼容 JSON 与 Python 字面量。
+
+        契约：返回字典；解析失败时返回 `{"value": s}`。
+        关键路径：`orjson.loads` -> `ast.literal_eval` -> 回退包装。
+        决策：
+        问题：上游可能提供 JSON 或 Python 字面量字符串。
+        方案：先用 `orjson`，失败后用 `ast.literal_eval`。
+        代价：仅支持安全字面量，复杂对象会被降级。
+        重评：当输入格式统一为 JSON 时。
+        """
+        # 实现：优先解析 JSON（兼容 true/false/null）。
         try:
             result = orjson.loads(s)
             if isinstance(result, dict):
@@ -430,7 +592,7 @@ class BaseFileComponent(Component, ABC):
         except orjson.JSONDecodeError:
             pass
 
-        # Fall back to Python literal evaluation
+        # 实现：JSON 失败后回退到 Python 字面量解析。
         try:
             result = ast.literal_eval(s)
             if isinstance(result, dict):
@@ -438,20 +600,25 @@ class BaseFileComponent(Component, ABC):
         except (SyntaxError, ValueError):
             pass
 
-        # If all parsing fails, return the fallback
+        # 注意：全部失败时返回原始字符串包装，避免抛异常影响流程。
         return {"value": s}
 
     def load_files_json(self) -> Data:
-        """Load files and return as a single Data object containing JSON content.
+        """加载文件并返回包含 JSON 内容的单个 `Data`。
 
-        Returns:
-            Data: Data object containing JSON content from all files
+        契约：从首条 `Data` 的 `text_key` 读取字符串并解析为字典；返回 `Data(data=dict)`。
+        关键路径：读取首条 `Data` -> 解析字符串 -> 写入 `Data`。
+        决策：
+        问题：JSON 作为文本加载后仍需结构化解析。
+        方案：使用 `parse_string_to_dict` 统一解析入口。
+        代价：只处理首条 `Data`，忽略多文件场景。
+        重评：当 JSON 合并策略确定时。
         """
         data_list = self.load_files_core()
         if not data_list:
             return Data()
 
-        # Grab the JSON data
+        # 注意：仅使用首条 `Data` 的 `text_key` 作为 JSON 来源。
         json_data = data_list[0].data[data_list[0].text_key]
         json_data = self.parse_string_to_dict(json_data)
 
@@ -460,22 +627,29 @@ class BaseFileComponent(Component, ABC):
         return Data(data=json_data)
 
     def load_files(self) -> DataFrame:
-        """Load files and return as DataFrame.
+        """加载文件并返回 `DataFrame`（行=文件）。
 
-        Returns:
-            DataFrame: DataFrame containing all file data
+        契约：每条 `Data` 转为一行字典；包含 `file_path` 与 `text`（若存在）。
+        关键路径：
+        1) 读取 `Data` 列表；
+        2) 展平 `Data.data` 并补充 `file_path`；
+        3) 汇总为 `DataFrame`。
+        决策：
+        问题：`Data` 结构不固定，需提供统一表格输出。
+        方案：将 `Data.data` 展平成行字典并补充 `file_path`。
+        代价：嵌套结构会被原样嵌入，可能导致下游解析成本上升。
+        重评：当有统一 schema 与字段映射规则时。
         """
         data_list = self.load_files_core()
         if not data_list:
             return DataFrame()
 
-        # Convert Data objects to a list of dictionaries
         all_rows = []
         for data in data_list:
             file_path = data.data.get(self.SERVER_FILE_PATH_FIELDNAME)
             row = dict(data.data) if data.data else {}
 
-            # Add text if available, otherwise use the data's text property
+            # 注意：`text` 优先使用显式字段，避免 `Data.text` 的惰性计算成本。
             if "text" in data.data:
                 row["text"] = data.data["text"]
             if file_path:
@@ -488,22 +662,29 @@ class BaseFileComponent(Component, ABC):
 
     @property
     def valid_extensions(self) -> list[str]:
-        """Returns valid file extensions for the class.
+        """返回该组件允许的文件扩展名（不含点号）。
 
-        This property can be overridden by child classes to provide specific
-        extensions.
-
-        Returns:
-            list[str]: A list of valid file extensions without the leading dot.
+        契约：子类通过覆写 `VALID_EXTENSIONS` 提供扩展名列表。
+        关键路径：直接读取类变量 `VALID_EXTENSIONS`。
+        决策：
+        问题：不同组件支持的文件类型不同。
+        方案：将扩展名配置为类级属性，便于复用与静态检查。
+        代价：运行期仍需二次校验实际文件类型。
+        重评：当支持动态注册扩展名时。
         """
         return self.VALID_EXTENSIONS
 
     @property
     def ignore_starts_with(self) -> list[str]:
-        """Returns prefixes to ignore when unpacking file bundles.
+        """返回解包时需要忽略的路径前缀列表。
 
-        Returns:
-            list[str]: A list of prefixes to ignore when unpacking file bundles.
+        契约：用于过滤隐藏文件与 `__MACOSX` 等系统目录。
+        关键路径：直接返回 `IGNORE_STARTS_WITH`。
+        决策：
+        问题：打包文件常包含无效或系统生成内容。
+        方案：通过前缀过滤减少噪声。
+        代价：可能忽略用户确实需要的隐藏文件。
+        重评：当提供显式白名单策略时。
         """
         return self.IGNORE_STARTS_WITH
 
@@ -513,19 +694,32 @@ class BaseFileComponent(Component, ABC):
         data_list: list[Data | None],
         path_field: str = SERVER_FILE_PATH_FIELDNAME,
     ) -> list[BaseFile]:
-        r"""Rolls up Data objects into corresponding BaseFile objects in order given by `base_files`.
+        r"""按 `base_files` 顺序回填 `Data` 列表。
 
-        Args:
-            base_files (list[BaseFile]): The original BaseFile objects.
-            data_list (list[Data | None]): The list of data to be aggregated into the BaseFile objects.
-            path_field (str): The field name on the data_list objects that holds the file path as a string.
-
-        Returns:
-            list[BaseFile]: A new list of BaseFile objects with merged `data` attributes.
+        契约：`data_list` 中必须包含 `path_field`；输出顺序与 `base_files` 保持一致。
+        关键路径：
+        1) 按 `path_field` 分组 `Data`；
+        2) 对每个 `BaseFile` 合并对应数据；
+        3) 返回新的 `BaseFile` 列表。
+        异常流：缺失 `path_field` 且 `silent_errors=False` 时抛 `ValueError`。
+        排障入口：日志包含缺失字段的 `Data` 内容。
+        决策：
+        问题：处理结果需要与原文件顺序严格对齐。
+        方案：以 `base_files` 为主序，按路径回填。
+        代价：若 `path_field` 不唯一会产生合并膨胀。
+        重评：当引入稳定主键或索引映射时。
         """
 
         def _build_data_dict(data_list: list[Data | None], data_list_field: str) -> dict[str, list[Data]]:
-            """Builds a dictionary grouping Data objects by a specified field."""
+            """按字段分组 `Data` 以便后续回填。
+
+            契约：返回 `path_field -> Data列表` 映射。
+            决策：
+            问题：多文件混合输出需要快速定位归属。
+            方案：预构建字典降低查找成本。
+            代价：占用额外内存。
+            重评：当数据量超出内存时。
+            """
             data_dict: dict[str, list[Data]] = {}
             for data in data_list:
                 if data is None:
@@ -542,10 +736,9 @@ class BaseFileComponent(Component, ABC):
                 data_dict.setdefault(key, []).append(data)
             return data_dict
 
-        # Build the data dictionary from the provided data_list
         data_dict = _build_data_dict(data_list, path_field)
 
-        # Generate the updated list of BaseFile objects, preserving the order of base_files
+        # 注意：保持输入顺序，避免输出重排影响下游对齐。
         updated_base_files = []
         for base_file in base_files:
             new_data_list = data_dict.get(str(base_file.path), [])
@@ -561,11 +754,22 @@ class BaseFileComponent(Component, ABC):
         return updated_base_files
 
     def _file_path_as_list(self) -> list[Data]:
+        """将 `file_path` 输入规整为 `Data` 列表。
+
+        契约：支持 `Data`/`Message`/列表；非法类型在 `silent_errors=False` 时抛 `ValueError`。
+        关键路径：标准化输入 -> 转换 `Message` -> 过滤非 `Data`。
+        决策：
+        问题：组件输入允许多种类型，需统一处理链路。
+        方案：将 `Message.text` 转换为 `Data` 并统一返回列表。
+        代价：输入类型越多，运行期校验越多。
+        重评：当输入类型收敛为单一 `Data` 时。
+        """
         file_path = self.file_path
         if not file_path:
             return []
 
         def _message_to_data(message: Message) -> Data:
+            # 注意：`Message.text` 视为服务端文件路径。
             return Data(**{self.SERVER_FILE_PATH_FIELDNAME: message.text})
 
         if isinstance(file_path, Data):
@@ -594,13 +798,20 @@ class BaseFileComponent(Component, ABC):
         return file_paths
 
     def _validate_and_resolve_paths(self) -> list[BaseFile]:
-        """Validate that all input paths exist and are valid, and create BaseFile instances.
+        """校验并解析输入路径，生成 `BaseFile` 列表。
 
-        Returns:
-            list[BaseFile]: A list of valid BaseFile instances.
-
-        Raises:
-            ValueError: If any path does not exist.
+        契约：返回有效 `BaseFile`；本地路径不存在且 `silent_errors=False` 时抛 `ValueError`。
+        关键路径：
+        1) 统一解析 `path`/`file_path` 输入；
+        2) 对本地路径进行存在性校验；
+        3) 生成 `BaseFile` 并附带删除策略。
+        异常流：`file_path` 缺失字段或路径不存在会抛异常（可被 `silent_errors` 抑制）。
+        排障入口：日志关键字 `Resolved storage path`、`get_full_path failed`。
+        决策：
+        问题：对象存储路径不可用本地 `exists()` 校验。
+        方案：`s3` 模式延迟校验到读取阶段。
+        代价：错误会在更晚阶段暴露。
+        重评：当存储服务提供轻量存在性探测时。
         """
         resolved_files = []
 
@@ -608,22 +819,19 @@ class BaseFileComponent(Component, ABC):
             path_str = str(path)
             settings = get_settings_service().settings
 
-            # When using object storage (S3), file paths are storage keys (e.g., "<flow_id>/<filename>")
-            # that don't exist on the local filesystem. We defer validation until file processing.
-            # For local storage, validate the file exists immediately to fail fast.
+            # 决策：`s3` 模式不做本地存在性校验，避免误判虚拟 key。
             if settings.storage_type == "s3":
                 resolved_files.append(
                     BaseFileComponent.BaseFile(data, Path(path_str), delete_after_processing=delete_after_processing)
                 )
             else:
-                # Check if path looks like a storage path (flow_id/filename format)
-                # If so, use get_full_path to resolve it to the actual storage location
+                # 注意：非绝对路径可能是存储路径格式（`flow_id/filename`），优先走 `get_full_path`。
                 if "/" in path_str and not Path(path_str).is_absolute():
                     try:
                         resolved_path = Path(self.get_full_path(path_str))
                         self.log(f"Resolved storage path '{path_str}' to '{resolved_path}'")
                     except (ValueError, AttributeError) as e:
-                        # Fallback to resolve_path if get_full_path fails
+                        # 注意：`get_full_path` 失败回退到 `resolve_path`，便于兼容旧组件。
                         self.log(f"get_full_path failed for '{path_str}': {e}, falling back to resolve_path")
                         resolved_path = Path(self.resolve_path(path_str))
                 else:
@@ -641,7 +849,7 @@ class BaseFileComponent(Component, ABC):
         file_path = self._file_path_as_list()
 
         if self.path and not file_path:
-            # Wrap self.path into a Data object
+            # 实现：将 `path` 规范化为 `Data`，与 `file_path` 处理流程一致。
             if isinstance(self.path, list):
                 for path in self.path:
                     data_obj = Data(data={self.SERVER_FILE_PATH_FIELDNAME: path})
@@ -670,13 +878,20 @@ class BaseFileComponent(Component, ABC):
         return resolved_files
 
     def _unpack_and_collect_files(self, files: list[BaseFile]) -> list[BaseFile]:
-        """Recursively unpack bundles and collect files into BaseFile instances.
+        """递归解包目录/压缩包并收集为 `BaseFile`。
 
-        Args:
-            files (list[BaseFile]): List of BaseFile instances to process.
-
-        Returns:
-            list[BaseFile]: Updated list of BaseFile instances.
+        契约：输入为 `BaseFile` 列表，输出仅包含文件路径（不含目录）。
+        关键路径：
+        1) 目录递归展开；
+        2) 支持的 bundle 解包到临时目录；
+        3) 直到列表中不再包含目录或 bundle。
+        异常流：解包失败会抛异常；临时目录由 `load_files_base` 统一清理。
+        性能瓶颈：深层目录遍历与大包解压。
+        决策：
+        问题：bundle 内可能仍包含目录或二级压缩包。
+        方案：递归调用自身直到收敛。
+        代价：递归深度增加，需注意极端输入。
+        重评：当引入迭代式解包器或深度上限控制时。
         """
         collected_files = []
 
@@ -686,7 +901,7 @@ class BaseFileComponent(Component, ABC):
             data = file.data
 
             if path.is_dir():
-                # Recurse into directories
+                # 实现：目录递归展开，保持与原 `BaseFile` 相同的删除策略。
                 collected_files.extend(
                     [
                         BaseFileComponent.BaseFile(
@@ -699,7 +914,7 @@ class BaseFileComponent(Component, ABC):
                     ]
                 )
             elif path.suffix[1:] in self.SUPPORTED_BUNDLE_EXTENSIONS:
-                # Unpack supported bundles
+                # 注意：解包结果写入临时目录，后续由 `load_files_base` 统一清理。
                 temp_dir = TemporaryDirectory()
                 self._temp_dirs.append(temp_dir)
                 temp_dir_path = Path(temp_dir.name)
@@ -719,7 +934,7 @@ class BaseFileComponent(Component, ABC):
             else:
                 collected_files.append(file)
 
-        # Recurse again if any directories or bundles are left in the list
+        # 注意：如果仍含目录或 bundle，继续递归直到收敛。
         if any(
             file.path.is_dir() or file.path.suffix[1:] in self.SUPPORTED_BUNDLE_EXTENSIONS for file in collected_files
         ):
@@ -728,43 +943,46 @@ class BaseFileComponent(Component, ABC):
         return collected_files
 
     def _unpack_bundle(self, bundle_path: Path, output_dir: Path):
-        """Unpack a bundle into a temporary directory.
+        """解包压缩包到临时目录，并阻断路径穿越。
 
-        Args:
-            bundle_path (Path): Path to the bundle.
-            output_dir (Path): Directory where files will be extracted.
-
-        Raises:
-            ValueError: If the bundle format is unsupported or cannot be read.
+        契约：仅支持 `zip`/`tar` 系列；不允许解包到 `output_dir` 之外。
+        关键路径：识别格式 -> 安全解包 -> 校验路径边界。
+        异常流：不支持格式或检测到路径穿越时抛 `ValueError`。
+        安全：对每个成员执行 `is_relative_to` 校验，避免 ZipSlip。
+        决策：
+        问题：解包路径可能被恶意构造导致覆盖系统文件。
+        方案：逐成员校验并拒绝越界路径。
+        代价：解包速度略慢。
+        重评：当使用系统级安全解包库时。
         """
 
         def _safe_extract_zip(bundle: ZipFile, output_dir: Path):
-            """Safely extract ZIP files."""
+            """安全解包 ZIP，拒绝路径穿越。"""
             for member in bundle.namelist():
-                # Filter out resource fork information for automatic production of mac
+                # 注意：跳过 `._` 资源分叉文件，避免噪声。
                 if Path(member).name.startswith("._"):
                     continue
                 member_path = output_dir / member
-                # Ensure no path traversal outside `output_dir`
+                # 安全：防止 `../` 路径穿越写出 `output_dir`。
                 if not member_path.resolve().is_relative_to(output_dir.resolve()):
                     msg = f"Attempted Path Traversal in ZIP File: {member}"
                     raise ValueError(msg)
                 bundle.extract(member, path=output_dir)
 
         def _safe_extract_tar(bundle: tarfile.TarFile, output_dir: Path):
-            """Safely extract TAR files."""
+            """安全解包 TAR，拒绝路径穿越。"""
             for member in bundle.getmembers():
-                # Filter out resource fork information for automatic production of mac
+                # 注意：跳过 `._` 资源分叉文件，避免噪声。
                 if Path(member.name).name.startswith("._"):
                     continue
                 member_path = output_dir / member.name
-                # Ensure no path traversal outside `output_dir`
+                # 安全：防止 `../` 路径穿越写出 `output_dir`。
                 if not member_path.resolve().is_relative_to(output_dir.resolve()):
                     msg = f"Attempted Path Traversal in TAR File: {member.name}"
                     raise ValueError(msg)
                 bundle.extract(member, path=output_dir)
 
-        # Check and extract based on file type
+        # 注意：仅允许 `zip`/`tar` 变种格式，其他格式直接拒绝。
         if is_zipfile(bundle_path):
             with ZipFile(bundle_path, "r") as zip_bundle:
                 _safe_extract_zip(zip_bundle, output_dir)
@@ -776,16 +994,16 @@ class BaseFileComponent(Component, ABC):
             raise ValueError(msg)
 
     def _filter_and_mark_files(self, files: list[BaseFile]) -> list[BaseFile]:
-        """Validate file types and filter out invalid files.
+        """按扩展名过滤文件并标记忽略列表。
 
-        Args:
-            files (list[BaseFile]): List of BaseFile instances.
-
-        Returns:
-            list[BaseFile]: Validated BaseFile instances.
-
-        Raises:
-            ValueError: If unsupported files are encountered and `ignore_unsupported_extensions` is False.
+        契约：返回仅包含允许扩展名的 `BaseFile`；忽略列表会写入日志。
+        关键路径：本地 `is_file` 校验 -> 扩展名过滤 -> 输出结果。
+        异常流：当 `ignore_unsupported_extensions=False` 且遇到不支持扩展名时抛 `ValueError`。
+        决策：
+        问题：本地文件可提前过滤，`s3` 路径无法验证是否为文件。
+        方案：`s3` 模式跳过 `is_file()` 校验，仅做扩展名判断。
+        代价：无效 `s3` 路径会在后续读取阶段失败。
+        重评：当存储服务提供轻量文件类型校验时。
         """
         settings = get_settings_service().settings
         is_s3_storage = settings.storage_type == "s3"
@@ -793,16 +1011,15 @@ class BaseFileComponent(Component, ABC):
         ignored_files = []
 
         for file in files:
-            # For local storage, verify the path is actually a file
-            # For S3 storage, paths are virtual keys that don't exist locally
+            # 注意：`s3` 为虚拟 key，无法本地判定 `is_file()`。
             if not is_s3_storage and not file.path.is_file():
                 self.log(f"Not a file: {file.path.name}")
                 continue
 
-            # Validate file extension
+            # 注意：扩展名不在白名单时按配置决定忽略或失败。
             extension = file.path.suffix[1:].lower() if file.path.suffix else ""
             if extension not in self.valid_extensions:
-                # For local storage, optionally ignore unsupported extensions
+                # 注意：本地存储可按配置忽略不支持扩展名。
                 if not is_s3_storage and self.ignore_unsupported_extensions:
                     ignored_files.append(file.path.name)
                     continue

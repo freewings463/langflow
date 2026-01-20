@@ -1,3 +1,19 @@
+"""
+模块名称：Vectara 向量存储组件
+
+模块目的：提供 Vectara 向量存储与相似度检索能力，并输出结构化 `Data`。
+使用场景：将文档写入 Vectara，并基于查询进行向量检索。
+主要功能包括：
+- 构建 Vectara VectorStore 实例并按需写入文档
+- 执行相似度检索并转换为 `Data` 列表
+
+关键组件：
+- `VectaraVectorStoreComponent`：向量存储组件入口
+
+设计背景：复用 LangChain VectorStore 接口以保持组件一致性。
+注意：缺失依赖 `langchain-community` 或鉴权失败会导致构建/调用异常。
+"""
+
 from typing import TYPE_CHECKING
 
 from langchain_community.vectorstores import Vectara
@@ -12,7 +28,17 @@ if TYPE_CHECKING:
 
 
 class VectaraVectorStoreComponent(LCVectorStoreComponent):
-    """Vectara Vector Store with search capabilities."""
+    """Vectara 向量存储组件。
+
+    契约：输入 Vectara 账号信息与可选文档，输出可检索的 VectorStore。
+    关键路径：`build_vector_store` 构建实例并写入文档，`search_documents` 执行检索。
+
+    决策：通过 `langchain_community.vectorstores.Vectara` 适配 Vectara
+    问题：需要统一向量存储接口并复用现有工具链
+    方案：使用 LangChain 社区封装作为适配层
+    代价：受上游接口与返回结构稳定性影响
+    重评：当上游 API 变更或需原生 SDK 特性时
+    """
 
     display_name: str = "Vectara"
     description: str = "Vectara Vector Store with search capabilities"
@@ -40,7 +66,20 @@ class VectaraVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> Vectara:
-        """Builds the Vectara object."""
+        """构建并返回 Vectara VectorStore 实例。
+
+        契约：依赖 `vectara_customer_id`/`vectara_corpus_id`/`vectara_api_key`。
+        副作用：可能写入向量存储（当 `ingest_data` 非空）。
+
+        关键路径（三步）：
+        1) 校验依赖并创建 Vectara 客户端
+        2) 处理并写入待入库文档
+        3) 返回 VectorStore 供后续检索
+
+        注意：缺少依赖会抛 `ImportError`；鉴权失败在调用阶段抛异常。
+        性能：写入耗时与 `ingest_data` 规模线性相关。
+        排障：关注导入错误与 Vectara 返回的鉴权/配额错误。
+        """
         try:
             from langchain_community.vectorstores import Vectara
         except ImportError as e:
@@ -57,7 +96,11 @@ class VectaraVectorStoreComponent(LCVectorStoreComponent):
         return vectara
 
     def _add_documents_to_vector_store(self, vector_store: Vectara) -> None:
-        """Adds documents to the Vector Store."""
+        """将待入库数据转换并写入 VectorStore。
+
+        契约：从 `ingest_data` 读取数据；为空时仅更新 `status`。
+        失败语义：数据格式不兼容会导致写入异常向外传播。
+        """
         ingest_data: list | Data | DataFrame = self.ingest_data
         if not ingest_data:
             self.status = "No documents to add to Vectara"
@@ -82,6 +125,20 @@ class VectaraVectorStoreComponent(LCVectorStoreComponent):
             self.status = "No valid documents to add to Vectara"
 
     def search_documents(self) -> list[Data]:
+        """执行相似度检索并返回结构化结果。
+
+        契约：当 `search_query` 非空时返回 `Data` 列表，否则返回空列表。
+        副作用：调用外部 Vectara 服务进行检索（网络 I/O）。
+
+        关键路径（三步）：
+        1) 构建/获取 VectorStore
+        2) 执行相似度检索
+        3) 转换为 `Data` 并写入 `status`
+
+        注意：空查询会直接返回空列表并写入状态提示。
+        性能：检索耗时受 `number_of_results` 与远端服务影响。
+        排障：关注 Vectara 返回的错误信息与组件 `status`。
+        """
         vector_store = self.build_vector_store()
 
         if self.search_query and isinstance(self.search_query, str) and self.search_query.strip():

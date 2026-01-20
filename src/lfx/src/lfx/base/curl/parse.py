@@ -1,15 +1,18 @@
-r"""This file contains a fix for the implementation of the `uncurl` library, which is available at https://github.com/spulec/uncurl.git.
+"""
+模块名称：curl 命令解析器
 
-The `uncurl` library provides a way to parse and convert cURL commands into Python requests.
-However, there are some issues with the original implementation that this file aims to fix.
+本模块提供将 `curl` 命令解析为请求上下文的能力，主要用于把 CLI 输入转换为 Langflow 内部可消费的请求参数。主要功能包括：
+- 解析 `-X/-d/-H/-u/-x` 等参数为结构化字段
+- 抽取 `cookie` 头并生成 `dict` 形式的 Cookie
+- 归一化行续写 `\\` 的多行命令
 
-The `parse_context` function in this file takes a cURL command as input and returns a `ParsedContext` object,
-which contains the parsed information from the cURL command, such as the HTTP method, URL, headers, cookies, etc.
+关键组件：
+- `ParsedArgs`：原始参数抽取结果（近似 `curl` 级别）
+- `ParsedContext`：请求级上下文（方法/头/代理/认证）
+- `parse_curl_command` / `parse_context`：解析入口
 
-The `normalize_newlines` function is a helper function that replaces the line continuation character ("\")
-followed by a newline with a space.
-
-
+设计背景：上游 `uncurl` 在头部/代理/续行等场景的解析不稳定，本实现保留兼容的同时做本地修补。
+注意事项：本模块只做字符串解析，不发起网络请求；`verify` 字段沿用 `-k/--insecure` 的布尔值语义，调用方需自行映射到实际 TLS 校验开关。
 """
 
 import re
@@ -20,6 +23,13 @@ from typing import NamedTuple
 
 
 class ParsedArgs(NamedTuple):
+    """`curl` 原始参数的结构化抽取结果。
+
+    契约：字段名与常见 `curl` 选项一一对应，`method` 默认 `get`，未出现的字段保持 `None`/空集合。
+    失败语义：本类型不做校验；非法组合或解析失败由上层函数抛错。
+    副作用：无。
+    """
+
     command: str | None
     url: str | None
     data: str | None
@@ -37,6 +47,13 @@ class ParsedArgs(NamedTuple):
 
 
 class ParsedContext(NamedTuple):
+    """请求级上下文模型，供上层构造请求使用。
+
+    契约：`headers`/`cookies` 为已去除多余空白的字典；`auth` 为二元组或 `None`；`proxy` 为 `requests` 风格代理字典。
+    失败语义：本类型不做校验；语义错误由调用方处理。
+    副作用：无。
+    """
+
     method: str
     url: str
     data: str | None
@@ -48,10 +65,24 @@ class ParsedContext(NamedTuple):
 
 
 def normalize_newlines(multiline_text):
+    """契约：将 `curl` 的续行格式 `\\` + 换行替换为单个空格，保持参数语义不变。"""
+
     return multiline_text.replace(" \\\n", " ")
 
 
 def parse_curl_command(curl_command):
+    """将单条 `curl` 命令解析为结构化参数，供后续上下文构建使用。
+
+    契约：输入为完整 `curl` 字符串；输出 `ParsedArgs`，字段与选项保持一对一映射。
+    失败语义：非法命令抛 `ValueError`；`shlex.split` 在引号不匹配时可能抛 `ValueError`。
+    副作用：无（纯解析）。
+
+    关键路径（三步）：
+    1) 归一化换行并用 `shlex` 分词
+    2) 扫描参数并填充模板字段
+    3) 合并 `-X` 指定的方法并返回结果
+    """
+
     tokens = shlex.split(normalize_newlines(curl_command))
     tokens = [token for token in tokens if token and token != " "]
     if tokens and "curl" not in tokens[0]:
@@ -121,29 +152,37 @@ def parse_curl_command(curl_command):
 
 
 def parse_context(curl_command):
+    """将 `curl` 字符串转为请求上下文，供上层请求构造使用。
+
+    契约：输出 `ParsedContext`，其中 `cookies` 来自 `cookie` 头解析，`proxy` 依据 `-x/-U` 组合生成。
+    失败语义：非法命令抛 `ValueError`；头字段缺少 `:` 可能触发 `ValueError`；`-u` 解析异常会抛 `AttributeError`。
+    副作用：无（仅构造数据结构）。
+
+    关键路径（三步）：
+    1) 解析命令并推断方法/数据体
+    2) 规范化头部并提取 Cookie
+    3) 组装认证与代理配置并返回
+    """
+
     method = "get"
     if not curl_command or not curl_command.strip():
         return ParsedContext(
             method=method, url="", data=None, headers={}, cookies={}, verify=True, auth=None, proxy=None
         )
 
-    # Strip whitespace to handle formatting issues
     curl_command = curl_command.strip()
     parsed_args: ParsedArgs = parse_curl_command(curl_command)
 
-    # Safeguard against missing parsed_args attributes
     post_data = getattr(parsed_args, "data", None) or getattr(parsed_args, "data_binary", None)
     if post_data:
         method = "post"
 
-    # Prioritize explicit method from -X flag
     if getattr(parsed_args, "method", None):
         method = parsed_args.method.lower()
 
     cookie_dict = OrderedDict()
     quoted_headers = OrderedDict()
 
-    # Process headers safely
     for curl_header in getattr(parsed_args, "headers", []):
         if curl_header.startswith(":"):
             occurrence = [m.start() for m in re.finditer(r":", curl_header)]
@@ -158,12 +197,10 @@ def parse_context(curl_command):
         else:
             quoted_headers[header_key] = header_value.strip()
 
-    # Add auth
     user = getattr(parsed_args, "user", None)
     if user:
         user = tuple(user.split(":"))
 
-    # Add proxy and its authentication if available
     proxies = getattr(parsed_args, "proxy", None)
     if proxies and getattr(parsed_args, "proxy_user", None):
         proxies = {
@@ -178,11 +215,12 @@ def parse_context(curl_command):
 
     return ParsedContext(
         method=method,
-        url=getattr(parsed_args, "url", ""),  # Default to empty string if URL is missing
+        url=getattr(parsed_args, "url", ""),
         data=post_data,
         headers=quoted_headers,
         cookies=cookie_dict,
-        verify=getattr(parsed_args, "insecure", True),  # Default to True if missing
+        # 注意：此处 `verify` 直接等于 `-k/--insecure` 的布尔值，与常见请求库语义相反。
+        verify=getattr(parsed_args, "insecure", True),
         auth=user,
         proxy=proxies,
     )

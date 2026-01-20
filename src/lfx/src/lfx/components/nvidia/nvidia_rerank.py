@@ -1,3 +1,13 @@
+"""NVIDIA Rerank 组件。
+
+本模块封装 NVIDIA 重排模型，用于对候选文档进行相关性重排。
+主要功能包括：
+- 选择重排模型并动态刷新可用模型列表
+- 构建 `NVIDIARerank` 压缩器实例
+
+注意事项：依赖 `langchain-nvidia-ai-endpoints` 且需有效 `api_key`。
+"""
+
 from typing import Any
 
 from lfx.base.compressors.model import LCCompressorComponent
@@ -9,6 +19,13 @@ from lfx.template.field.base import Output
 
 
 class NvidiaRerankComponent(LCCompressorComponent):
+    """NVIDIA Rerank 组件封装。
+
+    契约：输入为重排参数；输出为 `BaseDocumentCompressor` 实例。
+    副作用：可能触发模型列表刷新。
+    失败语义：依赖缺失抛 `ImportError`；刷新失败抛 `ValueError`。
+    """
+
     display_name = "NVIDIA Rerank"
     description = "Rerank documents using the NVIDIA API."
     icon = "NVIDIA"
@@ -43,6 +60,11 @@ class NvidiaRerankComponent(LCCompressorComponent):
     ]
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据 `base_url` 变化刷新可用模型选项。
+
+        契约：输入为 `build_config` 与字段值；输出更新后的 `build_config`。
+        失败语义：获取模型列表失败抛 `ValueError`。
+        """
         if field_name == "base_url" and field_value:
             try:
                 build_model = self.build_compressor()
@@ -55,6 +77,11 @@ class NvidiaRerankComponent(LCCompressorComponent):
         return build_config
 
     def build_compressor(self) -> BaseDocumentCompressor:
+        """构建 NVIDIA 重排压缩器实例。
+
+        契约：读取输入参数并返回 `NVIDIARerank`。
+        失败语义：依赖缺失抛 `ImportError`。
+        """
         try:
             from langchain_nvidia_ai_endpoints import NVIDIARerank
         except ImportError as e:

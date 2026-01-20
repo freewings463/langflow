@@ -1,3 +1,22 @@
+"""
+模块名称：MCP 连接与工具装配工具集
+
+本模块提供 MCP 客户端连接、会话复用、HTTP 头校验与工具封装能力，主要用于
+Langflow 与 MCP 服务器的交互。主要功能包括：
+- 创建支持可选 SSL 校验的 `httpx` 客户端
+- 规范化/校验请求头与 MCP 名称
+- 管理 MCP 会话生命周期与清理策略
+- 将 MCP 工具包装为 `StructuredTool` 以供运行
+
+关键组件：
+- `MCPSessionManager`：会话复用与清理核心
+- `MCPStdioClient`/`MCPStreamableHttpClient`：两种传输模式的客户端
+- `update_tools`：拉取远端工具并装配为可调用对象
+
+设计背景：需要在长连接与多上下文之间平衡资源复用与可靠性，避免会话泄漏。
+注意事项：多处逻辑依赖网络与外部进程，失败时常以 `ValueError` 反馈并记录日志。
+"""
+
 import asyncio
 import contextlib
 import inspect
@@ -25,9 +44,9 @@ from lfx.schema.json_schema import create_input_schema_from_json_schema
 from lfx.services.deps import get_settings_service
 from lfx.utils.async_helpers import run_until_complete
 
-HTTP_ERROR_STATUS_CODE = httpx_codes.BAD_REQUEST  # HTTP status code for client errors
+HTTP_ERROR_STATUS_CODE = httpx_codes.BAD_REQUEST
 
-# HTTP status codes used in validation
+# 校验场景使用的 HTTP 状态码
 HTTP_NOT_FOUND = 404
 HTTP_METHOD_NOT_ALLOWED = 405
 HTTP_NOT_ACCEPTABLE = 406
@@ -36,12 +55,17 @@ HTTP_INTERNAL_SERVER_ERROR = 500
 HTTP_UNAUTHORIZED = 401
 HTTP_FORBIDDEN = 403
 
-# MCP Session Manager constants - lazy loaded
+# MCP 会话管理相关配置（懒加载）
 _mcp_settings_cache: dict[str, Any] = {}
 
 
 def _get_mcp_setting(key: str, default: Any = None) -> Any:
-    """Lazy load MCP settings from settings service."""
+    """懒加载 MCP 配置项。
+
+    契约：输入 `key/default`，输出配置值；未命中返回 `default`。
+    副作用：首次读取会访问设置服务并写入 `_mcp_settings_cache`。
+    失败语义：设置服务异常将向上抛出。
+    """
     if key not in _mcp_settings_cache:
         settings = get_settings_service().settings
         _mcp_settings_cache[key] = getattr(settings, key, default)
@@ -49,26 +73,42 @@ def _get_mcp_setting(key: str, default: Any = None) -> Any:
 
 
 def get_max_sessions_per_server() -> int:
-    """Get maximum number of sessions per server to prevent resource exhaustion."""
+    """读取单服务器最大会话数。
+
+    契约：输出整数上限，用于限制会话数量。
+    副作用：读取设置服务并缓存。
+    失败语义：设置服务异常将向上抛出。
+    """
     return _get_mcp_setting("mcp_max_sessions_per_server")
 
 
 def get_session_idle_timeout() -> int:
-    """Get 5 minutes idle timeout for sessions."""
+    """读取会话空闲超时秒数。
+
+    契约：输出空闲超时秒数，供清理逻辑使用。
+    副作用：读取设置服务并缓存。
+    失败语义：设置服务异常将向上抛出。
+    """
     return _get_mcp_setting("mcp_session_idle_timeout")
 
 
 def get_session_cleanup_interval() -> int:
-    """Get cleanup interval in seconds."""
+    """读取会话清理轮询间隔。
+
+    契约：输出轮询间隔秒数。
+    副作用：读取设置服务并缓存。
+    失败语义：设置服务异常将向上抛出。
+    """
     return _get_mcp_setting("mcp_session_cleanup_interval")
 
 
-# RFC 7230 compliant header name pattern: token = 1*tchar
-# tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
-#         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+# RFC 7230 兼容的 Header 名称规则：
+# 规则：`token = 1*tchar`
+# 规则：`tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+#         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA`
 HEADER_NAME_PATTERN = re.compile(r"^[!#$%&\'*+\-.0-9A-Z^_`a-z|~]+$")
 
-# Common allowed headers for MCP connections
+# MCP 连接允许的常见 Header 白名单
 ALLOWED_HEADERS = {
     "authorization",
     "accept",
@@ -93,19 +133,11 @@ def create_mcp_http_client_with_ssl_option(
     *,
     verify_ssl: bool = True,
 ) -> httpx.AsyncClient:
-    """Create an httpx AsyncClient with configurable SSL verification.
+    """创建可配置 SSL 校验的 httpx 异步客户端。
 
-    This is a custom factory that extends the standard MCP client factory
-    to support disabling SSL verification for self-signed certificates.
-
-    Args:
-        headers: Optional headers to include with all requests.
-        timeout: Request timeout as httpx.Timeout object.
-        auth: Optional authentication handler.
-        verify_ssl: Whether to verify SSL certificates (default: True).
-
-    Returns:
-        Configured httpx.AsyncClient instance.
+    契约：输入可选 `headers/timeout/auth/verify_ssl`，输出 `httpx.AsyncClient`。
+    副作用：创建客户端对象，后续请求将携带配置并允许重定向。
+    失败语义：参数类型异常由 `httpx` 构造阶段抛出。
     """
     kwargs: dict[str, Any] = {
         "follow_redirects": True,
@@ -127,16 +159,16 @@ def create_mcp_http_client_with_ssl_option(
 
 
 def validate_headers(headers: dict[str, str]) -> dict[str, str]:
-    """Validate and sanitize HTTP headers according to RFC 7230.
+    """按 RFC 7230 校验并清理 HTTP Header。
 
-    Args:
-        headers: Dictionary of header name-value pairs
+    契约：输入原始 Header 字典，输出仅包含合法且已清理的 Header。
+    关键路径（三步）：
+    1) 过滤非字符串键值与非法名称。
+    2) 拦截注入风险并规范化名称大小写。
+    3) 清理控制字符并剔除空值。
 
-    Returns:
-        Dictionary of validated and sanitized headers
-
-    Raises:
-        ValueError: If headers contain invalid names or values
+    副作用：会记录警告日志用于安全审计。
+    失败语义：不抛出异常，非法项会被跳过并返回剩余结果。
     """
     if not headers:
         return {}
@@ -148,31 +180,27 @@ def validate_headers(headers: dict[str, str]) -> dict[str, str]:
             logger.warning(f"Skipping non-string header: {name}={value}")
             continue
 
-        # Validate header name according to RFC 7230
+        # 安全：Header 名称需满足 RFC 7230 token 规则
         if not HEADER_NAME_PATTERN.match(name):
             logger.warning(f"Invalid header name '{name}', skipping")
             continue
 
-        # Normalize header name to lowercase (HTTP headers are case-insensitive)
+        # 注意：HTTP Header 不区分大小写，统一小写便于比较
         normalized_name = name.lower()
 
-        # Optional: Check against whitelist of allowed headers
+        # 注意：仅记录非白名单 Header，保持兼容但提示风险
         if normalized_name not in ALLOWED_HEADERS:
-            # For MCP, we'll be permissive and allow non-standard headers
-            # but log a warning for security awareness
             logger.debug(f"Using non-standard header: {normalized_name}")
 
-        # Check for potential header injection attempts BEFORE sanitizing
+        # 安全：在清理前先拦截 CR/LF 注入
         if "\r" in value or "\n" in value:
             logger.warning(f"Potential header injection detected in '{name}', skipping")
             continue
 
-        # Sanitize header value - remove control characters and newlines
-        # RFC 7230: field-value = *( field-content / obs-fold )
-        # We'll remove control characters (0x00-0x1F, 0x7F) except tab (0x09) and space (0x20)
+        # 安全：移除控制字符（保留制表与空格）
         sanitized_value = re.sub(r"[\x00-\x08\x0A-\x1F\x7F]", "", value)
 
-        # Remove leading/trailing whitespace
+        # 注意：统一去除首尾空白
         sanitized_value = sanitized_value.strip()
 
         if not sanitized_value:
@@ -185,26 +213,22 @@ def validate_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def sanitize_mcp_name(name: str, max_length: int = 46) -> str:
-    """Sanitize a name for MCP usage by removing emojis, diacritics, and special characters.
+    """清理 MCP 名称，保证可安全用作标识符。
 
-    Args:
-        name: The original name to sanitize
-        max_length: Maximum length for the sanitized name
-
-    Returns:
-        A sanitized name containing only letters, numbers, hyphens, and underscores
+    契约：输入原始名称与最大长度，输出仅包含字母/数字/下划线的名称。
+    副作用：无。
+    失败语义：清理后为空时返回默认值 `unnamed`。
     """
     if not name or not name.strip():
         return ""
 
-    # Remove emojis using regex pattern
     emoji_pattern = re.compile(
         "["
-        "\U0001f600-\U0001f64f"  # emoticons
-        "\U0001f300-\U0001f5ff"  # symbols & pictographs
-        "\U0001f680-\U0001f6ff"  # transport & map symbols
-        "\U0001f1e0-\U0001f1ff"  # flags (iOS)
-        "\U00002500-\U00002bef"  # chinese char
+        "\U0001f600-\U0001f64f"  # 表情符号
+        "\U0001f300-\U0001f5ff"  # 符号与象形图
+        "\U0001f680-\U0001f6ff"  # 交通与地图符号
+        "\U0001f1e0-\U0001f1ff"  # 国旗（iOS）
+        "\U00002500-\U00002bef"  # 中文字符区间
         "\U00002702-\U000027b0"
         "\U00002702-\U000027b0"
         "\U000024c2-\U0001f251"
@@ -216,39 +240,32 @@ def sanitize_mcp_name(name: str, max_length: int = 46) -> str:
         "\u23cf"
         "\u23e9"
         "\u231a"
-        "\ufe0f"  # dingbats
+        "\ufe0f"  # 装饰符号
         "\u3030"
         "]+",
         flags=re.UNICODE,
     )
 
-    # Remove emojis
     name = emoji_pattern.sub("", name)
 
-    # Normalize unicode characters to remove diacritics
+    # 注意：规范化后移除变音符，避免不可见差异
     name = unicodedata.normalize("NFD", name)
     name = "".join(char for char in name if unicodedata.category(char) != "Mn")
 
-    # Replace spaces and special characters with underscores
-    name = re.sub(r"[^\w\s-]", "", name)  # Keep only word chars, spaces, and hyphens
-    name = re.sub(r"[-\s]+", "_", name)  # Replace spaces and hyphens with underscores
-    name = re.sub(r"_+", "_", name)  # Collapse multiple underscores
+    name = re.sub(r"[^\w\s-]", "", name)  # 仅保留字母/数字/空格/连字符
+    name = re.sub(r"[-\s]+", "_", name)  # 空格与连字符统一为下划线
+    name = re.sub(r"_+", "_", name)  # 合并连续下划线
 
-    # Remove leading/trailing underscores
     name = name.strip("_")
 
-    # Ensure it starts with a letter or underscore (not a number)
     if name and name[0].isdigit():
         name = f"_{name}"
 
-    # Convert to lowercase
     name = name.lower()
 
-    # Truncate to max length
     if len(name) > max_length:
         name = name[:max_length].rstrip("_")
 
-    # If empty after sanitization, provide a default
     if not name:
         name = "unnamed"
 
@@ -256,31 +273,38 @@ def sanitize_mcp_name(name: str, max_length: int = 46) -> str:
 
 
 def _camel_to_snake(name: str) -> str:
-    """Convert camelCase to snake_case."""
+    """将 camelCase 转为 snake_case。
+
+    契约：输入字符串，输出 snake_case 字符串。
+    副作用：无。
+    失败语义：无。
+    """
     import re
 
-    # Insert an underscore before any uppercase letter that follows a lowercase letter
+    # 注意：仅在小写/数字后接大写时插入下划线
     s1 = re.sub("([a-z0-9])([A-Z])", r"\1_\2", name)
     return s1.lower()
 
 
 def _convert_camel_case_to_snake_case(provided_args: dict[str, Any], arg_schema: type[BaseModel]) -> dict[str, Any]:
-    """Convert camelCase field names to snake_case if the schema expects snake_case fields."""
+    """按 schema 将 camelCase 字段名转换为 snake_case。
+
+    契约：输入参数字典与 schema，输出映射后的参数字典。
+    副作用：无。
+    失败语义：无（未知字段原样保留，交由校验抛错）。
+    """
     schema_fields = set(arg_schema.model_fields.keys())
     converted_args = {}
 
     for key, value in provided_args.items():
-        # If the key already exists in schema, use it as-is
+        # 注意：已存在字段名不转换
         if key in schema_fields:
             converted_args[key] = value
         else:
-            # Try converting camelCase to snake_case
             snake_key = _camel_to_snake(key)
             if snake_key in schema_fields:
                 converted_args[snake_key] = value
             else:
-                # If neither the original nor converted key exists, keep original
-                # The validation will catch this error
                 converted_args[key] = value
 
     return converted_args
@@ -289,8 +313,13 @@ def _convert_camel_case_to_snake_case(provided_args: dict[str, Any], arg_schema:
 def _handle_tool_validation_error(
     e: Exception, tool_name: str, provided_args: dict[str, Any], arg_schema: type[BaseModel]
 ) -> None:
-    """Handle validation errors for tool arguments with detailed error messages."""
-    # Check if this is a case where the tool was called with no arguments
+    """统一处理工具参数校验错误。
+
+    契约：输入异常与上下文信息，输出为 `None`，但会抛 `ValueError`。
+    副作用：无。
+    失败语义：始终抛 `ValueError`，附带更易理解的错误信息。
+    """
+    # 注意：当调用方未传参但 schema 有必填字段时，返回更明确的提示
     if not provided_args and hasattr(arg_schema, "model_fields"):
         required_fields = [name for name, field in arg_schema.model_fields.items() if field.is_required()]
         if required_fields:
@@ -305,20 +334,22 @@ def _handle_tool_validation_error(
 
 
 def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., Awaitable]:
+    """构造异步工具调用协程。
+
+    契约：输入工具名、参数 schema 与 MCP 客户端，输出可 await 的调用函数。
+    副作用：调用时会触发 MCP 远程执行。
+    失败语义：参数校验失败或执行失败时抛 `ValueError`。
+    """
     async def tool_coroutine(*args, **kwargs):
-        # Get field names from the model (preserving order)
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
-        # Map positional arguments to their corresponding field names
         for i, arg in enumerate(args):
             if i >= len(field_names):
                 msg = "Too many positional arguments provided"
                 raise ValueError(msg)
             provided_args[field_names[i]] = arg
-        # Merge in keyword arguments
         provided_args.update(kwargs)
         provided_args = _convert_camel_case_to_snake_case(provided_args, arg_schema)
-        # Validate input and fill defaults for missing optional fields
         try:
             validated = arg_schema.model_validate(provided_args)
         except Exception as e:  # noqa: BLE001
@@ -328,7 +359,6 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
             return await client.run_tool(tool_name, arguments=validated.model_dump())
         except Exception as e:
             await logger.aerror(f"Tool '{tool_name}' execution failed: {e}")
-            # Re-raise with more context
             msg = f"Tool '{tool_name}' execution failed: {e}"
             raise ValueError(msg) from e
 
@@ -336,6 +366,12 @@ def create_tool_coroutine(tool_name: str, arg_schema: type[BaseModel], client) -
 
 
 def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Callable[..., str]:
+    """构造同步工具调用函数。
+
+    契约：输入工具名、参数 schema 与 MCP 客户端，输出同步调用函数。
+    副作用：调用时会触发 MCP 远程执行（内部使用 `run_until_complete`）。
+    失败语义：参数校验失败或执行失败时抛 `ValueError`。
+    """
     def tool_func(*args, **kwargs):
         field_names = list(arg_schema.model_fields.keys())
         provided_args = {}
@@ -355,7 +391,6 @@ def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Cal
             return run_until_complete(client.run_tool(tool_name, arguments=validated.model_dump()))
         except Exception as e:
             logger.error(f"Tool '{tool_name}' execution failed: {e}")
-            # Re-raise with more context
             msg = f"Tool '{tool_name}' execution failed: {e}"
             raise ValueError(msg) from e
 
@@ -363,6 +398,12 @@ def create_tool_func(tool_name: str, arg_schema: type[BaseModel], client) -> Cal
 
 
 def get_unique_name(base_name, max_length, existing_names):
+    """生成不冲突的名称。
+
+    契约：输入基础名称、最大长度与已存在集合，输出唯一名称。
+    副作用：无。
+    失败语义：无（保证返回可用名称）。
+    """
     name = base_name[:max_length]
     if name not in existing_names:
         return name
@@ -377,6 +418,12 @@ def get_unique_name(base_name, max_length, existing_names):
 
 
 async def get_flow_snake_case(flow_name: str, user_id: str, session, *, is_action: bool | None = None):
+    """按 snake_case 名称查找用户 Flow。
+
+    契约：输入 `flow_name/user_id/session`，输出匹配的 Flow 或 `None`。
+    副作用：访问数据库会话执行查询。
+    失败语义：缺少 Flow 模型时抛 `ImportError`。
+    """
     try:
         from langflow.services.database.models.flow.model import Flow
         from sqlmodel import select
@@ -401,17 +448,16 @@ async def get_flow_snake_case(flow_name: str, user_id: str, session, *, is_actio
 
 
 def _is_valid_key_value_item(item: Any) -> bool:
-    """Check if an item is a valid key-value dictionary."""
+    """判断是否为 `{"key": ..., "value": ...}` 结构。"""
     return isinstance(item, dict) and "key" in item and "value" in item
 
 
 def _process_headers(headers: Any) -> dict:
-    """Process the headers input into a valid dictionary.
+    """将多种 Header 输入统一为合法字典。
 
-    Args:
-        headers: The headers to process, can be dict, str, or list
-    Returns:
-        Processed and validated dictionary
+    契约：输入可能为 dict/list/None，输出合法 Header 字典。
+    副作用：调用 `validate_headers` 进行清理与日志记录。
+    失败语义：结构异常时返回 `{}`。
     """
     if headers is None:
         return {}
@@ -427,13 +473,18 @@ def _process_headers(headers: Any) -> dict:
                 value = item["value"]
                 processed_headers[key] = value
         except (KeyError, TypeError, ValueError):
-            return {}  # Return empty dictionary instead of None
+            return {}  # 注意：异常时返回空字典而非 None
         return validate_headers(processed_headers)
     return {}
 
 
 def _validate_node_installation(command: str) -> str:
-    """Validate the npx command."""
+    """校验 `npx` 命令依赖是否可用。
+
+    契约：输入命令字符串，输出原命令字符串。
+    副作用：无。
+    失败语义：未安装 Node.js 时抛 `ValueError`。
+    """
     if "npx" in command and not shutil.which("node"):
         msg = "Node.js is not installed. Please install Node.js to use npx commands."
         raise ValueError(msg)
@@ -441,7 +492,12 @@ def _validate_node_installation(command: str) -> str:
 
 
 async def _validate_connection_params(mode: str, command: str | None = None, url: str | None = None) -> None:
-    """Validate connection parameters based on mode."""
+    """按连接模式校验参数完整性。
+
+    契约：输入 `mode` 与相关参数，输出 `None` 表示校验通过。
+    副作用：无。
+    失败语义：参数缺失或模式非法时抛 `ValueError`。
+    """
     if mode not in ["Stdio", "Streamable_HTTP", "SSE"]:
         msg = f"Invalid mode: {mode}. Must be either 'Stdio', 'Streamable_HTTP', or 'SSE'"
         raise ValueError(msg)
@@ -457,39 +513,47 @@ async def _validate_connection_params(mode: str, command: str | None = None, url
 
 
 class MCPSessionManager:
-    """Manages persistent MCP sessions with proper context manager lifecycle.
+    """管理 MCP 持久会话与清理策略。
 
-    Fixed version that addresses the memory leak issue by:
-    1. Session reuse based on server identity rather than unique context IDs
-    2. Maximum session limits per server to prevent resource exhaustion
-    3. Idle timeout for automatic session cleanup
-    4. Periodic cleanup of stale sessions
-    5. Transport preference caching to avoid retrying failed transports
+    契约：以服务器维度复用会话，并限制单服务器会话数量。
+    副作用：创建后台清理任务，可能启动/关闭子进程与网络连接。
+    失败语义：连接失败会在调用链上抛 `ValueError`，清理失败仅记录日志。
+    注意：缓存传输方式偏好以减少重复失败重试。
     """
 
     def __init__(self):
-        # Structure: server_key -> {"sessions": {session_id: session_info}, "last_cleanup": timestamp}
+        # 注意：`sessions_by_server` 结构为 `server_key -> {"sessions": {session_id: info}, "last_cleanup": ts}`
         self.sessions_by_server = {}
-        self._background_tasks = set()  # Keep references to background tasks
-        # Backwards-compatibility maps: which context_id uses which (server_key, session_id)
+        self._background_tasks = set()  # 注意：保留任务引用，避免被 GC 取消
+        # 注意：兼容旧逻辑：context_id -> (server_key, session_id)
         self._context_to_session: dict[str, tuple[str, str]] = {}
-        # Reference count for each active (server_key, session_id)
+        # 注意：记录每个会话被多少上下文引用
         self._session_refcount: dict[tuple[str, str], int] = {}
-        # Cache which transport works for each server to avoid retrying failed transports
-        # server_key -> "streamable_http" | "sse"
+        # 注意：缓存可用传输方式，避免重复失败重试
+        # `server_key -> "streamable_http" | "sse"`
         self._transport_preference: dict[str, str] = {}
         self._cleanup_task = None
         self._start_cleanup_task()
 
     def _start_cleanup_task(self):
-        """Start the periodic cleanup task."""
+        """启动周期性清理任务。
+
+        契约：仅在未运行时创建后台任务。
+        副作用：创建 asyncio 任务并加入 `_background_tasks`。
+        失败语义：异常由事件循环抛出。
+        """
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
             self._background_tasks.add(self._cleanup_task)
             self._cleanup_task.add_done_callback(self._background_tasks.discard)
 
     async def _periodic_cleanup(self):
-        """Periodically clean up idle sessions."""
+        """周期性清理空闲会话。
+
+        契约：循环执行清理，直到任务被取消。
+        副作用：可能关闭会话并记录日志。
+        失败语义：可恢复异常被吞并并记录，任务继续运行。
+        """
         while True:
             try:
                 await asyncio.sleep(get_session_cleanup_interval())
@@ -497,11 +561,16 @@ class MCPSessionManager:
             except asyncio.CancelledError:
                 break
             except (RuntimeError, KeyError, ClosedResourceError, ValueError, asyncio.TimeoutError) as e:
-                # Handle common recoverable errors without stopping the cleanup loop
+                # 注意：可恢复异常仅记录，不中断清理循环
                 await logger.awarning(f"Error in periodic cleanup: {e}")
 
     async def _cleanup_idle_sessions(self):
-        """Clean up sessions that have been idle for too long."""
+        """清理超时空闲的会话。
+
+        契约：遍历各服务器会话并移除超时项。
+        副作用：可能关闭会话并删除缓存条目。
+        失败语义：异常由调用方处理（通常在周期任务中记录后继续）。
+        """
         current_time = asyncio.get_event_loop().time()
         servers_to_remove = []
 
@@ -513,24 +582,26 @@ class MCPSessionManager:
                 if current_time - session_info["last_used"] > get_session_idle_timeout():
                     sessions_to_remove.append(session_id)
 
-            # Clean up idle sessions
             for session_id in sessions_to_remove:
                 await logger.ainfo(f"Cleaning up idle session {session_id} for server {server_key}")
                 await self._cleanup_session_by_id(server_key, session_id)
 
-            # Remove server entry if no sessions left
             if not sessions:
                 servers_to_remove.append(server_key)
 
-        # Clean up empty server entries
         for server_key in servers_to_remove:
             del self.sessions_by_server[server_key]
 
     def _get_server_key(self, connection_params, transport_type: str) -> str:
-        """Generate a consistent server key based on connection parameters."""
+        """根据连接参数生成可复用的 server_key。
+
+        契约：输入连接参数与传输类型，输出稳定的 server_key 字符串。
+        副作用：无。
+        失败语义：无（使用兜底 hash）。
+        """
         if transport_type == "stdio":
             if hasattr(connection_params, "command"):
-                # Include command, args, and environment for uniqueness
+                # 注意：stdio 模式需包含命令、参数与环境以区分实例
                 command_str = f"{connection_params.command} {' '.join(connection_params.args or [])}"
                 env_str = str(sorted((connection_params.env or {}).items()))
                 key_input = f"{command_str}|{env_str}"
@@ -538,26 +609,30 @@ class MCPSessionManager:
         elif transport_type == "streamable_http" and (
             isinstance(connection_params, dict) and "url" in connection_params
         ):
-            # Include URL and headers for uniqueness
+            # 注意：HTTP 模式需包含 URL 与 Header 以区分实例
             url = connection_params["url"]
             headers = str(sorted((connection_params.get("headers", {})).items()))
             key_input = f"{url}|{headers}"
             return f"streamable_http_{hash(key_input)}"
 
-        # Fallback to a generic key
+        # 注意：兜底使用完整参数 hash
         return f"{transport_type}_{hash(str(connection_params))}"
 
     async def _validate_session_connectivity(self, session) -> bool:
-        """Validate that the session is actually usable by testing a simple operation."""
+        """通过轻量操作验证会话可用性。
+
+        契约：输入会话对象，输出布尔值表示可用性。
+        副作用：调用 `list_tools` 触发一次远程请求。
+        失败语义：连接异常返回 `False`，未知异常向上抛出。
+        """
         try:
-            # Try to list tools as a connectivity test (this is a lightweight operation)
-            # Use a shorter timeout for the connectivity test to fail fast
+            # 注意：使用 `list_tools` 作为轻量连通性探测，并缩短超时
             response = await asyncio.wait_for(session.list_tools(), timeout=3.0)
         except (asyncio.TimeoutError, ConnectionError, OSError, ValueError) as e:
             await logger.adebug(f"Session connectivity test failed (standard error): {e}")
             return False
         except Exception as e:
-            # Handle MCP-specific errors that might not be in the standard list
+            # 注意：补充 MCP 特有错误判断
             error_str = str(e)
             if (
                 "ClosedResourceError" in str(type(e))
@@ -569,16 +644,15 @@ class MCPSessionManager:
             ):
                 await logger.adebug(f"Session connectivity test failed (MCP connection error): {e}")
                 return False
-            # Re-raise unexpected errors
+            # 注意：未知异常向上抛出，避免误判健康
             await logger.awarning(f"Unexpected error in connectivity test: {e}")
             raise
         else:
-            # Validate that we got a meaningful response
+            # 注意：响应对象需包含 tools 字段
             if response is None:
                 await logger.adebug("Session connectivity test failed: received None response")
                 return False
             try:
-                # Check if we can access the tools list (even if empty)
                 tools = getattr(response, "tools", None)
                 if tools is None:
                     await logger.adebug("Session connectivity test failed: no tools attribute in response")
@@ -591,35 +665,37 @@ class MCPSessionManager:
                 return True
 
     async def get_session(self, context_id: str, connection_params, transport_type: str):
-        """Get or create a session with improved reuse strategy.
+        """获取或创建可复用的会话。
 
-        The key insight is that we should reuse sessions based on the server
-        identity (command + args for stdio, URL for Streamable HTTP) rather than the context_id.
-        This prevents creating a new subprocess for each unique context.
+        契约：输入 `context_id/connection_params/transport_type`，输出可用会话对象。
+        关键路径（三步）：
+        1) 基于连接参数生成 `server_key` 并复用健康会话。
+        2) 超过上限时移除最久未用会话。
+        3) 创建新会话并记录映射与引用计数。
+
+        异常流：创建会话或健康检查失败将抛 `ValueError`。
+        性能瓶颈：`list_tools` 健康检查与会话创建的网络/进程开销。
+        排障入口：日志关键字 `Reusing existing session` / `Creating new session`。
         """
         server_key = self._get_server_key(connection_params, transport_type)
 
-        # Ensure server entry exists
         if server_key not in self.sessions_by_server:
             self.sessions_by_server[server_key] = {"sessions": {}, "last_cleanup": asyncio.get_event_loop().time()}
 
         server_data = self.sessions_by_server[server_key]
         sessions = server_data["sessions"]
 
-        # Try to find a healthy existing session
+        # 注意：优先复用健康会话
         for session_id, session_info in list(sessions.items()):
             session = session_info["session"]
             task = session_info["task"]
 
-            # Check if session is still alive
             if not task.done():
-                # Update last used time
                 session_info["last_used"] = asyncio.get_event_loop().time()
 
-                # Quick health check
                 if await self._validate_session_connectivity(session):
                     await logger.adebug(f"Reusing existing session {session_id} for server {server_key}")
-                    # record mapping & bump ref-count for backwards compatibility
+                    # 注意：记录映射并增加引用计数，兼容旧清理逻辑
                     self._context_to_session[context_id] = (server_key, session_id)
                     self._session_refcount[(server_key, session_id)] = (
                         self._session_refcount.get((server_key, session_id), 0) + 1
@@ -628,20 +704,17 @@ class MCPSessionManager:
                 await logger.ainfo(f"Session {session_id} for server {server_key} failed health check, cleaning up")
                 await self._cleanup_session_by_id(server_key, session_id)
             else:
-                # Task is done, clean up
                 await logger.ainfo(f"Session {session_id} for server {server_key} task is done, cleaning up")
                 await self._cleanup_session_by_id(server_key, session_id)
 
-        # Check if we've reached the maximum number of sessions for this server
+        # 注意：超过上限时移除最久未用会话
         if len(sessions) >= get_max_sessions_per_server():
-            # Remove the oldest session
             oldest_session_id = min(sessions.keys(), key=lambda x: sessions[x]["last_used"])
             await logger.ainfo(
                 f"Maximum sessions reached for server {server_key}, removing oldest session {oldest_session_id}"
             )
             await self._cleanup_session_by_id(server_key, oldest_session_id)
 
-        # Create new session
         session_id = f"{server_key}_{len(sessions)}"
         await logger.ainfo(f"Creating new session {session_id} for server {server_key}")
 
@@ -649,18 +722,17 @@ class MCPSessionManager:
             session, task = await self._create_stdio_session(session_id, connection_params)
             actual_transport = "stdio"
         elif transport_type == "streamable_http":
-            # Pass the cached transport preference if available
+            # 注意：优先复用已验证的传输方式
             preferred_transport = self._transport_preference.get(server_key)
             session, task, actual_transport = await self._create_streamable_http_session(
                 session_id, connection_params, preferred_transport
             )
-            # Cache the transport that worked for future connections
+            # 注意：缓存成功的传输方式，减少重试
             self._transport_preference[server_key] = actual_transport
         else:
             msg = f"Unknown transport type: {transport_type}"
             raise ValueError(msg)
 
-        # Store session info with the actual transport used
         sessions[session_id] = {
             "session": session,
             "task": task,
@@ -668,32 +740,39 @@ class MCPSessionManager:
             "last_used": asyncio.get_event_loop().time(),
         }
 
-        # register mapping & initial ref-count for the new session
         self._context_to_session[context_id] = (server_key, session_id)
         self._session_refcount[(server_key, session_id)] = 1
 
         return session
 
     async def _create_stdio_session(self, session_id: str, connection_params):
-        """Create a new stdio session as a background task to avoid context issues."""
+        """创建 stdio 会话并以后台任务维持。
+
+        契约：输入 `session_id/connection_params`，输出 `(session, task)`。
+        关键路径（三步）：
+        1) 创建后台任务并初始化 MCP 会话。
+        2) 等待会话就绪信号（带超时）。
+        3) 返回会话与后台任务引用。
+
+        异常流：初始化超时抛 `ValueError` 并清理任务。
+        性能瓶颈：子进程启动与会话初始化。
+        排障入口：日志关键字 `Timeout waiting for STDIO session`。
+        """
         import asyncio
 
         from mcp.client.stdio import stdio_client
 
-        # Create a future to get the session
         session_future: asyncio.Future[ClientSession] = asyncio.Future()
 
         async def session_task():
-            """Background task that keeps the session alive."""
+            """后台任务：初始化并维持会话存活。"""
             try:
                 async with stdio_client(connection_params) as (read, write):
                     session = ClientSession(read, write)
                     async with session:
                         await session.initialize()
-                        # Signal that session is ready
                         session_future.set_result(session)
 
-                        # Keep the session alive until cancelled
                         import anyio
 
                         event = anyio.Event()
@@ -705,16 +784,13 @@ class MCPSessionManager:
                 if not session_future.done():
                     session_future.set_exception(e)
 
-        # Start the background task
         task = asyncio.create_task(session_task())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-        # Wait for session to be ready (use longer timeout for remote connections)
         try:
             session = await asyncio.wait_for(session_future, timeout=30.0)
         except asyncio.TimeoutError as timeout_err:
-            # Clean up the failed task
             if not task.done():
                 task.cancel()
                 import contextlib
@@ -731,30 +807,28 @@ class MCPSessionManager:
     async def _create_streamable_http_session(
         self, session_id: str, connection_params, preferred_transport: str | None = None
     ):
-        """Create a new Streamable HTTP session with SSE fallback as a background task to avoid context issues.
+        """创建 Streamable HTTP 会话，失败时回退 SSE。
 
-        Args:
-            session_id: Unique identifier for this session
-            connection_params: Connection parameters including URL, headers, timeouts, verify_ssl
-            preferred_transport: If set to "sse", skip Streamable HTTP and go directly to SSE
+        契约：输入 `session_id/connection_params/preferred_transport`，输出 `(session, task, transport_used)`。
+        关键路径（三步）：
+        1) 优先尝试 Streamable HTTP（可选快速超时）。
+        2) 失败则回退 SSE 并记录成功传输方式。
+        3) 返回会话与后台任务引用。
 
-        Returns:
-            tuple: (session, task, transport_used) where transport_used is "streamable_http" or "sse"
+        异常流：两种传输均失败时抛 `ValueError`。
+        性能瓶颈：网络握手与会话初始化。
+        排障入口：日志关键字 `Streamable HTTP` / `SSE connection failed`。
         """
         import asyncio
 
         from mcp.client.sse import sse_client
         from mcp.client.streamable_http import streamablehttp_client
 
-        # Create a future to get the session
         session_future: asyncio.Future[ClientSession] = asyncio.Future()
-        # Track which transport succeeded
         used_transport: list[str] = []
 
-        # Get verify_ssl option from connection params, default to True
         verify_ssl = connection_params.get("verify_ssl", True)
 
-        # Create custom httpx client factory with SSL verification option
         def custom_httpx_factory(
             headers: dict[str, str] | None = None,
             timeout: httpx.Timeout | None = None,
@@ -765,15 +839,13 @@ class MCPSessionManager:
             )
 
         async def session_task():
-            """Background task that keeps the session alive."""
+            """后台任务：初始化并维持会话存活。"""
             streamable_error = None
 
-            # Skip Streamable HTTP if we know SSE works for this server
+            # 注意：若已缓存 SSE 成功，直接跳过 Streamable HTTP
             if preferred_transport != "sse":
-                # Try Streamable HTTP first with a quick timeout
                 try:
                     await logger.adebug(f"Attempting Streamable HTTP connection for session {session_id}")
-                    # Use a shorter timeout for the initial connection attempt (2 seconds)
                     async with streamablehttp_client(
                         url=connection_params["url"],
                         headers=connection_params["headers"],
@@ -782,14 +854,11 @@ class MCPSessionManager:
                     ) as (read, write, _):
                         session = ClientSession(read, write)
                         async with session:
-                            # Initialize with a timeout to fail fast
                             await asyncio.wait_for(session.initialize(), timeout=2.0)
                             used_transport.append("streamable_http")
                             await logger.ainfo(f"Session {session_id} connected via Streamable HTTP")
-                            # Signal that session is ready
                             session_future.set_result(session)
 
-                            # Keep the session alive until cancelled
                             import anyio
 
                             event = anyio.Event()
@@ -798,7 +867,7 @@ class MCPSessionManager:
                             except asyncio.CancelledError:
                                 await logger.ainfo(f"Session {session_id} (Streamable HTTP) is shutting down")
                 except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
-                    # If Streamable HTTP fails or times out, try SSE as fallback immediately
+                    # 注意：Streamable HTTP 失败或超时立即回退 SSE
                     streamable_error = e
                     error_type = "timed out" if isinstance(e, asyncio.TimeoutError) else "failed"
                     await logger.awarning(
@@ -807,11 +876,10 @@ class MCPSessionManager:
             else:
                 await logger.adebug(f"Skipping Streamable HTTP for session {session_id}, using cached SSE preference")
 
-            # Try SSE if Streamable HTTP failed or if SSE is preferred
+            # 注意：Streamable HTTP 失败或偏好 SSE 时执行回退
             if streamable_error is not None or preferred_transport == "sse":
                 try:
                     await logger.adebug(f"Attempting SSE connection for session {session_id}")
-                    # Extract SSE read timeout from connection params, default to 30s if not present
                     sse_read_timeout = connection_params.get("sse_read_timeout_seconds", 30)
 
                     async with sse_client(
@@ -827,11 +895,9 @@ class MCPSessionManager:
                             used_transport.append("sse")
                             fallback_msg = " (fallback)" if streamable_error else " (preferred)"
                             await logger.ainfo(f"Session {session_id} connected via SSE{fallback_msg}")
-                            # Signal that session is ready
                             if not session_future.done():
                                 session_future.set_result(session)
 
-                            # Keep the session alive until cancelled
                             import anyio
 
                             event = anyio.Event()
@@ -840,7 +906,7 @@ class MCPSessionManager:
                             except asyncio.CancelledError:
                                 await logger.ainfo(f"Session {session_id} (SSE) is shutting down")
                 except Exception as sse_error:  # noqa: BLE001
-                    # Both transports failed (or just SSE if it was preferred)
+                    # 注意：两种传输均失败时抛出错误
                     if streamable_error:
                         await logger.aerror(
                             f"Both Streamable HTTP and SSE failed for session {session_id}. "
@@ -857,24 +923,19 @@ class MCPSessionManager:
                         if not session_future.done():
                             session_future.set_exception(ValueError(f"Failed to connect via SSE: {sse_error}"))
 
-        # Start the background task
         task = asyncio.create_task(session_task())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-        # Wait for session to be ready (use longer timeout for remote connections)
         try:
             session = await asyncio.wait_for(session_future, timeout=30.0)
-            # Log which transport was used
             if used_transport:
                 transport_used = used_transport[0]
                 await logger.ainfo(f"Session {session_id} successfully established using {transport_used}")
                 return session, task, transport_used
-            # This shouldn't happen, but handle it just in case
             msg = f"Session {session_id} established but transport not recorded"
             raise ValueError(msg)
         except asyncio.TimeoutError as timeout_err:
-            # Clean up the failed task
             if not task.done():
                 task.cancel()
                 import contextlib
@@ -887,16 +948,25 @@ class MCPSessionManager:
             raise ValueError(msg) from timeout_err
 
     async def _cleanup_session_by_id(self, server_key: str, session_id: str):
-        """Clean up a specific session by server key and session ID."""
+        """按 server_key 与 session_id 清理会话。
+
+        契约：输入标识符，输出 `None`，并确保会话资源被释放。
+        关键路径（三步）：
+        1) 定位会话与兼容旧结构。
+        2) 尝试关闭会话并取消后台任务。
+        3) 移除缓存条目并记录异常。
+
+        副作用：关闭会话、取消任务并修改缓存结构。
+        失败语义：清理失败仅记录日志。
+        """
         if server_key not in self.sessions_by_server:
             return
 
         server_data = self.sessions_by_server[server_key]
-        # Handle both old and new session structure
+        # 注意：兼容旧结构（sessions 可能直接挂在 server_data 上）
         if isinstance(server_data, dict) and "sessions" in server_data:
             sessions = server_data["sessions"]
         else:
-            # Handle old structure where sessions were stored directly
             sessions = server_data
 
         if session_id not in sessions:
@@ -904,11 +974,11 @@ class MCPSessionManager:
 
         session_info = sessions[session_id]
         try:
-            # First try to properly close the session if it exists
+            # 注意：优先尝试优雅关闭会话
             if "session" in session_info:
                 session = session_info["session"]
 
-                # Try async close first (aclose method)
+                # 注意：优先使用 `aclose`
                 if hasattr(session, "aclose"):
                     try:
                         await session.aclose()
@@ -916,16 +986,14 @@ class MCPSessionManager:
                     except Exception as e:  # noqa: BLE001
                         await logger.adebug("Error closing session %s with aclose(): %s", session_id, e)
 
-                # If no aclose, try regular close method
+                # 注意：否则回退 `close`
                 elif hasattr(session, "close"):
                     try:
-                        # Check if close() is awaitable using inspection
+                        # 注意：根据是否可 await 选择调用方式
                         if inspect.iscoroutinefunction(session.close):
-                            # It's an async method
                             await session.close()
                             await logger.adebug("Successfully closed session %s using async close()", session_id)
                         else:
-                            # Try calling it and check if result is awaitable
                             close_result = session.close()
                             if inspect.isawaitable(close_result):
                                 await close_result
@@ -933,12 +1001,11 @@ class MCPSessionManager:
                                     "Successfully closed session %s using awaitable close()", session_id
                                 )
                             else:
-                                # It's a synchronous close
                                 await logger.adebug("Successfully closed session %s using sync close()", session_id)
                     except Exception as e:  # noqa: BLE001
                         await logger.adebug("Error closing session %s with close(): %s", session_id, e)
 
-            # Cancel the background task which will properly close the session
+            # 注意：取消后台任务触发会话关闭
             if "task" in session_info:
                 task = session_info["task"]
                 if not task.done():
@@ -950,54 +1017,55 @@ class MCPSessionManager:
         except Exception as e:  # noqa: BLE001
             await logger.awarning(f"Error cleaning up session {session_id}: {e}")
         finally:
-            # Remove from sessions dict
             del sessions[session_id]
 
     async def cleanup_all(self):
-        """Clean up all sessions."""
-        # Cancel periodic cleanup task
+        """清理所有会话并关闭后台任务。
+
+        契约：清空所有会话与缓存映射。
+        关键路径（三步）：
+        1) 停止周期清理任务。
+        2) 逐服务器清理会话与后台任务。
+        3) 清空缓存与兼容映射。
+
+        副作用：取消后台任务并关闭所有连接。
+        失败语义：清理失败仅记录日志。
+        """
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
 
-        # Clean up all sessions
         for server_key in list(self.sessions_by_server.keys()):
             server_data = self.sessions_by_server[server_key]
-            # Handle both old and new session structure
             if isinstance(server_data, dict) and "sessions" in server_data:
                 sessions = server_data["sessions"]
             else:
-                # Handle old structure where sessions were stored directly
                 sessions = server_data
 
             for session_id in list(sessions.keys()):
                 await self._cleanup_session_by_id(server_key, session_id)
 
-        # Clear the sessions_by_server structure completely
         self.sessions_by_server.clear()
 
-        # Clear compatibility maps
         self._context_to_session.clear()
         self._session_refcount.clear()
 
-        # Clear all background tasks
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-        # Give a bit more time for subprocess transports to clean up
-        # This helps prevent the BaseSubprocessTransport.__del__ warnings
+        # 注意：留出短暂延迟，减少子进程清理警告
         await asyncio.sleep(0.5)
 
     async def _cleanup_session(self, context_id: str):
-        """Backward-compat cleanup by context_id.
+        """按 context_id 进行兼容清理。
 
-        Decrements the ref-count for the session used by *context_id* and only
-        tears the session down when the last context that references it goes
-        away.
+        契约：基于 `context_id` 递减引用计数，最后一个引用释放会话。
+        副作用：可能关闭会话并更新缓存映射。
+        失败语义：找不到映射则记录调试日志并返回。
         """
         mapping = self._context_to_session.get(context_id)
         if not mapping:
@@ -1014,11 +1082,17 @@ class MCPSessionManager:
         else:
             self._session_refcount[ref_key] = remaining
 
-        # Remove the mapping for this context
+        # 注意：移除该 context 的映射
         self._context_to_session.pop(context_id, None)
 
 
 class MCPStdioClient:
+    """MCP stdio 传输客户端封装。
+
+    契约：提供连接、工具调用与会话复用能力。
+    副作用：可能启动子进程并建立 MCP 会话。
+    失败语义：连接或调用失败时抛 `ValueError`。
+    """
     def __init__(self, component_cache=None):
         self.session: ClientSession | None = None
         self._connection_params = None
@@ -1027,7 +1101,17 @@ class MCPStdioClient:
         self._component_cache = component_cache
 
     async def _connect_to_server(self, command_str: str, env: dict[str, str] | None = None) -> list[StructuredTool]:
-        """Connect to MCP server using stdio transport (SDK style)."""
+        """使用 stdio 方式连接 MCP 服务器（内部实现）。
+
+        契约：输入命令与环境变量，输出工具列表。
+        关键路径（三步）：
+        1) 生成平台适配的启动参数与环境变量。
+        2) 获取/创建持久会话并列出工具。
+        3) 标记连接状态并返回工具列表。
+
+        副作用：启动子进程并建立 MCP 会话。
+        失败语义：连接失败抛 `ValueError` 或底层异常。
+        """
         from mcp import StdioServerParameters
 
         command = command_str.split(" ")
@@ -1049,37 +1133,48 @@ class MCPStdioClient:
                 env=env_data,
             )
 
-        # Store connection parameters for later use in run_tool
         self._connection_params = server_params
 
-        # If no session context is set, create a default one
         if not self._session_context:
-            # Generate a fallback context based on connection parameters
             import uuid
 
             param_hash = uuid.uuid4().hex[:8]
             self._session_context = f"default_{param_hash}"
 
-        # Get or create a persistent session
         session = await self._get_or_create_session()
         response = await session.list_tools()
         self._connected = True
         return response.tools
 
     async def connect_to_server(self, command_str: str, env: dict[str, str] | None = None) -> list[StructuredTool]:
-        """Connect to MCP server using stdio transport (SDK style)."""
+        """使用 stdio 方式连接 MCP 服务器（对外接口）。
+
+        契约：输入命令与环境变量，输出工具列表。
+        副作用：启动子进程并建立 MCP 会话。
+        失败语义：超时或连接失败抛 `ValueError`。
+        """
         return await asyncio.wait_for(
             self._connect_to_server(command_str, env), timeout=get_settings_service().settings.mcp_server_timeout
         )
 
     def set_session_context(self, context_id: str):
-        """Set the session context (e.g., flow_id + user_id + session_id)."""
+        """设置会话上下文标识。
+
+        契约：输入 `context_id`，用于会话复用与清理。
+        副作用：覆盖当前上下文。
+        失败语义：无。
+        """
         self._session_context = context_id
 
     def _get_session_manager(self) -> MCPSessionManager:
-        """Get or create session manager from component cache."""
+        """获取或创建会话管理器。
+
+        契约：优先从组件缓存读取，否则创建新实例。
+        副作用：可能写入组件缓存。
+        失败语义：缓存访问异常将向上抛出。
+        """
         if not self._component_cache:
-            # Fallback to instance-level session manager if no cache
+            # 注意：无缓存时使用实例级管理器
             if not hasattr(self, "_session_manager"):
                 self._session_manager = MCPSessionManager()
             return self._session_manager
@@ -1093,35 +1188,37 @@ class MCPStdioClient:
         return session_manager
 
     async def _get_or_create_session(self) -> ClientSession:
-        """Get or create a persistent session for the current context."""
+        """为当前上下文获取或创建会话。
+
+        契约：输出可用 `ClientSession`。
+        副作用：可能创建新会话并缓存。
+        失败语义：缺少上下文或连接参数时抛 `ValueError`。
+        """
         if not self._session_context or not self._connection_params:
             msg = "Session context and connection params must be set"
             raise ValueError(msg)
 
-        # Use cached session manager to get/create persistent session
         session_manager = self._get_session_manager()
         return await session_manager.get_session(self._session_context, self._connection_params, "stdio")
 
     async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Run a tool with the given arguments using context-specific session.
+        """在当前会话上下文中执行工具。
 
-        Args:
-            tool_name: Name of the tool to run
-            arguments: Dictionary of arguments to pass to the tool
+        契约：输入 `tool_name/arguments`，输出工具执行结果。
+        关键路径（三步）：
+        1) 确保已连接并补齐默认 context。
+        2) 获取/创建会话并调用工具。
+        3) 失败时按错误类型重试或抛错。
 
-        Returns:
-            The result of the tool execution
-
-        Raises:
-            ValueError: If session is not initialized or tool execution fails
+        异常流：连接不可用或执行失败抛 `ValueError`。
+        性能瓶颈：远程调用超时与会话重建。
+        排障入口：日志关键字 `Tool '{tool_name}' failed`。
         """
         if not self._connected or not self._connection_params:
             msg = "Session not initialized or disconnected. Call connect_to_server first."
             raise ValueError(msg)
 
-        # If no session context is set, create a default one
         if not self._session_context:
-            # Generate a fallback context based on connection parameters
             import uuid
 
             param_hash = uuid.uuid4().hex[:8]
@@ -1133,18 +1230,17 @@ class MCPStdioClient:
         for attempt in range(max_retries):
             try:
                 await logger.adebug(f"Attempting to run tool '{tool_name}' (attempt {attempt + 1}/{max_retries})")
-                # Get or create persistent session
                 session = await self._get_or_create_session()
 
                 result = await asyncio.wait_for(
                     session.call_tool(tool_name, arguments=arguments),
-                    timeout=30.0,  # 30 second timeout
+                    timeout=30.0,
                 )
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
 
-                # Import specific MCP error types for detection
+                # 注意：识别常见 MCP 连接错误类型
                 try:
                     is_closed_resource_error = isinstance(e, ClosedResourceError)
                     is_mcp_connection_error = isinstance(e, McpError) and "Connection closed" in str(e)
@@ -1152,37 +1248,29 @@ class MCPStdioClient:
                     is_closed_resource_error = "ClosedResourceError" in str(type(e))
                     is_mcp_connection_error = "Connection closed" in str(e)
 
-                # Detect timeout errors
                 is_timeout_error = isinstance(e, asyncio.TimeoutError | TimeoutError)
 
-                # If we're getting the same error type repeatedly, don't retry
                 if last_error_type == current_error_type and attempt > 0:
                     await logger.aerror(f"Repeated {current_error_type} error for tool '{tool_name}', not retrying")
                     break
 
                 last_error_type = current_error_type
 
-                # If it's a connection error (ClosedResourceError or MCP connection closed) and we have retries left
                 if (is_closed_resource_error or is_mcp_connection_error) and attempt < max_retries - 1:
                     await logger.awarning(
                         f"MCP session connection issue for tool '{tool_name}', retrying with fresh session..."
                     )
-                    # Clean up the dead session
                     if self._session_context:
                         session_manager = self._get_session_manager()
                         await session_manager._cleanup_session(self._session_context)
-                    # Add a small delay before retry
                     await asyncio.sleep(0.5)
                     continue
 
-                # If it's a timeout error and we have retries left, try once more
                 if is_timeout_error and attempt < max_retries - 1:
                     await logger.awarning(f"Tool '{tool_name}' timed out, retrying...")
-                    # Don't clean up session for timeouts, might just be a slow response
                     await asyncio.sleep(1.0)
                     continue
 
-                # For other errors or no retries left, handle as before
                 if (
                     isinstance(e, ConnectionError | TimeoutError | OSError | ValueError)
                     or is_closed_resource_error
@@ -1191,34 +1279,31 @@ class MCPStdioClient:
                 ):
                     msg = f"Failed to run tool '{tool_name}' after {attempt + 1} attempts: {e}"
                     await logger.aerror(msg)
-                    # Clean up failed session from cache
                     if self._session_context and self._component_cache:
                         cache_key = f"mcp_session_stdio_{self._session_context}"
                         self._component_cache.delete(cache_key)
                     self._connected = False
                     raise ValueError(msg) from e
-                # Re-raise unexpected errors
                 raise
             else:
                 await logger.adebug(f"Tool '{tool_name}' completed successfully")
                 return result
 
-        # This should never be reached due to the exception handling above
         msg = f"Failed to run tool '{tool_name}': Maximum retries exceeded with repeated {last_error_type} errors"
         await logger.aerror(msg)
         raise ValueError(msg)
 
     async def disconnect(self):
-        """Properly close the connection and clean up resources."""
-        # For stdio transport, there is no remote session to terminate explicitly
-        # The session cleanup happens when the background task is cancelled
+        """断开连接并清理本地会话。
 
-        # Clean up local session using the session manager
+        契约：释放当前会话与连接参数。
+        副作用：取消后台任务并清理缓存映射。
+        失败语义：清理失败仅记录日志。
+        """
         if self._session_context:
             session_manager = self._get_session_manager()
             await session_manager._cleanup_session(self._session_context)
 
-        # Reset local state
         self.session = None
         self._connection_params = None
         self._connected = False
@@ -1232,6 +1317,12 @@ class MCPStdioClient:
 
 
 class MCPStreamableHttpClient:
+    """MCP Streamable HTTP/SSE 客户端封装。
+
+    契约：提供基于 HTTP 的连接、工具调用与会话复用能力。
+    副作用：建立网络连接并可能发送会话终止请求。
+    失败语义：连接或调用失败时抛 `ValueError`。
+    """
     def __init__(self, component_cache=None):
         self.session: ClientSession | None = None
         self._connection_params = None
@@ -1240,9 +1331,14 @@ class MCPStreamableHttpClient:
         self._component_cache = component_cache
 
     def _get_session_manager(self) -> MCPSessionManager:
-        """Get or create session manager from component cache."""
+        """获取或创建会话管理器。
+
+        契约：优先从组件缓存读取，否则创建新实例。
+        副作用：可能写入组件缓存。
+        失败语义：缓存访问异常将向上抛出。
+        """
         if not self._component_cache:
-            # Fallback to instance-level session manager if no cache
+            # 注意：无缓存时使用实例级管理器
             if not hasattr(self, "_session_manager"):
                 self._session_manager = MCPSessionManager()
             return self._session_manager
@@ -1256,7 +1352,12 @@ class MCPStreamableHttpClient:
         return session_manager
 
     async def validate_url(self, url: str | None) -> tuple[bool, str]:
-        """Validate the Streamable HTTP URL before attempting connection."""
+        """校验 Streamable HTTP/SSE URL 合法性。
+
+        契约：输入 `url`，输出 `(is_valid, error_msg)`。
+        副作用：无。
+        失败语义：解析异常返回 `False` 与错误信息。
+        """
         try:
             parsed = urlparse(url)
             if not parsed.scheme or not parsed.netloc:
@@ -1274,23 +1375,28 @@ class MCPStreamableHttpClient:
         *,
         verify_ssl: bool = True,
     ) -> list[StructuredTool]:
-        """Connect to MCP server using Streamable HTTP transport with SSE fallback (SDK style)."""
-        # Validate and sanitize headers early
+        """使用 Streamable HTTP 连接 MCP 服务器（内部实现，支持 SSE 回退）。
+
+        契约：输入 URL 与可选 Header/超时参数，输出工具列表。
+        关键路径（三步）：
+        1) 清理 Header 并校验 URL（首次连接）。
+        2) 建立持久会话（HTTP 失败时回退 SSE）。
+        3) 拉取工具列表并标记连接状态。
+
+        副作用：建立网络连接并创建会话。
+        失败语义：URL 非法或连接失败抛 `ValueError`。
+        """
         validated_headers = _process_headers(headers)
 
         if url is None:
             msg = "URL is required for StreamableHTTP or SSE mode"
             raise ValueError(msg)
 
-        # Only validate URL if we don't have a cached session
-        # This avoids expensive HTTP validation calls when reusing sessions
         if not self._connected or not self._connection_params:
             is_valid, error_msg = await self.validate_url(url)
             if not is_valid:
                 msg = f"Invalid Streamable HTTP or SSE URL ({url}): {error_msg}"
                 raise ValueError(msg)
-            # Store connection parameters for later use in run_tool
-            # Include SSE read timeout for fallback and SSL verification option
             self._connection_params = {
                 "url": url,
                 "headers": validated_headers,
@@ -1301,15 +1407,12 @@ class MCPStreamableHttpClient:
         elif headers:
             self._connection_params["headers"] = validated_headers
 
-        # If no session context is set, create a default one
         if not self._session_context:
-            # Generate a fallback context based on connection parameters
             import uuid
 
             param_hash = uuid.uuid4().hex[:8]
             self._session_context = f"default_http_{param_hash}"
 
-        # Get or create a persistent session (will try Streamable HTTP, then SSE fallback)
         session = await self._get_or_create_session()
         response = await session.list_tools()
         self._connected = True
@@ -1323,7 +1426,12 @@ class MCPStreamableHttpClient:
         *,
         verify_ssl: bool = True,
     ) -> list[StructuredTool]:
-        """Connect to MCP server using Streamable HTTP with SSE fallback transport (SDK style)."""
+        """使用 Streamable HTTP 连接 MCP 服务器（对外接口，支持 SSE 回退）。
+
+        契约：输入 URL 与可选 Header/超时参数，输出工具列表。
+        副作用：建立网络连接并创建会话。
+        失败语义：超时或连接失败抛 `ValueError`。
+        """
         return await asyncio.wait_for(
             self._connect_to_server(
                 url, headers, sse_read_timeout_seconds=sse_read_timeout_seconds, verify_ssl=verify_ssl
@@ -1332,35 +1440,45 @@ class MCPStreamableHttpClient:
         )
 
     def set_session_context(self, context_id: str):
-        """Set the session context (e.g., flow_id + user_id + session_id)."""
+        """设置会话上下文标识。
+
+        契约：输入 `context_id`，用于会话复用与清理。
+        副作用：覆盖当前上下文。
+        失败语义：无。
+        """
         self._session_context = context_id
 
     async def _get_or_create_session(self) -> ClientSession:
-        """Get or create a persistent session for the current context."""
+        """为当前上下文获取或创建会话。
+
+        契约：输出可用 `ClientSession`。
+        副作用：可能创建新会话并缓存。
+        失败语义：缺少上下文或连接参数时抛 `ValueError`。
+        """
         if not self._session_context or not self._connection_params:
             msg = "Session context and params must be set"
             raise ValueError(msg)
 
-        # Use cached session manager to get/create persistent session
         session_manager = self._get_session_manager()
-        # Cache session so we can access server-assigned session_id later for DELETE
         self.session = await session_manager.get_session(
             self._session_context, self._connection_params, "streamable_http"
         )
         return self.session
 
     async def _terminate_remote_session(self) -> None:
-        """Attempt to explicitly terminate the remote MCP session via HTTP DELETE (best-effort)."""
-        # Only relevant for Streamable HTTP or SSE transport
+        """尝试通过 HTTP DELETE 主动终止远端会话（尽力而为）。
+
+        契约：无返回值，失败仅记录日志。
+        副作用：向远端发送 DELETE 请求。
+        失败语义：异常被捕获并记录，不影响后续清理。
+        """
         if not self._connection_params or "url" not in self._connection_params:
             return
 
         url: str = self._connection_params["url"]
 
-        # Retrieve session id from the underlying SDK if exposed
         session_id = None
         if getattr(self, "session", None) is not None:
-            # Common attributes in MCP python SDK: `session_id` or `id`
             session_id = getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
 
         headers: dict[str, str] = dict(self._connection_params.get("headers", {}))
@@ -1371,29 +1489,26 @@ class MCPStreamableHttpClient:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 await client.delete(url, headers=headers)
         except Exception as e:  # noqa: BLE001
-            # DELETE is advisory—log and continue
             logger.debug(f"Unable to send session DELETE to '{url}': {e}")
 
     async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Run a tool with the given arguments using context-specific session.
+        """在当前会话上下文中执行工具。
 
-        Args:
-            tool_name: Name of the tool to run
-            arguments: Dictionary of arguments to pass to the tool
+        契约：输入 `tool_name/arguments`，输出工具执行结果。
+        关键路径（三步）：
+        1) 确保已连接并补齐默认 context。
+        2) 获取/创建会话并调用工具。
+        3) 失败时按错误类型重试或抛错。
 
-        Returns:
-            The result of the tool execution
-
-        Raises:
-            ValueError: If session is not initialized or tool execution fails
+        异常流：连接不可用或执行失败抛 `ValueError`。
+        性能瓶颈：远程调用超时与会话重建。
+        排障入口：日志关键字 `Tool '{tool_name}' failed`。
         """
         if not self._connected or not self._connection_params:
             msg = "Session not initialized or disconnected. Call connect_to_server first."
             raise ValueError(msg)
 
-        # If no session context is set, create a default one
         if not self._session_context:
-            # Generate a fallback context based on connection parameters
             import uuid
 
             param_hash = uuid.uuid4().hex[:8]
@@ -1405,18 +1520,17 @@ class MCPStreamableHttpClient:
         for attempt in range(max_retries):
             try:
                 await logger.adebug(f"Attempting to run tool '{tool_name}' (attempt {attempt + 1}/{max_retries})")
-                # Get or create persistent session
                 session = await self._get_or_create_session()
 
                 result = await asyncio.wait_for(
                     session.call_tool(tool_name, arguments=arguments),
-                    timeout=30.0,  # 30 second timeout
+                    timeout=30.0,
                 )
             except Exception as e:
                 current_error_type = type(e).__name__
                 await logger.awarning(f"Tool '{tool_name}' failed on attempt {attempt + 1}: {current_error_type} - {e}")
 
-                # Import specific MCP error types for detection
+                # 注意：识别常见 MCP 连接错误类型
                 try:
                     from anyio import ClosedResourceError
                     from mcp.shared.exceptions import McpError
@@ -1427,37 +1541,29 @@ class MCPStreamableHttpClient:
                     is_closed_resource_error = "ClosedResourceError" in str(type(e))
                     is_mcp_connection_error = "Connection closed" in str(e)
 
-                # Detect timeout errors
                 is_timeout_error = isinstance(e, asyncio.TimeoutError | TimeoutError)
 
-                # If we're getting the same error type repeatedly, don't retry
                 if last_error_type == current_error_type and attempt > 0:
                     await logger.aerror(f"Repeated {current_error_type} error for tool '{tool_name}', not retrying")
                     break
 
                 last_error_type = current_error_type
 
-                # If it's a connection error (ClosedResourceError or MCP connection closed) and we have retries left
                 if (is_closed_resource_error or is_mcp_connection_error) and attempt < max_retries - 1:
                     await logger.awarning(
                         f"MCP session connection issue for tool '{tool_name}', retrying with fresh session..."
                     )
-                    # Clean up the dead session
                     if self._session_context:
                         session_manager = self._get_session_manager()
                         await session_manager._cleanup_session(self._session_context)
-                    # Add a small delay before retry
                     await asyncio.sleep(0.5)
                     continue
 
-                # If it's a timeout error and we have retries left, try once more
                 if is_timeout_error and attempt < max_retries - 1:
                     await logger.awarning(f"Tool '{tool_name}' timed out, retrying...")
-                    # Don't clean up session for timeouts, might just be a slow response
                     await asyncio.sleep(1.0)
                     continue
 
-                # For other errors or no retries left, handle as before
                 if (
                     isinstance(e, ConnectionError | TimeoutError | OSError | ValueError)
                     or is_closed_resource_error
@@ -1466,34 +1572,33 @@ class MCPStreamableHttpClient:
                 ):
                     msg = f"Failed to run tool '{tool_name}' after {attempt + 1} attempts: {e}"
                     await logger.aerror(msg)
-                    # Clean up failed session from cache
                     if self._session_context and self._component_cache:
                         cache_key = f"mcp_session_http_{self._session_context}"
                         self._component_cache.delete(cache_key)
                     self._connected = False
                     raise ValueError(msg) from e
-                # Re-raise unexpected errors
                 raise
             else:
                 await logger.adebug(f"Tool '{tool_name}' completed successfully")
                 return result
 
-        # This should never be reached due to the exception handling above
         msg = f"Failed to run tool '{tool_name}': Maximum retries exceeded with repeated {last_error_type} errors"
         await logger.aerror(msg)
         raise ValueError(msg)
 
     async def disconnect(self):
-        """Properly close the connection and clean up resources."""
-        # Attempt best-effort remote session termination first
+        """断开连接并清理资源。
+
+        契约：释放本地会话并尝试终止远端会话。
+        副作用：发送 DELETE 请求并清理缓存映射。
+        失败语义：远端终止失败仅记录日志。
+        """
         await self._terminate_remote_session()
 
-        # Clean up local session using the session manager
         if self._session_context:
             session_manager = self._get_session_manager()
             await session_manager._cleanup_session(self._session_context)
 
-        # Reset local state
         self.session = None
         self._connection_params = None
         self._connected = False
@@ -1506,8 +1611,8 @@ class MCPStreamableHttpClient:
         await self.disconnect()
 
 
-# Backward compatibility: MCPSseClient is now an alias for MCPStreamableHttpClient
-# The new client supports both Streamable HTTP and SSE with automatic fallback
+# 兼容旧接口：`MCPSseClient` 作为 `MCPStreamableHttpClient` 的别名
+# 新客户端同时支持 Streamable HTTP 与 SSE 自动回退
 MCPSseClient = MCPStreamableHttpClient
 
 
@@ -1516,9 +1621,20 @@ async def update_tools(
     server_config: dict,
     mcp_stdio_client: MCPStdioClient | None = None,
     mcp_streamable_http_client: MCPStreamableHttpClient | None = None,
-    mcp_sse_client: MCPStreamableHttpClient | None = None,  # Backward compatibility
+    mcp_sse_client: MCPStreamableHttpClient | None = None,  # 兼容旧参数
 ) -> tuple[str, list[StructuredTool], dict[str, StructuredTool]]:
-    """Fetch server config and update available tools."""
+    """根据服务配置拉取并装配工具列表。
+
+    契约：输入服务名与配置，输出 `(mode, tool_list, tool_cache)`。
+    关键路径（三步）：
+    1) 校验连接参数并选择传输模式。
+    2) 连接服务器获取工具清单。
+    3) 构建 `StructuredTool` 并缓存。
+
+    异常流：配置非法或连接失败抛 `ValueError`。
+    性能瓶颈：远程连接与 JSON Schema 解析。
+    排障入口：日志关键字 `Invalid MCP server configuration`。
+    """
     if server_config is None:
         server_config = {}
     if not server_name:
@@ -1526,12 +1642,11 @@ async def update_tools(
     if mcp_stdio_client is None:
         mcp_stdio_client = MCPStdioClient()
 
-    # Backward compatibility: accept mcp_sse_client parameter
+    # 注意：兼容旧参数 `mcp_sse_client`
     if mcp_streamable_http_client is None:
         mcp_streamable_http_client = mcp_sse_client if mcp_sse_client is not None else MCPStreamableHttpClient()
 
-    # Fetch server config from backend
-    # Determine mode from config, defaulting to Streamable_HTTP if URL present
+    # 注意：未显式指定 mode 时按配置推断
     mode = server_config.get("mode", "")
     if not mode:
         mode = "Stdio" if "command" in server_config else "Streamable_HTTP" if "url" in server_config else ""
@@ -1547,17 +1662,14 @@ async def update_tools(
         logger.error(f"Invalid MCP server configuration for '{server_name}': {e}")
         raise
 
-    # Determine connection type and parameters
     client: MCPStdioClient | MCPStreamableHttpClient | None = None
     if mode == "Stdio":
-        # Stdio connection
         args = server_config.get("args", [])
         env = server_config.get("env", {})
         full_command = " ".join([command, *args])
         tools = await mcp_stdio_client.connect_to_server(full_command, env)
         client = mcp_stdio_client
     elif mode in ["Streamable_HTTP", "SSE"]:
-        # Streamable HTTP connection with SSE fallback
         verify_ssl = server_config.get("verify_ssl", True)
         tools = await mcp_streamable_http_client.connect_to_server(url, headers=headers, verify_ssl=verify_ssl)
         client = mcp_streamable_http_client
@@ -1580,11 +1692,11 @@ async def update_tools(
                 logger.warning(f"Could not create schema for tool '{tool.name}' from server '{server_name}'")
                 continue
 
-            # Create a custom StructuredTool that bypasses schema validation
+            # 注意：自定义 StructuredTool 以处理参数命名转换
             class MCPStructuredTool(StructuredTool):
                 def run(self, tool_input: str | dict, config=None, **kwargs):
-                    """Override the main run method to handle parameter conversion before validation."""
-                    # Parse tool_input if it's a string
+                    """同步执行时在校验前转换参数命名。"""
+                    # 注意：字符串输入先解析为 JSON
                     if isinstance(tool_input, str):
                         try:
                             parsed_input = json.loads(tool_input)
@@ -1593,15 +1705,14 @@ async def update_tools(
                     else:
                         parsed_input = tool_input or {}
 
-                    # Convert camelCase parameters to snake_case
+                    # 注意：将 camelCase 转为 snake_case
                     converted_input = self._convert_parameters(parsed_input)
 
-                    # Call the parent run method with converted parameters
                     return super().run(converted_input, config=config, **kwargs)
 
                 async def arun(self, tool_input: str | dict, config=None, **kwargs):
-                    """Override the main arun method to handle parameter conversion before validation."""
-                    # Parse tool_input if it's a string
+                    """异步执行时在校验前转换参数命名。"""
+                    # 注意：字符串输入先解析为 JSON
                     if isinstance(tool_input, str):
                         try:
                             parsed_input = json.loads(tool_input)
@@ -1610,10 +1721,9 @@ async def update_tools(
                     else:
                         parsed_input = tool_input or {}
 
-                    # Convert camelCase parameters to snake_case
+                    # 注意：将 camelCase 转为 snake_case
                     converted_input = self._convert_parameters(parsed_input)
 
-                    # Call the parent arun method with converted parameters
                     return await super().arun(converted_input, config=config, **kwargs)
 
                 def _convert_parameters(self, input_dict):
@@ -1625,15 +1735,12 @@ async def update_tools(
 
                     for key, value in input_dict.items():
                         if key in original_fields:
-                            # Field exists as-is
                             converted_dict[key] = value
                         else:
-                            # Try to convert camelCase to snake_case
                             snake_key = _camel_to_snake(key)
                             if snake_key in original_fields:
                                 converted_dict[snake_key] = value
                             else:
-                                # Keep original key
                                 converted_dict[key] = value
 
                     return converted_dict

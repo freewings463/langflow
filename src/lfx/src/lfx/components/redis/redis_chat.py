@@ -8,12 +8,14 @@ from lfx.inputs.inputs import IntInput, MessageTextInput, SecretStrInput, StrInp
 
 
 class RedisIndexChatMemory(LCChatMemoryComponent):
+    # Redis 聊天记录存储组件
     display_name = "Redis Chat Memory"
     description = "Retrieves and store chat messages from Redis."
     name = "RedisChatMemory"
     icon = "Redis"
 
     inputs = [
+        # 连接信息与会话配置
         StrInput(
             name="host", display_name="hostname", required=True, value="localhost", info="IP address or hostname."
         ),
@@ -32,11 +34,13 @@ class RedisIndexChatMemory(LCChatMemoryComponent):
     ]
 
     def build_message_history(self) -> Memory:
+        # 组装 Redis 连接 URL 并构建聊天历史
         kwargs = {}
         password: str | None = self.password
         if self.key_prefix:
             kwargs["key_prefix"] = self.key_prefix
         if password:
+            # URL 编码密码，避免特殊字符导致连接失败
             password = parse.quote_plus(password)
 
         url = f"redis://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"

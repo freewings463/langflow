@@ -1,7 +1,16 @@
-"""Template validation utilities for Langflow starter projects.
+"""
+模块名称：template_validation
 
-This module provides validation functions to ensure template integrity and prevent
-unexpected breakage in starter project templates.
+本模块提供Langflow入门项目的模板验证实用工具，主要用于确保模板完整性并防止
+入门项目模板中出现意外的损坏。
+主要功能包括：
+- 验证模板基本结构
+- 验证流程是否可以构建
+- 验证流程代码
+- 验证流程执行
+
+设计背景：在starter项目模板中需要确保模板的完整性，防止意外破坏
+注意事项：包含异步函数用于执行流程验证
 """
 
 import asyncio
@@ -14,14 +23,16 @@ from lfx.graph.graph.base import Graph
 
 
 def validate_template_structure(template_data: dict[str, Any], filename: str) -> list[str]:
-    """Validate basic template structure.
-
-    Args:
-        template_data: The template data to validate
-        filename: Name of the template file for error reporting
-
-    Returns:
-        List of error messages, empty if validation passes
+    """验证基本模板结构。
+    
+    关键路径（三步）：
+    1) 检查模板数据是否包含必需的字段（nodes和edges）
+    2) 验证字段类型是否正确（nodes和edges必须是列表）
+    3) 检查每个节点是否包含必需的字段（id和data）
+    
+    异常流：返回错误消息列表，如果验证通过则返回空列表
+    性能瓶颈：模板数据的遍历验证
+    排障入口：检查返回的错误列表以确定验证失败的具体原因
     """
     errors = []
 
@@ -50,14 +61,16 @@ def validate_template_structure(template_data: dict[str, Any], filename: str) ->
 
 
 def validate_flow_can_build(template_data: dict[str, Any], filename: str) -> list[str]:
-    """Validate that the template can be built into a working flow.
-
-    Args:
-        template_data: The template data to validate
-        filename: Name of the template file for error reporting
-
-    Returns:
-        List of build errors, empty if flow builds successfully
+    """验证模板是否可以构建成可工作的流程。
+    
+    关键路径（三步）：
+    1) 使用模板数据创建图对象
+    2) 验证流配置和基本图结构
+    3) 检查图是否包含有效顶点
+    
+    异常流：捕获并报告构建流程图时的异常
+    性能瓶颈：图的构建和验证
+    排障入口：检查返回的错误列表以确定构建失败的具体原因
     """
     errors = []
 
@@ -86,14 +99,16 @@ def validate_flow_can_build(template_data: dict[str, Any], filename: str) -> lis
 
 
 def validate_flow_code(template_data: dict[str, Any], filename: str) -> list[str]:
-    """Validate flow code using direct function call.
-
-    Args:
-        template_data: The template data to validate
-        filename: Name of the template file for error reporting
-
-    Returns:
-        List of validation errors, empty if validation passes
+    """使用直接函数调用验证流程代码。
+    
+    关键路径（三步）：
+    1) 从模板数据中提取代码字段
+    2) 对每个代码字段调用validate_code函数进行验证
+    3) 收集导入和函数错误
+    
+    异常流：捕获并报告代码验证过程中的异常
+    性能瓶颈：代码验证函数的执行
+    排障入口：检查返回的错误列表以确定代码验证失败的具体原因
     """
     errors = []
 
@@ -140,16 +155,18 @@ def validate_flow_code(template_data: dict[str, Any], filename: str) -> list[str
 async def validate_flow_execution(
     client, template_data: dict[str, Any], filename: str, headers: dict[str, str]
 ) -> list[str]:
-    """Validate flow execution by building and running the flow.
-
-    Args:
-        client: AsyncClient for API requests
-        template_data: The template data to validate
-        filename: Name of the template file for error reporting
-        headers: Authorization headers for API requests
-
-    Returns:
-        List of execution errors, empty if execution succeeds
+    """通过构建和运行流程来验证流程执行。
+    
+    关键路径（三步）：
+    1) 创建流程并获取流程ID
+    2) 构建流程并验证事件流
+    3) 清理已创建的流程
+    
+    异常流：
+    - 捕获并报告API请求超时和其他异常
+    - 即使清理超时也不会导致验证失败
+    性能瓶颈：API请求和响应处理
+    排障入口：检查返回的错误列表以确定执行失败的具体原因
     """
     errors = []
 
@@ -201,13 +218,18 @@ async def validate_flow_execution(
 
 
 async def _validate_event_stream(response, job_id: str, filename: str, errors: list[str]) -> None:
-    """Validate the event stream from flow execution.
-
-    Args:
-        response: The response object with event stream
-        job_id: The job ID to verify in events
-        filename: Name of the template file for error reporting
-        errors: List to append errors to
+    """验证来自流程执行的事件流。
+    
+    关键路径（三步）：
+    1) 遍历事件流中的所有行
+    2) 解析每个事件并验证其内容
+    3) 检查是否观察到必要的事件类型
+    
+    异常流：
+    - 捕获并报告JSON解析错误
+    - 捕获并报告事件处理超时
+    性能瓶颈：事件流的异步处理
+    排障入口：检查错误列表以确定事件流验证失败的原因
     """
     try:
         vertices_sorted_seen = False

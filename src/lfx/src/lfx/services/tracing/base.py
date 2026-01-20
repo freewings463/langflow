@@ -1,4 +1,12 @@
-"""Abstract base class for tracing services."""
+"""模块名称：追踪服务抽象基类
+
+本模块定义追踪服务的最小接口，供轻量实现与完整实现统一对齐。
+使用场景：Graph 运行时调用追踪服务时的接口约束。
+主要功能包括：
+- 定义 tracer 生命周期接口
+- 定义组件级追踪上下文
+- 定义日志与输出写入接口
+"""
 
 from __future__ import annotations
 
@@ -17,15 +25,11 @@ if TYPE_CHECKING:
 
 
 class BaseTracingService(Service, ABC):
-    """Abstract base class for tracing services.
-
-    Defines the minimal interface that all tracing service implementations
-    must provide, whether minimal (LFX) or full-featured (Langflow).
-    """
+    """追踪服务抽象基类。"""
 
     @abstractmethod
     def __init__(self):
-        """Initialize the tracing service."""
+        """初始化追踪服务。"""
         super().__init__()
 
     @abstractmethod
@@ -37,24 +41,11 @@ class BaseTracingService(Service, ABC):
         session_id: str | None,
         project_name: str | None = None,
     ) -> None:
-        """Start tracers for a graph run.
-
-        Args:
-            run_id: Unique identifier for the run
-            run_name: Name of the run
-            user_id: User identifier (optional)
-            session_id: Session identifier (optional)
-            project_name: Project name (optional)
-        """
+        """启动一次运行的追踪器。"""
 
     @abstractmethod
     async def end_tracers(self, outputs: dict, error: Exception | None = None) -> None:
-        """End tracers for a graph run.
-
-        Args:
-            outputs: Output data from the run
-            error: Exception if run failed (optional)
-        """
+        """结束一次运行的追踪器。"""
 
     @abstractmethod
     @asynccontextmanager
@@ -65,26 +56,11 @@ class BaseTracingService(Service, ABC):
         inputs: dict[str, Any],
         metadata: dict[str, Any] | None = None,
     ):
-        """Context manager for tracing a component execution.
-
-        Args:
-            component: The component being traced
-            trace_name: Name for the trace
-            inputs: Input data to the component
-            metadata: Additional metadata (optional)
-
-        Yields:
-            Self for method chaining
-        """
+        """组件级追踪上下文管理器。"""
 
     @abstractmethod
     def add_log(self, trace_name: str, log: Any) -> None:
-        """Add a log entry to the current trace.
-
-        Args:
-            trace_name: Name of the trace
-            log: Log data to add
-        """
+        """向当前追踪写入日志。"""
 
     @abstractmethod
     def set_outputs(
@@ -93,27 +69,13 @@ class BaseTracingService(Service, ABC):
         outputs: dict[str, Any],
         output_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Set outputs for the current trace.
-
-        Args:
-            trace_name: Name of the trace
-            outputs: Output data
-            output_metadata: Additional output metadata (optional)
-        """
+        """为当前追踪设置输出数据。"""
 
     @abstractmethod
     def get_langchain_callbacks(self) -> list[BaseCallbackHandler]:
-        """Get LangChain callback handlers for tracing.
-
-        Returns:
-            List of callback handlers
-        """
+        """返回 LangChain 回调处理器列表。"""
 
     @property
     @abstractmethod
     def project_name(self) -> str | None:
-        """Get the current project name.
-
-        Returns:
-            Project name or None if not set
-        """
+        """返回当前项目名称。"""

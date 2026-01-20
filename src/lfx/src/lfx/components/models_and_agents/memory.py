@@ -1,3 +1,19 @@
+"""
+模块名称：消息记忆组件
+
+本模块提供消息存取能力，支持 Langflow 内置存储与外部 Memory 接入。
+主要功能：
+- 存储消息到内部表或外部 Memory；
+- 按条件检索消息并输出文本/数据表；
+- 基于模式切换动态显示输入/输出。
+
+关键组件：
+- MemoryComponent：消息存取组件入口。
+
+设计背景：统一不同记忆后端的读取/写入方式，便于组件化复用。
+注意事项：外部 Memory 需实现 `aget_messages/aadd_messages` 接口。
+"""
+
 from typing import Any, cast
 
 from lfx.custom.custom_component.component import Component
@@ -14,6 +30,17 @@ from lfx.utils.constants import MESSAGE_SENDER_AI, MESSAGE_SENDER_NAME_AI, MESSA
 
 
 class MemoryComponent(Component):
+    """消息存取组件封装
+
+    契约：支持 `Store/Retrieve` 两种模式；输出为 `Message` 或 `DataFrame`。
+    关键路径：1) 模式选择 2) 调用外部或内部存储 3) 返回格式化结果。
+    决策：优先兼容外部 Memory 接口
+    问题：用户可能接入自定义记忆实现
+    方案：检测 `aget_messages/aadd_messages` 并透传调用
+    代价：外部接口不一致会导致运行时错误
+    重评：当 Memory 接口标准化并可校验时
+    """
+
     display_name = "Message History"
     description = "Stores or retrieves stored chat messages from Langflow tables or an external memory."
     documentation: str = "https://docs.langflow.org/message-history"
@@ -120,9 +147,19 @@ class MemoryComponent(Component):
     ]
 
     def update_outputs(self, frontend_node: dict, field_name: str, field_value: Any) -> dict:
-        """Dynamically show only the relevant output based on the selected output type."""
+        """根据模式切换输出端口
+
+        契约：修改 `frontend_node["outputs"]` 并返回更新后的节点配置。
+        关键路径：1) 清空旧输出 2) 按 `Store/Retrieve` 生成输出列表。
+        异常流：字段不匹配时保持现状，不抛异常。
+        决策：输出随模式动态变化以避免误连
+        问题：存储与检索的输出语义不同
+        方案：Store 仅返回存储结果，Retrieve 返回文本与表格
+        代价：切换模式会丢失原有输出连接
+        重评：当 UI 支持条件输出绑定时
+        """
         if field_name == "mode":
-            # Start with empty outputs
+            # 注意：先清空输出，避免遗留旧模式端口。
             frontend_node["outputs"] = []
             if field_value == "Store":
                 frontend_node["outputs"] = [
@@ -146,6 +183,18 @@ class MemoryComponent(Component):
         return frontend_node
 
     async def store_message(self) -> Message:
+        """存储消息并返回最新写入结果
+
+        契约：输入 `message/session_id/context_id` 等字段；成功返回 `Message`。
+        关键路径：1) 规范化消息对象 2) 写入外部或内部存储 3) 取回并返回。
+        异常流：无可返回消息时抛 `ValueError`。
+        排障入口：异常信息包含 session/sender 关键字段。
+        决策：优先使用外部 Memory（若提供）
+        问题：需要兼容外部持久化存储
+        方案：检测 `self.memory` 并走其接口
+        代价：外部实现差异可能导致错误
+        重评：当仅允许内置存储时
+        """
         message = Message(text=self.message) if isinstance(self.message, str) else self.message
 
         message.context_id = self.context_id or message.context_id
@@ -188,6 +237,19 @@ class MemoryComponent(Component):
         return stored_message
 
     async def retrieve_messages(self) -> Data:
+        """按条件检索消息列表
+
+        契约：支持按 `sender_type/sender_name/session_id/context_id` 过滤；返回 `Data`（消息列表）。
+        关键路径：1) 解析过滤条件 2) 调用外部/内部存储 3) 按数量/排序裁剪。
+        异常流：外部 Memory 缺少接口时抛 `AttributeError`。
+        性能瓶颈：内部检索可达 `limit=10000`，高频调用需注意。
+        排障入口：异常提示包含缺失方法名。
+        决策：外部 Memory 由组件负责裁剪/排序
+        问题：不同 Memory 的返回顺序不一致
+        方案：按 `n_messages/order` 在组件内处理
+        代价：额外内存与 CPU 开销
+        重评：当外部 Memory 支持原生分页/排序时
+        """
         sender_type = self.sender_type
         sender_name = self.sender_name
         session_id = self.session_id
@@ -202,29 +264,29 @@ class MemoryComponent(Component):
             memory_name = type(self.memory).__name__
             err_msg = f"External Memory object ({memory_name}) must have 'aget_messages' method."
             raise AttributeError(err_msg)
-        # Check if n_messages is None or 0
+        # 注意：n_messages 为 0 时直接返回空列表。
         if n_messages == 0:
             stored = []
         elif self.memory:
-            # override session_id
+            # 实现：外部 memory 使用当前 session/context 覆盖配置。
             self.memory.session_id = session_id
             self.memory.context_id = context_id
 
             stored = await self.memory.aget_messages()
-            # langchain memories are supposed to return messages in ascending order
+            # 注意：LangChain memory 默认按升序返回。
 
             if n_messages:
-                stored = stored[-n_messages:]  # Get last N messages first
+                stored = stored[-n_messages:]  # 注意：先取最后 N 条。
 
             if order == "DESC":
-                stored = stored[::-1]  # Then reverse if needed
+                stored = stored[::-1]  # 注意：需要降序时再反转。
 
             stored = [Message.from_lc_message(m) for m in stored]
             if sender_type:
                 expected_type = MESSAGE_SENDER_AI if sender_type == MESSAGE_SENDER_AI else MESSAGE_SENDER_USER
                 stored = [m for m in stored if m.type == expected_type]
         else:
-            # For internal memory, we always fetch the last N messages by ordering by DESC
+            # 注意：内部存储以 order 控制排序，再裁剪最后 N 条。
             stored = await aget_messages(
                 sender=sender_type,
                 sender_name=sender_name,
@@ -234,21 +296,36 @@ class MemoryComponent(Component):
                 order=order,
             )
             if n_messages:
-                stored = stored[-n_messages:]  # Get last N messages
+                stored = stored[-n_messages:]  # 注意：取最后 N 条。
 
-        # self.status = stored
+        # 注意：状态输出保留给调试场景，默认关闭。
         return cast("Data", stored)
 
     async def retrieve_messages_as_text(self) -> Message:
+        """将检索结果渲染为模板文本
+
+        契约：返回 `Message` 文本；依赖 `template` 字段。
+        关键路径：1) 读取消息 2) 按模板渲染。
+        决策：使用模板渲染而非固定拼接
+        问题：不同场景需要不同展示格式
+        方案：模板驱动格式化
+        代价：模板错误会导致输出异常
+        重评：当输出格式固定化时
+        """
         stored_text = data_to_text(self.template, await self.retrieve_messages())
-        # self.status = stored_text
+        # 注意：状态输出保留给调试场景，默认关闭。
         return Message(text=stored_text)
 
     async def retrieve_messages_dataframe(self) -> DataFrame:
-        """Convert the retrieved messages into a DataFrame.
+        """将检索结果转换为 DataFrame
 
-        Returns:
-            DataFrame: A DataFrame containing the message data.
+        契约：返回 `DataFrame`；字段来自 `Message` 对象。
+        关键路径：1) 读取消息 2) 直接构造 DataFrame。
+        决策：使用 DataFrame 作为表格输出格式
+        问题：前端需要表格化展示
+        方案：统一输出 DataFrame
+        代价：字段变更需同步前端展示
+        重评：当前端支持自定义表格时
         """
         messages = await self.retrieve_messages()
         return DataFrame(messages)
@@ -259,6 +336,16 @@ class MemoryComponent(Component):
         field_value: Any,  # noqa: ARG002
         field_name: str | None = None,  # noqa: ARG002
     ) -> dotdict:
+        """按模式切换可见字段
+
+        契约：返回更新后的 `build_config`；副作用：字段显示与默认值被调整。
+        关键路径：1) 读取当前模式 2) 应用字段显示规则 3) 返回配置。
+        决策：通过 `set_current_fields` 统一字段切换
+        问题：手工切换字段容易遗漏
+        方案：使用公共工具函数集中处理
+        代价：依赖工具函数的规则完整性
+        重评：当字段切换规则变复杂时
+        """
         return set_current_fields(
             build_config=build_config,
             action_fields=self.mode_config,

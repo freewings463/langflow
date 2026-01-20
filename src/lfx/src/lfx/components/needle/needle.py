@@ -7,6 +7,7 @@ from lfx.utils.constants import MESSAGE_SENDER_AI
 
 
 class NeedleComponent(Component):
+    # Needle 检索组件基础信息
     display_name = "Needle Retriever"
     description = "A retriever that uses the Needle API to search collections."
     documentation = "https://docs.needle-ai.com"
@@ -45,22 +46,22 @@ class NeedleComponent(Component):
     outputs = [Output(display_name="Result", name="result", type_="Message", method="run")]
 
     def run(self) -> Message:
-        # Extract query and top_k
+        # 提取 query 与 top_k 输入
         query_input = self.query
         actual_query = query_input.get("query", "") if isinstance(query_input, dict) else query_input
 
-        # Parse top_k from tool input or use default, always enforcing minimum of 20
+        # 从工具输入解析 top_k，或使用默认值，且最小值固定为 20
         try:
             if isinstance(query_input, dict) and "top_k" in query_input:
                 agent_top_k = query_input.get("top_k")
-                # Check if agent_top_k is not None before converting to int
+                # 仅在非空时转换为整数
                 top_k = max(20, int(agent_top_k)) if agent_top_k is not None else max(20, self.top_k)
             else:
                 top_k = max(20, self.top_k)
         except (ValueError, TypeError):
             top_k = max(20, self.top_k)
 
-        # Validate required inputs
+        # 校验必填参数
         if not self.needle_api_key or not self.needle_api_key.strip():
             error_msg = "The Needle API key cannot be empty."
             raise ValueError(error_msg)
@@ -72,7 +73,7 @@ class NeedleComponent(Component):
             raise ValueError(error_msg)
 
         try:
-            # Initialize the retriever and get documents
+            # 初始化检索器并拉取文档
             retriever = NeedleRetriever(
                 needle_api_key=self.needle_api_key,
                 collection_id=self.collection_id,
@@ -81,24 +82,26 @@ class NeedleComponent(Component):
 
             docs = retriever.get_relevant_documents(actual_query)
 
-            # Format the response
+            # 组装输出文本
             if not docs:
                 text_content = "No relevant documents found for the query."
             else:
                 context = "\n\n".join([f"Document {i + 1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
                 text_content = f"Question: {actual_query}\n\nContext:\n{context}"
 
-            # Return formatted message
+            # 返回统一格式的 Message
             return Message(
                 text=text_content,
                 type="assistant",
                 sender=MESSAGE_SENDER_AI,
                 additional_kwargs={
+                    # 附带源文档与最终使用的 top_k
                     "source_documents": [{"page_content": doc.page_content, "metadata": doc.metadata} for doc in docs],
                     "top_k_used": top_k,
                 },
             )
 
         except Exception as e:
+            # 统一错误包装，便于前端展示
             error_msg = f"Error processing query: {e!s}"
             raise ValueError(error_msg) from e

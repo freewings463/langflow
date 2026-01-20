@@ -1,3 +1,18 @@
+"""
+模块名称：S3 文件上传组件
+
+本模块提供将文件或文本内容写入 S3 的组件封装，支持两种上传策略。主要功能包括：
+- 按文本内容写入 S3（Store Data）
+- 按原始文件路径上传（Store Original File）
+
+关键组件：
+- `S3BucketUploaderComponent`
+
+设计背景：需要在 LFX 流程中将处理结果或源文件写入 S3。
+使用场景：知识库构建、结果归档、文件备份。
+注意事项：依赖 `boto3`，缺失将抛 `ImportError`。
+"""
+
 from pathlib import Path
 from typing import Any
 
@@ -13,38 +28,16 @@ from lfx.io import (
 
 
 class S3BucketUploaderComponent(Component):
-    """S3BucketUploaderComponent is a component responsible for uploading files to an S3 bucket.
+    """S3 文件上传组件
 
-    It provides two strategies for file upload: "By Data" and "By File Name". The component
-    requires AWS credentials and bucket details as inputs and processes files accordingly.
-
-    Attributes:
-        display_name (str): The display name of the component.
-        description (str): A brief description of the components functionality.
-        icon (str): The icon representing the component.
-        name (str): The internal name of the component.
-        inputs (list): A list of input configurations required by the component.
-        outputs (list): A list of output configurations provided by the component.
-
-    Methods:
-        process_files() -> None:
-            Processes files based on the selected strategy. Calls the appropriate method
-            based on the strategy attribute.
-        process_files_by_data() -> None:
-            Processes and uploads files to an S3 bucket based on the data inputs. Iterates
-            over the data inputs, logs the file path and text content, and uploads each file
-            to the specified S3 bucket if both file path and text content are available.
-        process_files_by_name() -> None:
-            Processes and uploads files to an S3 bucket based on their names. Iterates through
-            the list of data inputs, retrieves the file path from each data item, and uploads
-            the file to the specified S3 bucket if the file path is available. Logs the file
-            path being uploaded.
-        _s3_client() -> Any:
-            Creates and returns an S3 client using the provided AWS access key ID and secret
-            access key.
-
-        Please note that this component requires the boto3 library to be installed. It is designed
-        to work with File and Director components as inputs
+    契约：输入 AWS 凭证、`bucket_name`、`strategy` 与 `data_inputs`；输出写入结果标记；
+    副作用：向 S3 写入对象或上传文件；失败语义：依赖缺失抛 `ImportError`，上传失败抛异常透传。
+    关键路径：1) 选择上传策略 2) 遍历 `data_inputs` 3) 通过 S3 客户端写入。
+    决策：提供“Store Data/Store Original File”两种策略。
+    问题：既要支持文本写入，又要支持原文件直传。
+    方案：用 `strategy` 分支选择处理方式。
+    代价：输入数据需包含 `file_path` 与/或 `text` 字段。
+    重评：当统一为单一上传方式或引入批量上传时。
     """
 
     display_name = "S3 Bucket Uploader"
@@ -112,16 +105,16 @@ class S3BucketUploaderComponent(Component):
     ]
 
     def process_files(self) -> None:
-        """Process files based on the selected strategy.
+        """按策略分发上传流程
 
-        This method uses a strategy pattern to process files. The strategy is determined
-        by the `self.strategy` attribute, which can be either "By Data" or "By File Name".
-        Depending on the strategy, the corresponding method (`process_files_by_data` or
-        `process_files_by_name`) is called. If an invalid strategy is provided, an error
-        is logged.
-
-        Returns:
-            None
+        契约：读取 `strategy` 并调用对应方法；副作用：执行上传、记录日志；
+        失败语义：非法策略记录日志但不抛异常。
+        关键路径：1) 构建策略映射 2) 调用对应处理函数。
+        决策：非法策略仅记录日志而非中断。
+        问题：组件运行时需避免因配置错误直接终止流程。
+        方案：降级为日志提示。
+        代价：可能掩盖配置问题。
+        重评：当需要强制失败以提升可见性时。
         """
         strategy_methods = {
             "Store Data": self.process_files_by_data,
@@ -130,17 +123,16 @@ class S3BucketUploaderComponent(Component):
         strategy_methods.get(self.strategy, lambda: self.log("Invalid strategy"))()
 
     def process_files_by_data(self) -> None:
-        """Processes and uploads files to an S3 bucket based on the data inputs.
+        """以文本内容写入 S3
 
-        This method iterates over the data inputs, logs the file path and text content,
-        and uploads each file to the specified S3 bucket if both file path and text content
-        are available.
-
-        Args:
-            None
-
-        Returns:
-            None
+        契约：从 `data_inputs` 读取 `file_path` 与 `text`，写入 `bucket_name`；
+        副作用：创建对象并上传；失败语义：S3 写入失败异常透传。
+        关键路径：1) 读取数据项 2) 规范化路径 3) 调用 `put_object`。
+        决策：仅当 `file_path` 与 `text` 同时存在时写入。
+        问题：数据项可能不完整。
+        方案：缺失字段直接跳过。
+        代价：不完整数据不会产生任何输出。
+        重评：当需要对缺失字段进行告警或失败时。
         """
         for data_item in self.data_inputs:
             file_path = data_item.data.get("file_path")
@@ -152,14 +144,16 @@ class S3BucketUploaderComponent(Component):
                 )
 
     def process_files_by_name(self) -> None:
-        """Processes and uploads files to an S3 bucket based on their names.
+        """按原始文件路径上传
 
-        Iterates through the list of data inputs, retrieves the file path from each data item,
-        and uploads the file to the specified S3 bucket if the file path is available.
-        Logs the file path being uploaded.
-
-        Returns:
-            None
+        契约：从 `data_inputs` 读取 `file_path` 并上传到 `bucket_name`；
+        副作用：上传文件、记录日志；失败语义：上传失败异常透传。
+        关键路径：1) 读取 `file_path` 2) 记录日志 3) 调用 `upload_file`。
+        决策：使用本地路径作为上传源。
+        问题：需要保留原始文件内容与结构。
+        方案：直接上传本地文件。
+        代价：要求运行环境可访问源文件路径。
+        重评：当源文件不可访问或需流式上传时。
         """
         for data_item in self.data_inputs:
             file_path = data_item.data.get("file_path")
@@ -168,10 +162,16 @@ class S3BucketUploaderComponent(Component):
                 self._s3_client().upload_file(file_path, Bucket=self.bucket_name, Key=self._normalize_path(file_path))
 
     def _s3_client(self) -> Any:
-        """Creates and returns an S3 client using the provided AWS access key ID and secret access key.
+        """创建 S3 客户端
 
-        Returns:
-            Any: A boto3 S3 client instance.
+        契约：使用组件内的 AWS 凭证创建并返回 boto3 客户端；
+        副作用：加载 boto3；失败语义：缺失依赖抛 `ImportError`。
+        关键路径：导入 boto3 并创建客户端。
+        决策：每次调用都创建新的客户端实例。
+        问题：避免跨线程或跨请求共享客户端导致的状态问题。
+        方案：按需创建短生命周期客户端。
+        代价：频繁调用会增加创建成本。
+        重评：当需要连接复用或性能优化时。
         """
         try:
             import boto3
@@ -186,25 +186,24 @@ class S3BucketUploaderComponent(Component):
         )
 
     def _normalize_path(self, file_path) -> str:
-        """Process the file path based on the s3_prefix and path_as_prefix.
+        """规范化 S3 对象 Key
 
-        Args:
-            file_path (str): The original file path.
-            s3_prefix (str): The S3 prefix to use.
-            path_as_prefix (bool): Whether to use the file path as the S3 prefix.
-
-        Returns:
-            str: The processed file path.
+        契约：输入本地 `file_path`，结合 `s3_prefix`/`strip_path` 返回对象 Key；
+        副作用：无；失败语义：无（路径不存在也不会报错）。
+        关键路径：1) 根据 `strip_path` 取文件名 2) 拼接 `s3_prefix`。
+        决策：`strip_path=True` 时仅保留文件名。
+        问题：保留本地目录结构可能导致 Key 过长或泄露路径。
+        方案：可选择只保留文件名。
+        代价：可能造成同名文件覆盖。
+        重评：当需要保留目录层级或加入唯一后缀时。
         """
         prefix = self.s3_prefix
         strip_path = self.strip_path
         processed_path: str = file_path
 
         if strip_path:
-            # Filename only
             processed_path = Path(file_path).name
 
-        # Concatenate the s3_prefix if it exists
         if prefix:
             processed_path = str(Path(prefix) / processed_path)
 

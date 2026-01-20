@@ -1,3 +1,20 @@
+"""
+模块名称：`Tavily` 搜索工具组件
+
+本模块封装 Tavily 搜索 API，支持高级检索与内容片段返回。
+主要功能包括：
+- 校验搜索参数并转换为枚举值
+- 调用 Tavily API 并结构化结果
+- 可选返回摘要、图片与原始内容
+
+关键组件：
+- `TavilySearchToolComponent.run_model`：参数校验与调用入口
+- `TavilySearchToolComponent._tavily_search`：HTTP 请求与结果整理
+
+设计背景：为 RAG 场景提供可配置的实时搜索能力。
+注意事项：请求超时或配额限制会抛 `ToolException`。
+"""
+
 from enum import Enum
 
 import httpx
@@ -11,7 +28,7 @@ from lfx.inputs.inputs import BoolInput, DropdownInput, IntInput, MessageTextInp
 from lfx.log.logger import logger
 from lfx.schema.data import Data
 
-# Add at the top with other constants
+# 注意：限制单源返回的内容片段数，避免过长输出。
 MAX_CHUNKS_PER_SOURCE = 3
 
 
@@ -33,6 +50,7 @@ class TavilySearchTimeRange(Enum):
 
 
 class TavilySearchSchema(BaseModel):
+    """Tavily 搜索参数结构。"""
     query: str = Field(..., description="The search query you want to execute with Tavily.")
     search_depth: TavilySearchDepth = Field(TavilySearchDepth.BASIC, description="The depth of the search.")
     topic: TavilySearchTopic = Field(TavilySearchTopic.GENERAL, description="The category of the search.")
@@ -71,6 +89,15 @@ class TavilySearchSchema(BaseModel):
 
 
 class TavilySearchToolComponent(LCToolComponent):
+    """Tavily 搜索工具组件。
+
+    契约：输入查询与搜索参数，输出 `Data` 列表。
+    决策：在组件层进行参数校验与枚举转换。
+    问题：前端传入字符串易造成枚举不一致。
+    方案：统一在 `run_model` 中转换并捕获错误。
+    代价：增加组件层处理逻辑。
+    重评：当输入类型强校验由前端保证时简化转换。
+    """
     display_name = "Tavily Search API"
     description = """**Tavily Search API** is a search engine optimized for LLMs and RAG, \
         aimed at efficient, quick, and persistent search results. It can be used independently or as an agent tool.
@@ -176,7 +203,15 @@ Note: Check 'Advanced' for all options.
     ]
 
     def run_model(self) -> list[Data]:
-        # Convert string values to enum instances with validation
+        """校验参数并执行 Tavily 搜索。
+
+        关键路径（三步）：
+        1) 将输入转换为枚举并校验
+        2) 解析域名白名单/黑名单
+        3) 调用 `_tavily_search` 并返回结果
+        异常流：枚举解析失败返回带 `error` 的 `Data`。
+        """
+        # 注意：将字符串转换为枚举，确保 API 传参一致。
         try:
             search_depth_enum = (
                 self.search_depth
@@ -210,11 +245,11 @@ Note: Check 'Advanced' for all options.
             self.status = error_message
             return [Data(data={"error": error_message})]
 
-        # Initialize domain variables as None
+        # 注意：初始化域名过滤变量为 None，便于按需注入。
         include_domains = None
         exclude_domains = None
 
-        # Only process domains if they're provided
+        # 注意：仅在提供域名时才解析，避免空串影响。
         if self.include_domains:
             include_domains = [domain.strip() for domain in self.include_domains.split(",") if domain.strip()]
 
@@ -237,6 +272,7 @@ Note: Check 'Advanced' for all options.
         )
 
     def build_tool(self) -> Tool:
+        """构建可被 LangChain 调用的搜索工具。"""
         return StructuredTool.from_function(
             name="tavily_search",
             description="Perform a web search using the Tavily API.",
@@ -260,7 +296,15 @@ Note: Check 'Advanced' for all options.
         days: int = 7,
         time_range: TavilySearchTimeRange | None = None,
     ) -> list[Data]:
-        # Validate enum values
+        """调用 Tavily API 并返回结构化结果。
+
+        关键路径（三步）：
+        1) 校验枚举与数值边界
+        2) 构造请求体并发送 HTTP 请求
+        3) 解析响应并转换为 `Data`
+        异常流：超时、HTTP 错误会抛 `ToolException`。
+        """
+        # 注意：枚举必须是已知类型。
         if not isinstance(search_depth, TavilySearchDepth):
             msg = f"Invalid search_depth value: {search_depth}"
             raise TypeError(msg)
@@ -268,12 +312,12 @@ Note: Check 'Advanced' for all options.
             msg = f"Invalid topic value: {topic}"
             raise TypeError(msg)
 
-        # Validate chunks_per_source range
+        # 注意：限制单源片段数，避免超长输出。
         if not 1 <= chunks_per_source <= MAX_CHUNKS_PER_SOURCE:
             msg = f"chunks_per_source must be between 1 and {MAX_CHUNKS_PER_SOURCE}, got {chunks_per_source}"
             raise ValueError(msg)
 
-        # Validate days is positive
+        # 注意：新闻检索的时间范围需为正数。
         if days < 1:
             msg = f"days must be greater than or equal to 1, got {days}"
             raise ValueError(msg)

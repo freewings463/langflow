@@ -1,3 +1,19 @@
+"""
+模块名称：lfx.graph.edge.base
+
+本模块提供图中边的运行时模型与循环边语义，主要用于解析前端句柄并校验连线合法性。主要功能包括：
+- 功能1：解析 `EdgeData` 构建 `Edge` / `CycleEdge`
+- 功能2：根据输入输出类型校验句柄兼容性
+- 功能3：在循环边中写入目标参数以闭环执行
+
+关键组件：
+- `Edge`：普通边的解析与校验
+- `CycleEdge`：循环边的结果兑现
+
+设计背景：统一处理前端句柄协议与运行期类型匹配，避免执行期才暴露不兼容连接。
+注意事项：校验失败会抛 `ValueError`；循环边依赖源节点已构建。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
@@ -11,7 +27,23 @@ if TYPE_CHECKING:
 
 
 class Edge:
+    """连接源/目标节点的运行时边模型。
+
+    契约：输入 `source`/`target` 与 `EdgeData`，初始化后提供 `target_param`、`matched_type` 与校验结果。
+    关键路径：1) 解析句柄 2) 校验句柄 3) 记录匹配类型。
+    决策：兼容旧/新句柄协议并存；问题：历史流程仍发送 `baseClasses`；
+    方案：检测 `base_classes` 分支进入 `_legacy_*`；代价：双分支维护成本；
+    重评：旧协议下线后移除 `_legacy_*` 分支。
+    """
+
     def __init__(self, source: Vertex, target: Vertex, edge: EdgeData):
+        """构建边并完成句柄/类型校验。
+
+        关键路径（三步）：1) 解析 `edge` 句柄 2) 选择新/旧校验 3) 校验类型匹配。
+        异常流：句柄缺失或类型不匹配时抛 `ValueError`。
+        性能瓶颈：匹配复杂度与 `outputs`/`inputs` 数量线性相关。
+        排障入口：日志关键字 `Edge data is empty`。
+        """
         self.source_id: str = source.id if source else ""
         self.target_id: str = target.id if target else ""
         self.valid_handles: bool = False
@@ -144,6 +176,15 @@ class Edge:
             self._validate_edge(source, target)
 
     def _validate_edge(self, source, target) -> None:
+        """校验新协议下的类型匹配并标记结果。
+
+        契约：读取 `source.outputs` 与 `target` 输入约束，设置 `self.valid`/`self.matched_type`。
+        关键路径：1) 抽取 `source_handle` 输出 2) 区分 loop/常规输入 3) 记录首个匹配类型。
+        决策：使用包含关系匹配类型名（`output_type in target_req`）；
+        问题：历史类型名存在包含关系；方案：容错匹配；代价：潜在误匹配；重评：类型枚举化后改严格等值。
+        异常流：无匹配类型时抛 `ValueError`；性能瓶颈：双层匹配 O(n*m)；
+        排障入口：调试日志 `source_types`/`target_reqs`。
+        """
         # Validate that the outputs of the source node are valid inputs
         # for the target node
         # .outputs is a list of Output objects as dictionaries
@@ -202,6 +243,14 @@ class Edge:
             raise ValueError(msg)
 
     def _legacy_validate_edge(self, source, target) -> None:
+        """校验旧协议下的类型匹配。
+
+        契约：使用 `source.output` 与 `target` 输入约束，设置 `self.valid`/`self.matched_type`。
+        关键路径：1) 汇总输出类型 2) 按包含关系匹配 3) 记录首个匹配类型。
+        异常流：无匹配类型时抛 `ValueError`。
+        性能瓶颈：匹配复杂度与类型数量线性相关。
+        排障入口：调试日志 `source_types`/`target_reqs`。
+        """
         # Validate that the outputs of the source node are valid inputs
         # for the target node
         self.source_types = source.output
@@ -247,6 +296,14 @@ class Edge:
 
 
 class CycleEdge(Edge):
+    """循环边：在执行期将源节点结果写回目标节点参数。
+
+    契约：依赖 `matched_type` 判定写回的数据来源；通过 `honor` 兑现后可重复读取结果。
+    关键路径：1) 读取源节点结果 2) 写入目标参数 3) 标记已兑现。
+    决策：循环边不触发构建未完成的节点；问题：避免在只读阶段隐式构建；
+    方案：未构建即抛错；代价：调用方需确保构建顺序；重评：引入显式构建阶段后评估。
+    """
+
     def __init__(self, source: Vertex, target: Vertex, raw_edge: EdgeData):
         super().__init__(source, target, raw_edge)
         self.is_fulfilled = False  # Whether the contract has been fulfilled.
@@ -256,12 +313,12 @@ class CycleEdge(Edge):
         target.has_cycle_edges = True
 
     async def honor(self, source: Vertex, target: Vertex) -> None:
-        """Fulfills the contract by setting the result of the source vertex to the target vertex's parameter.
+        """兑现循环边契约并写入目标参数。
 
-        If the edge is runnable, the source vertex is run with the message text and the target vertex's
-        root_field param is set to the
-        result. If the edge is not runnable, the target vertex's parameter is set to the result.
-        :param message: The message object to be processed if the edge is runnable.
+        关键路径（三步）：1) 校验源节点已构建 2) 选取 `built_result`/`built_object` 3) 写入目标参数。
+        异常流：源节点未构建时抛 `ValueError`。
+        性能瓶颈：无显著瓶颈，主要为内存赋值。
+        排障入口：异常信息 `Source vertex ... is not built.`。
         """
         if self.is_fulfilled:
             return
@@ -281,6 +338,12 @@ class CycleEdge(Edge):
         self.is_fulfilled = True
 
     async def get_result_from_source(self, source: Vertex, target: Vertex):
+        """返回循环边结果，必要时先兑现。
+
+        契约：若未兑现则先执行 `honor`；始终返回 `self.result`。
+        异常流：沿用 `honor` 的 `ValueError`。
+        排障入口：关注 `ChatOutput` 参数 `message` 的空值判定逻辑。
+        """
         # Fulfill the contract if it has not been fulfilled.
         if not self.is_fulfilled:
             await self.honor(source, target)

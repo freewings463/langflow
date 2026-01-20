@@ -1,3 +1,19 @@
+"""
+模块名称：缓存服务抽象基类
+
+本模块定义同步/异步缓存服务的抽象接口，主要用于统一缓存实现的契约与生命周期。主要功能包括：
+- 提供同步缓存的 `get`/`set`/`upsert`/`delete`/`clear` 等接口
+- 提供异步缓存的对应接口与连接状态检查
+
+关键组件：
+- `CacheService`：同步缓存接口
+- `AsyncBaseCacheService`：异步缓存接口
+- `ExternalAsyncBaseCacheService`：外部依赖缓存接口
+
+设计背景：缓存实现多样（内存/磁盘/`Redis`），需统一契约
+注意事项：接口返回 `CACHE_MISS` 语义由具体实现定义
+"""
+
 import abc
 import asyncio
 import threading
@@ -10,174 +26,118 @@ AsyncLockType = TypeVar("AsyncLockType", bound=asyncio.Lock)
 
 
 class CacheService(Service, Generic[LockType]):
-    """Abstract base class for a cache."""
+    """同步缓存服务抽象基类。
+
+    契约：提供键值缓存的读写/删除/清空/存在性判断接口。
+    注意：具体实现需定义 `CACHE_MISS` 的语义与线程安全策略。
+    """
 
     name = "cache_service"
 
     @abc.abstractmethod
     def get(self, key, lock: LockType | None = None):
-        """Retrieve an item from the cache.
+        """读取缓存项。
 
-        Args:
-            key: The key of the item to retrieve.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The value associated with the key, or CACHE_MISS if the key is not found.
+        契约：输入 `key` 与可选锁；输出命中值或 `CACHE_MISS`。
+        失败语义：实现可选择抛异常或返回 `CACHE_MISS`。
         """
 
     @abc.abstractmethod
     def set(self, key, value, lock: LockType | None = None):
-        """Add an item to the cache.
+        """写入缓存项。
 
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
+        契约：输入 `key`/`value` 与可选锁；无返回值；允许覆盖。
         """
 
     @abc.abstractmethod
     def upsert(self, key, value, lock: LockType | None = None):
-        """Add an item to the cache if it doesn't exist, or update it if it does.
+        """插入或更新缓存项。
 
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
+        契约：输入 `key`/`value` 与可选锁；无返回值；实现可支持合并语义。
         """
 
     @abc.abstractmethod
     def delete(self, key, lock: LockType | None = None):
-        """Remove an item from the cache.
+        """删除缓存项。
 
-        Args:
-            key: The key of the item to remove.
-            lock: A lock to use for the operation.
+        契约：输入 `key` 与可选锁；无返回值；不存在时应静默处理。
         """
 
     @abc.abstractmethod
     def clear(self, lock: LockType | None = None):
-        """Clear all items from the cache."""
+        """清空缓存。
+
+        契约：无返回值；实现需保证清空语义。
+        """
 
     @abc.abstractmethod
     def contains(self, key) -> bool:
-        """Check if the key is in the cache.
+        """判断键是否存在于缓存。
 
-        Args:
-            key: The key of the item to check.
-
-        Returns:
-            True if the key is in the cache, False otherwise.
+        契约：输入 `key`；输出 `bool`。
         """
 
     @abc.abstractmethod
     def __contains__(self, key) -> bool:
-        """Check if the key is in the cache.
-
-        Args:
-            key: The key of the item to check.
-
-        Returns:
-            True if the key is in the cache, False otherwise.
-        """
+        """`in` 操作的存在性判断。"""
 
     @abc.abstractmethod
     def __getitem__(self, key):
-        """Retrieve an item from the cache using the square bracket notation.
-
-        Args:
-            key: The key of the item to retrieve.
-        """
+        """下标读取语义，等价于 `get`。"""
 
     @abc.abstractmethod
     def __setitem__(self, key, value) -> None:
-        """Add an item to the cache using the square bracket notation.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-        """
+        """下标写入语义，等价于 `set`。"""
 
     @abc.abstractmethod
     def __delitem__(self, key) -> None:
-        """Remove an item from the cache using the square bracket notation.
-
-        Args:
-            key: The key of the item to remove.
-        """
+        """下标删除语义，等价于 `delete`。"""
 
 
 class AsyncBaseCacheService(Service, Generic[AsyncLockType]):
-    """Abstract base class for a async cache."""
+    """异步缓存服务抽象基类。
+
+    契约：提供异步键值缓存的读写/删除/清空/存在性判断接口。
+    """
 
     name = "cache_service"
 
     @abc.abstractmethod
     async def get(self, key, lock: AsyncLockType | None = None):
-        """Retrieve an item from the cache.
+        """读取缓存项（异步）。
 
-        Args:
-            key: The key of the item to retrieve.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The value associated with the key, or CACHE_MISS if the key is not found.
+        契约：输入 `key` 与可选锁；输出命中值或 `CACHE_MISS`。
         """
 
     @abc.abstractmethod
     async def set(self, key, value, lock: AsyncLockType | None = None):
-        """Add an item to the cache.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
-        """
+        """写入缓存项（异步）。"""
 
     @abc.abstractmethod
     async def upsert(self, key, value, lock: AsyncLockType | None = None):
-        """Add an item to the cache if it doesn't exist, or update it if it does.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
-        """
+        """插入或更新缓存项（异步）。"""
 
     @abc.abstractmethod
     async def delete(self, key, lock: AsyncLockType | None = None):
-        """Remove an item from the cache.
-
-        Args:
-            key: The key of the item to remove.
-            lock: A lock to use for the operation.
-        """
+        """删除缓存项（异步）。"""
 
     @abc.abstractmethod
     async def clear(self, lock: AsyncLockType | None = None):
-        """Clear all items from the cache."""
+        """清空缓存（异步）。"""
 
     @abc.abstractmethod
     async def contains(self, key) -> bool:
-        """Check if the key is in the cache.
-
-        Args:
-            key: The key of the item to check.
-
-        Returns:
-            True if the key is in the cache, False otherwise.
-        """
+        """判断键是否存在于缓存（异步）。"""
 
 
 class ExternalAsyncBaseCacheService(AsyncBaseCacheService):
-    """Abstract base class for an external async cache."""
+    """外部依赖异步缓存抽象基类。
+
+    契约：在异步缓存基础上增加连接状态检查接口。
+    """
 
     name = "cache_service"
 
     @abc.abstractmethod
     async def is_connected(self) -> bool:
-        """Check if the cache is connected.
-
-        Returns:
-            True if the cache is connected, False otherwise.
-        """
+        """检查外部缓存是否已连接。"""

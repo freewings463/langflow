@@ -1,4 +1,15 @@
-"""Dependency analysis utilities for custom components."""
+"""
+模块名称：自定义组件依赖分析
+
+本模块基于 AST 解析组件代码中的 import 语句，输出第三方依赖列表与版本信息。
+主要功能：
+- 识别绝对/相对导入并过滤标准库；
+- 可选解析已安装包的版本；
+- 输出依赖统计结果供前端展示。
+
+设计背景：自定义组件加载时需要提示外部依赖与版本信息。
+注意事项：版本解析依赖本地环境已安装包，未安装时返回 None。
+"""
 
 from __future__ import annotations
 
@@ -11,31 +22,31 @@ from functools import lru_cache
 try:
     STDLIB_MODULES: set[str] = set(sys.stdlib_module_names)  # 3.10+
 except AttributeError:
-    # Fallback heuristic if running on <3.10
+    # 注意：在 <3.10 环境下使用内置模块列表作为回退。
     STDLIB_MODULES = set(sys.builtin_module_names)
 
 
 @dataclass(frozen=True)
 class DependencyInfo:
-    """Information about a dependency imported in Python code."""
+    """记录代码中导入依赖的信息。"""
 
-    name: str  # package name (e.g. "numpy", "requests")
-    version: str | None  # package version if available
-    is_local: bool  # True for relative imports (from .module import ...)
+    name: str  # 注意：包名（如 "numpy", "requests"）。
+    version: str | None  # 注意：已安装包版本（可选）。
+    is_local: bool  # 注意：相对导入标记（如 from .module import ...）。
 
 
 def _top_level(pkg: str) -> str:
-    """Extract top-level package name."""
+    """提取顶层包名（如 numpy.linalg -> numpy）。"""
     return pkg.split(".", 1)[0]
 
 
 def _is_relative(module: str | None) -> bool:
-    """Check if module is a relative import."""
+    """判断是否为相对导入（以 '.' 开头）。"""
     return module is not None and module.startswith(".")
 
 
 class _ImportVisitor(ast.NodeVisitor):
-    """AST visitor to extract import information."""
+    """AST 访问器：提取 import 依赖信息。"""
 
     def __init__(self):
         self.results: list[DependencyInfo] = []
@@ -46,30 +57,30 @@ class _ImportVisitor(ast.NodeVisitor):
             dep = DependencyInfo(
                 name=_top_level(full),
                 version=None,
-                is_local=False,  # Regular imports are not local
+                is_local=False,  # 注意：普通 import 视为非本地。
             )
             self.results.append(dep)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
-        # Reconstruct full module name with proper relative import handling
+        # 注意：按相对导入规则重建完整模块名。
         if node.level > 0:
-            # Relative import: from .module import x or from ..parent import x
+            # 注意：相对导入示例：from .module import x / from ..parent import x
             dots = "." * node.level
             full_module = dots + (node.module or "")
         else:
-            # Absolute import: from module import x
+            # 注意：绝对导入示例：from module import x
             full_module = node.module or ""
         for _alias in node.names:
             dep = DependencyInfo(
                 name=_top_level(full_module.lstrip(".")) if full_module else "",
                 version=None,
-                is_local=_is_relative(full_module),  # Check if it's a relative import
+                is_local=_is_relative(full_module),  # 注意：标记是否为相对导入。
             )
             self.results.append(dep)
 
 
 def _classify_dependency(dep: DependencyInfo) -> DependencyInfo:
-    """Resolve version information for external dependencies."""
+    """补充外部依赖版本信息（若可解析）。"""
     version = None
     if not dep.is_local and dep.name:
         version = _get_distribution_version(dep.name)
@@ -82,32 +93,29 @@ def _classify_dependency(dep: DependencyInfo) -> DependencyInfo:
 
 
 def analyze_dependencies(source: str, *, resolve_versions: bool = True) -> list[dict]:
-    """Return a list[dict] of dependencies imported by the given Python source code.
+    """分析代码依赖并返回字典列表
 
-    Args:
-        source: Python source code string
-        resolve_versions: Whether to resolve version information
-
-    Returns:
-        List of dependency dictionaries
+    契约：返回依赖字典列表，包含 name/version/is_local 等信息。
+    关键路径：1) 解析 AST 2) 访问 import 3) 去重并过滤标准库。
+    异常流：语法错误由上层处理（此处不捕获）。
     """
     code = source
 
-    # Parse the code and extract imports
+    # 实现：解析代码并提取 import 语句。
     tree = ast.parse(code)
     visitor = _ImportVisitor()
     visitor.visit(tree)
 
-    # Process and deduplicate dependencies by package name only
+    # 实现：按包名去重依赖。
     unique_packages: dict[str, DependencyInfo] = {}
     for raw_dep in visitor.results:
         processed_dep = _classify_dependency(raw_dep) if resolve_versions else raw_dep
 
-        # Skip stdlib imports and local imports - we only care about external dependencies
+        # 注意：忽略标准库与本地导入，仅保留外部依赖。
         if processed_dep.name in STDLIB_MODULES or processed_dep.is_local:
             continue
 
-        # Deduplicate by package name only (not full_module)
+        # 注意：仅按包名去重（不区分子模块）。
         if processed_dep.name not in unique_packages:
             unique_packages[processed_dep.name] = processed_dep
 
@@ -115,13 +123,10 @@ def analyze_dependencies(source: str, *, resolve_versions: bool = True) -> list[
 
 
 def analyze_component_dependencies(component_code: str) -> dict:
-    """Analyze dependencies for a custom component.
+    """分析组件依赖并返回统计结果
 
-    Args:
-        component_code: The component's source code
-
-    Returns:
-        Dictionary with dependency analysis results
+    契约：返回 `{"total_dependencies": int, "dependencies": [...]}`。
+    异常流：解析失败返回空依赖。
     """
     try:
         deps = analyze_dependencies(component_code, resolve_versions=True)
@@ -131,34 +136,35 @@ def analyze_component_dependencies(component_code: str) -> dict:
             "dependencies": [{"name": d["name"], "version": d["version"]} for d in deps if d["name"]],
         }
     except (SyntaxError, TypeError, ValueError, ImportError):
-        # If analysis fails, return minimal info
+        # 注意：分析失败返回最小依赖信息。
         return {
             "total_dependencies": 0,
             "dependencies": [],
         }
 
 
-# Cache the expensive packages_distributions() call globally
+# 注意：packages_distributions 代价较高，使用全局缓存。
 @lru_cache(maxsize=1)
 def _get_packages_distributions():
-    """Cache the expensive packages_distributions() call."""
+    """缓存 packages_distributions() 调用结果。"""
     try:
         return md.packages_distributions()
     except (OSError, AttributeError, ValueError):
         return {}
 
 
-# Helper function to cache version lookups for installed distributions
+# 注意：版本查询频繁，缓存单包版本。
 @lru_cache(maxsize=128)
 def _get_distribution_version(import_name: str):
+    """根据导入名反查分发包版本。"""
     try:
-        # Reverse-lookup: which distribution(s) provide this importable name?
+        # 注意：反向查找提供该导入名的分发包。
         reverse_map = _get_packages_distributions()
         dist_names = reverse_map.get(import_name)
         if not dist_names:
             return None
 
-        # Take the first matching distribution
+        # 注意：取首个匹配分发包版本。
         dist_name = dist_names[0]
         return md.distribution(dist_name).version
     except (ImportError, AttributeError, OSError, ValueError):

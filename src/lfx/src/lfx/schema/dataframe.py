@@ -1,3 +1,8 @@
+"""DataFrame 扩展类型。
+
+本模块基于 pandas.DataFrame 提供与 Data/Message 的互转能力。
+"""
+
 from typing import TYPE_CHECKING, cast
 
 import pandas as pd
@@ -11,29 +16,12 @@ if TYPE_CHECKING:
 
 
 class DataFrame(pandas_DataFrame):
-    """A pandas DataFrame subclass specialized for handling collections of Data objects.
+    """面向 Data 对象的 DataFrame 扩展。
 
-    This class extends pandas.DataFrame to provide seamless integration between
-    Langflow's Data objects and pandas' powerful data manipulation capabilities.
-
-    Args:
-        data: Input data in various formats:
-            - List[Data]: List of Data objects
-            - List[Dict]: List of dictionaries
-            - Dict: Dictionary of arrays/lists
-            - pandas.DataFrame: Existing DataFrame
-            - Any format supported by pandas.DataFrame
-        **kwargs: Additional arguments passed to pandas.DataFrame constructor
-
-    Examples:
-        >>> # From Data objects
-        >>> dataset = DataFrame([Data(data={"name": "John"}), Data(data={"name": "Jane"})])
-
-        >>> # From dictionaries
-        >>> dataset = DataFrame([{"name": "John"}, {"name": "Jane"}])
-
-        >>> # From dictionary of lists
-        >>> dataset = DataFrame({"name": ["John", "Jane"], "age": [30, 25]})
+    关键路径（三步）：
+    1) 初始化并规范化输入数据；
+    2) 提供与 Data/Document 的互转；
+    3) 支持追加行与批量追加。
     """
 
     def __init__(
@@ -43,10 +31,10 @@ class DataFrame(pandas_DataFrame):
         default_value: str = "",
         **kwargs,
     ):
-        # Initialize pandas DataFrame first without data
-        super().__init__(**kwargs)  # Removed data parameter
+        # 先初始化空 DataFrame
+        super().__init__(**kwargs)  # 已移除 data 参数
 
-        # Store attributes as private members to avoid conflicts with pandas
+        # 使用私有属性避免与 pandas 字段冲突
         self._text_key = text_key
         self._default_value = default_value
 
@@ -60,21 +48,44 @@ class DataFrame(pandas_DataFrame):
                 msg = "List items must be either all Data objects or all dictionaries"
                 raise ValueError(msg)
             self._update(data, **kwargs)
-        elif isinstance(data, dict | pd.DataFrame):  # Fixed type check syntax
+        elif isinstance(data, dict | pd.DataFrame):  # 修正类型判断
             self._update(data, **kwargs)
 
     def _update(self, data, **kwargs):
-        """Helper method to update DataFrame with new data."""
+        """Helper method to update DataFrame with new data.
+
+        契约：
+        - 输入：新数据和额外参数
+        - 输出：无（原地更新）
+        - 副作用：修改 DataFrame 内容
+        - 失败语义：数据格式错误时抛出异常
+        """
         new_df = pd.DataFrame(data, **kwargs)
         self._update_inplace(new_df)
 
-    # Update property accessors
+    # 属性访问器
     @property
     def text_key(self) -> str:
+        """获取文本键。
+
+        契约：
+        - 输入：无
+        - 输出：当前文本键
+        - 副作用：无
+        - 失败语义：无
+        """
         return self._text_key
 
     @text_key.setter
     def text_key(self, value: str) -> None:
+        """设置文本键。
+
+        契约：
+        - 输入：新的文本键
+        - 输出：无
+        - 副作用：修改内部文本键
+        - 失败语义：文本键不在列中时抛出 ValueError
+        """
         if value not in self.columns:
             msg = f"Text key '{value}' not found in DataFrame columns"
             raise ValueError(msg)
@@ -82,45 +93,43 @@ class DataFrame(pandas_DataFrame):
 
     @property
     def default_value(self) -> str:
+        """获取默认值。
+
+        契约：
+        - 输入：无
+        - 输出：当前默认值
+        - 副作用：无
+        - 失败语义：无
+        """
         return self._default_value
 
     @default_value.setter
     def default_value(self, value: str) -> None:
+        """设置默认值。
+
+        契约：
+        - 输入：新的默认值
+        - 输出：无
+        - 副作用：修改内部默认值
+        - 失败语义：无
+        """
         self._default_value = value
 
     def to_data_list(self) -> list[Data]:
-        """Converts the DataFrame back to a list of Data objects."""
+        """转换为 Data 列表。"""
         list_of_dicts = self.to_dict(orient="records")
-        # suggested change: [Data(**row) for row in list_of_dicts]
+        # 可选写法：Data(**row)
         return [Data(data=row) for row in list_of_dicts]
 
     def add_row(self, data: dict | Data) -> "DataFrame":
-        """Adds a single row to the dataset.
-
-        Args:
-            data: Either a Data object or a dictionary to add as a new row
-
-        Returns:
-            DataFrame: A new DataFrame with the added row
-
-        Example:
-            >>> dataset = DataFrame([{"name": "John"}])
-            >>> dataset = dataset.add_row({"name": "Jane"})
-        """
+        """追加单行数据。"""
         if isinstance(data, Data):
             data = data.data
         new_df = self._constructor([data])
         return cast("DataFrame", pd.concat([self, new_df], ignore_index=True))
 
     def add_rows(self, data: list[dict | Data]) -> "DataFrame":
-        """Adds multiple rows to the dataset.
-
-        Args:
-            data: List of Data objects or dictionaries to add as new rows
-
-        Returns:
-            DataFrame: A new DataFrame with the added rows
-        """
+        """追加多行数据。"""
         processed_data = []
         for item in data:
             if isinstance(item, Data):
@@ -132,26 +141,27 @@ class DataFrame(pandas_DataFrame):
 
     @property
     def _constructor(self):
+        """返回 DataFrame 构造函数。
+
+        契约：
+        - 输入：无
+        - 输出：DataFrame 构造函数
+        - 副作用：无
+        - 失败语义：无
+        """
         def _c(*args, **kwargs):
             return DataFrame(*args, **kwargs).__finalize__(self)
 
         return _c
 
     def __bool__(self):
-        """Truth value testing for the DataFrame.
-
-        Returns True if the DataFrame has at least one row, False otherwise.
-        """
+        """返回 DataFrame 是否非空。"""
         return not self.empty
 
-    __hash__ = None  # DataFrames are mutable and shouldn't be hashable
+    __hash__ = None  # DataFrame 可变，不可哈希
 
     def to_lc_documents(self) -> list[Document]:
-        """Converts the DataFrame to a list of Documents.
-
-        Returns:
-            list[Document]: The converted list of Documents.
-        """
+        """转换为 LangChain Document 列表。"""
         list_of_dicts = self.to_dict(orient="records")
         documents = []
         for row in list_of_dicts:
@@ -164,47 +174,37 @@ class DataFrame(pandas_DataFrame):
         return documents
 
     def _docs_to_dataframe(self, docs):
-        """Converts a list of Documents to a DataFrame.
-
-        Args:
-            docs: List of Document objects
-
-        Returns:
-            DataFrame: A new DataFrame with the converted Documents
-        """
+        """将 Document 列表转换为 DataFrame。"""
         return DataFrame(docs)
 
     def __eq__(self, other):
-        """Override equality to handle comparison with empty DataFrames and non-DataFrame objects."""
+        """自定义相等比较，规避空表与非表对象误判。"""
         if self.empty:
             return False
-        if isinstance(other, list) and not other:  # Empty list case
+        if isinstance(other, list) and not other:  # 空列表
             return False
-        if not isinstance(other, DataFrame | pd.DataFrame):  # Non-DataFrame case
+        if not isinstance(other, DataFrame | pd.DataFrame):  # 非 DataFrame
             return False
         return super().__eq__(other)
 
     def to_data(self) -> Data:
-        """Convert this DataFrame to a Data object.
-
-        Returns:
-            Data: A Data object containing the DataFrame records under 'results' key.
-        """
+        """转换为 Data（results 列表）。"""
         dict_list = self.to_dict(orient="records")
         return Data(data={"results": dict_list})
 
     def to_message(self) -> "Message":
+        """转换为 Markdown 文本的 Message。"""
         from lfx.schema.message import Message
 
-        # Process DataFrame similar to the _safe_convert method
-        # Remove empty rows
+        # 按 safe_convert 逻辑处理
+        # 移除空行
         processed_df = self.dropna(how="all")
-        # Remove empty lines in each cell
+        # 移除单元格空行
         processed_df = processed_df.replace(r"^\s*$", "", regex=True)
-        # Replace multiple newlines with a single newline
+        # 多个换行压缩为一个
         processed_df = processed_df.replace(r"\n+", "\n", regex=True)
-        # Replace pipe characters to avoid markdown table issues
+        # 转义管道符避免 Markdown 表格错位
         processed_df = processed_df.replace(r"\|", r"\\|", regex=True)
         processed_df = processed_df.map(lambda x: str(x).replace("\n", "<br/>") if isinstance(x, str) else x)
-        # Convert to markdown and wrap in a Message
+        # 转为 Markdown 并封装 Message
         return Message(text=processed_df.to_markdown(index=False))

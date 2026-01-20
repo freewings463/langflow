@@ -1,3 +1,19 @@
+"""模块名称：Novita LLM 组件适配
+
+本模块提供 Novita AI 的 OpenAI 兼容模型接入能力，供 Langflow 组件系统调用。
+使用场景：在对话流中调用 Novita 模型进行文本生成或结构化输出。
+主要功能包括：
+- 拉取可用模型列表并刷新 UI 选项
+- 构建 `ChatOpenAI` 实例并指向 Novita `base_url`
+- 支持可选 JSON 输出模式
+
+关键组件：
+- NovitaModelComponent：Novita 模型组件入口
+
+设计背景：复用 Langflow 现有 OpenAI 生态，降低新模型接入成本
+注意事项：模型列表拉取失败会回退到 `MODEL_NAMES`
+"""
+
 import requests
 from langchain_openai import ChatOpenAI
 from pydantic.v1 import SecretStr
@@ -19,6 +35,19 @@ from lfx.inputs.inputs import (
 
 
 class NovitaModelComponent(LCModelComponent):
+    """Novita 模型组件，提供 OpenAI 兼容接口的文本生成。
+
+    契约：输入 `api_key`/`model_name`/`max_tokens` 等，输出 `LanguageModel`
+    关键路径：1) 刷新模型列表 2) 构建 `ChatOpenAI` 3) 可选 JSON 绑定
+    副作用：模型列表刷新会发起网络请求
+    异常流：列表请求失败回退 `MODEL_NAMES`；连接失败抛 `ValueError`
+    排障入口：`status` 字段包含 `Error fetching models`
+    决策：以 OpenAI 兼容 `base_url` 接入 Novita
+    问题：需要与 Langflow 现有 OpenAI 生态复用
+    方案：使用 `ChatOpenAI` 并指定 `base_url`
+    代价：受限于 OpenAI 兼容层能力
+    重评：当 Novita 原生 SDK 能提供更完整能力时
+    """
     display_name = "Novita AI"
     description = "Generates text using Novita AI LLMs (OpenAI compatible)."
     icon = "Novita"
@@ -79,6 +108,17 @@ class NovitaModelComponent(LCModelComponent):
     ]
 
     def get_models(self) -> list[str]:
+        """拉取 Novita 模型列表。
+
+        关键路径（三步）：
+        1) 组装请求地址与 headers
+        2) 调用 `/models` 并校验状态码
+        3) 解析 `data` 并返回模型 id 列表
+
+        异常流：网络/接口异常时设置 `status` 并回退 `MODEL_NAMES`
+        性能瓶颈：受网络延迟影响，默认超时 10 秒
+        排障入口：组件状态 `status` 字段
+        """
         base_url = "https://api.novita.ai/v3/openai"
         url = f"{base_url}/models"
 
@@ -95,12 +135,35 @@ class NovitaModelComponent(LCModelComponent):
 
     @override
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
+        """按字段变化刷新模型下拉选项。
+
+        契约：仅在 `api_key` 或 `model_name` 变更时刷新 `model_name.options`
+        副作用：调用 `get_models` 可能触发网络请求
+        """
         if field_name in {"api_key", "model_name"}:
             models = self.get_models()
             build_config["model_name"]["options"] = models
         return build_config
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 Novita ChatOpenAI 模型实例。
+
+        关键路径（三步）：
+        1) 汇总输入参数并补齐默认值
+        2) 初始化 `ChatOpenAI` 并指定 Novita `base_url`
+        3) `json_mode` 开启时绑定 `response_format`
+
+        契约：返回 `LanguageModel`；`max_tokens=0` 视为不限
+        副作用：可能进行网络初始化；使用 `SecretStr` 处理密钥
+        异常流：连接失败抛 `ValueError("Could not connect to Novita API.")`
+        性能瓶颈：首次初始化受网络影响
+        排障入口：异常消息 `Could not connect to Novita API.`
+        决策：`json_mode` 时强制绑定 JSON 输出
+        问题：无 schema 时仍需稳定 JSON 结构
+        方案：调用 `bind` 设置 `response_format={"type": "json_object"}`
+        代价：可能与模型默认输出不一致
+        重评：当上游提供标准化结构化输出控制时
+        """
         api_key = self.api_key
         temperature = self.temperature
         model_name: str = self.model_name

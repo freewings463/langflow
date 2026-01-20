@@ -1,3 +1,15 @@
+"""
+模块名称：知识库管理接口
+
+本模块提供知识库的查询、统计与删除能力，面向前端的知识库列表与详情页。
+主要功能：
+- 探测知识库存储目录并提取元数据
+- 统计知识库规模、分片与文本指标
+- 单个/批量删除知识库目录
+设计背景：统一管理本地持久化的向量知识库并提供可视化指标。
+注意事项：目录删除为不可逆操作，异常统一转为 4xx/5xx。
+"""
+
 import json
 import shutil
 from http import HTTPStatus
@@ -19,7 +31,7 @@ _KNOWLEDGE_BASES_DIR: Path | None = None
 
 
 def _get_knowledge_bases_dir() -> Path:
-    """Lazy load the knowledge bases directory from settings."""
+    """从配置延迟加载知识库根目录。"""
     global _KNOWLEDGE_BASES_DIR  # noqa: PLW0603
     if _KNOWLEDGE_BASES_DIR is None:
         settings = get_settings_service().settings
@@ -32,6 +44,8 @@ def _get_knowledge_bases_dir() -> Path:
 
 
 class KnowledgeBaseInfo(BaseModel):
+    """知识库摘要信息。"""
+
     id: str
     name: str
     embedding_provider: str | None = "Unknown"
@@ -44,16 +58,18 @@ class KnowledgeBaseInfo(BaseModel):
 
 
 class BulkDeleteRequest(BaseModel):
+    """批量删除请求，包含知识库名称列表。"""
+
     kb_names: list[str]
 
 
 def get_kb_root_path() -> Path:
-    """Get the knowledge bases root path."""
+    """返回知识库根目录路径。"""
     return _get_knowledge_bases_dir()
 
 
 def get_directory_size(path: Path) -> int:
-    """Calculate the total size of all files in a directory."""
+    """统计目录下所有文件的总大小（字节）。"""
     total_size = 0
     try:
         for file_path in path.rglob("*"):
@@ -65,8 +81,19 @@ def get_directory_size(path: Path) -> int:
 
 
 def detect_embedding_provider(kb_path: Path) -> str:
-    """Detect the embedding provider from config files and directory structure."""
-    # Provider patterns to check for
+    """从配置文件与目录结构推断向量模型提供方。
+
+    契约：
+    - 输入：`kb_path`
+    - 输出：提供方名称或 `"Unknown"`
+    - 失败语义：配置文件读取失败会被记录并跳过
+
+    关键路径（三步）：
+    1) 遍历 JSON 配置查找显式提供方字段
+    2) 通过关键词在配置文本中匹配提供方
+    3) 以目录结构特征作为最终回退
+    """
+    # 实现：基于关键词匹配与目录特征进行识别。
     provider_patterns = {
         "OpenAI": ["openai", "text-embedding-ada", "text-embedding-3"],
         "HuggingFace": ["sentence-transformers", "huggingface", "bert-"],
@@ -75,7 +102,7 @@ def detect_embedding_provider(kb_path: Path) -> str:
         "Chroma": ["chroma"],
     }
 
-    # Check JSON config files for provider information
+    # 实现：优先扫描 JSON 配置，避免误判。
     for config_file in kb_path.glob("*.json"):
         try:
             with config_file.open("r", encoding="utf-8") as f:
@@ -85,7 +112,7 @@ def detect_embedding_provider(kb_path: Path) -> str:
 
                 config_str = json.dumps(config_data).lower()
 
-                # Check for explicit provider fields first
+                # 注意：先读取显式字段，可靠性更高。
                 provider_fields = ["embedding_provider", "provider", "embedding_model_provider"]
                 for field in provider_fields:
                     if field in config_data:
@@ -94,7 +121,7 @@ def detect_embedding_provider(kb_path: Path) -> str:
                             if any(pattern in provider_value for pattern in patterns):
                                 return provider
 
-                # Check for model name patterns
+                # 实现：回退到关键字匹配。
                 for provider, patterns in provider_patterns.items():
                     if any(pattern in config_str for pattern in patterns):
                         return provider
@@ -103,7 +130,7 @@ def detect_embedding_provider(kb_path: Path) -> str:
             logger.exception("Error reading config file '%s'", config_file)
             continue
 
-    # Fallback to directory structure
+    # 实现：配置缺失时退回目录结构识别。
     if (kb_path / "chroma").exists():
         return "Chroma"
     if (kb_path / "vectors.npy").exists():
@@ -113,24 +140,35 @@ def detect_embedding_provider(kb_path: Path) -> str:
 
 
 def detect_embedding_model(kb_path: Path) -> str:
-    """Detect the embedding model from config files."""
-    # First check the embedding metadata file (most accurate)
+    """从配置文件中识别向量模型名称。
+
+    契约：
+    - 输入：`kb_path`
+    - 输出：模型名称或 `"Unknown"`
+    - 失败语义：配置读取失败会被记录并继续
+
+    关键路径（三步）：
+    1) 读取 `embedding_metadata.json` 的显式模型字段
+    2) 遍历其他 JSON 配置的显式模型字段
+    3) 通过已知提供方模型关键词回退识别
+    """
+    # 注意：优先读取最可信的 `embedding_metadata.json`。
     metadata_file = kb_path / "embedding_metadata.json"
     if metadata_file.exists():
         try:
             with metadata_file.open("r", encoding="utf-8") as f:
                 metadata = json.load(f)
                 if isinstance(metadata, dict) and "embedding_model" in metadata:
-                    # Check for embedding model field
+                    # 实现：提取 `embedding_model` 字段。
                     model_value = str(metadata.get("embedding_model", "unknown"))
                     if model_value and model_value.lower() != "unknown":
                         return model_value
         except (OSError, json.JSONDecodeError) as _:
             logger.exception("Error reading embedding metadata file '%s'", metadata_file)
 
-    # Check other JSON config files for model information
+    # 实现：遍历其他 JSON 配置文件查找模型名。
     for config_file in kb_path.glob("*.json"):
-        # Skip the embedding metadata file since we already checked it
+        # 注意：跳过已处理的 metadata 文件。
         if config_file.name == "embedding_metadata.json":
             continue
 
@@ -140,7 +178,7 @@ def detect_embedding_model(kb_path: Path) -> str:
                 if not isinstance(config_data, dict):
                     continue
 
-                # Check for explicit model fields first and return the actual model name
+                # 注意：优先读取显式模型字段。
                 model_fields = ["embedding_model", "model", "embedding_model_name", "model_name"]
                 for field in model_fields:
                     if field in config_data:
@@ -148,7 +186,7 @@ def detect_embedding_model(kb_path: Path) -> str:
                         if model_value and model_value.lower() != "unknown":
                             return model_value
 
-                # Check for OpenAI specific model names
+                # 实现：识别 OpenAI 常见模型名。
                 if "openai" in json.dumps(config_data).lower():
                     openai_models = ["text-embedding-ada-002", "text-embedding-3-small", "text-embedding-3-large"]
                     config_str = json.dumps(config_data).lower()
@@ -156,10 +194,10 @@ def detect_embedding_model(kb_path: Path) -> str:
                         if model in config_str:
                             return model
 
-                # Check for HuggingFace model names (usually in model field)
+                # 实现：识别 HuggingFace 常见模型名。
                 if "model" in config_data:
                     model_name = str(config_data["model"])
-                    # Common HuggingFace embedding models
+                    # 注意：匹配常见 HuggingFace 嵌入模型前缀。
                     hf_patterns = ["sentence-transformers", "all-MiniLM", "all-mpnet", "multi-qa"]
                     if any(pattern in model_name for pattern in hf_patterns):
                         return model_name
@@ -172,8 +210,8 @@ def detect_embedding_model(kb_path: Path) -> str:
 
 
 def get_text_columns(df: pd.DataFrame, schema_data: list | None = None) -> list[str]:
-    """Get the text columns to analyze for word/character counts."""
-    # First try schema-defined text columns
+    """识别用于统计的文本列集合。"""
+    # 实现：优先使用 schema 中标记为 `vectorize` 的字符串列。
     if schema_data:
         text_columns = [
             col["column_name"]
@@ -183,18 +221,18 @@ def get_text_columns(df: pd.DataFrame, schema_data: list | None = None) -> list[
         if text_columns:
             return [col for col in text_columns if col in df.columns]
 
-    # Fallback to common text column names
+    # 实现：回退到常见列名匹配。
     common_names = ["text", "content", "document", "chunk"]
     text_columns = [col for col in df.columns if col.lower() in common_names]
     if text_columns:
         return text_columns
 
-    # Last resort: all string columns
+    # 实现：最后退回所有字符串列。
     return [col for col in df.columns if df[col].dtype == "object"]
 
 
 def calculate_text_metrics(df: pd.DataFrame, text_columns: list[str]) -> tuple[int, int]:
-    """Calculate total words and characters from text columns."""
+    """计算文本列的总词数与字符数。"""
     total_words = 0
     total_characters = 0
 
@@ -210,7 +248,19 @@ def calculate_text_metrics(df: pd.DataFrame, text_columns: list[str]) -> tuple[i
 
 
 def get_kb_metadata(kb_path: Path) -> dict:
-    """Extract metadata from a knowledge base directory."""
+    """提取知识库目录的统计与模型元数据。
+
+    契约：
+    - 输入：`kb_path`
+    - 输出：包含分片数、词数、字符数与模型信息的字典
+    - 副作用：读取磁盘与 Chroma 数据库
+    - 失败语义：异常会记录日志并返回已有字段
+
+    关键路径（三步）：
+    1) 读取 metadata/schema 文件并识别模型信息
+    2) 打开 Chroma 集合并拉取文档元数据
+    3) 统计文本指标并计算平均分片大小
+    """
     metadata: dict[str, float | int | str] = {
         "chunks": 0,
         "words": 0,
@@ -221,7 +271,7 @@ def get_kb_metadata(kb_path: Path) -> dict:
     }
 
     try:
-        # First check embedding metadata file for accurate provider and model info
+        # 注意：优先读取 `embedding_metadata.json` 获取可靠的模型信息。
         metadata_file = kb_path / "embedding_metadata.json"
         if metadata_file.exists():
             try:
@@ -235,13 +285,13 @@ def get_kb_metadata(kb_path: Path) -> dict:
             except (OSError, json.JSONDecodeError) as _:
                 logger.exception("Error reading embedding metadata file '%s'", metadata_file)
 
-        # Fallback to detection if not found in metadata file
+        # 实现：元数据缺失时退回自动识别。
         if metadata["embedding_provider"] == "Unknown":
             metadata["embedding_provider"] = detect_embedding_provider(kb_path)
         if metadata["embedding_model"] == "Unknown":
             metadata["embedding_model"] = detect_embedding_model(kb_path)
 
-        # Read schema for text column information
+        # 实现：读取 schema 获取文本列配置。
         schema_data = None
         schema_file = kb_path / "schema.json"
         if schema_file.exists():
@@ -253,19 +303,19 @@ def get_kb_metadata(kb_path: Path) -> dict:
             except (ValueError, TypeError, OSError) as _:
                 logger.exception("Error reading schema file '%s'", schema_file)
 
-        # Create vector store
+        # 实现：打开 Chroma 向量库以读取源文档信息。
         chroma = Chroma(
             persist_directory=str(kb_path),
             collection_name=kb_path.name,
         )
 
-        # Access the raw collection
+        # 注意：访问底层集合以便读取原始文档与元数据。
         collection = chroma._collection  # noqa: SLF001
 
-        # Fetch all documents and metadata
+        # 实现：拉取文档与元数据。
         results = collection.get(include=["documents", "metadatas"])
 
-        # Convert to pandas DataFrame
+        # 实现：转换为 DataFrame 便于统计。
         source_chunks = pd.DataFrame(
             {
                 "document": results["documents"],
@@ -273,18 +323,18 @@ def get_kb_metadata(kb_path: Path) -> dict:
             }
         )
 
-        # Process the source data for metadata
+        # 实现：统计分片数量与文本指标。
         try:
             metadata["chunks"] = len(source_chunks)
 
-            # Get text columns and calculate metrics
+            # 实现：选取文本列并统计词数/字符数。
             text_columns = get_text_columns(source_chunks, schema_data)
             if text_columns:
                 words, characters = calculate_text_metrics(source_chunks, text_columns)
                 metadata["words"] = words
                 metadata["characters"] = characters
 
-                # Calculate average chunk size
+                # 实现：计算平均分片大小。
                 if int(metadata["chunks"]) > 0:
                     metadata["avg_chunk_size"] = round(int(characters) / int(metadata["chunks"]), 1)
 
@@ -300,7 +350,14 @@ def get_kb_metadata(kb_path: Path) -> dict:
 @router.get("", status_code=HTTPStatus.OK)
 @router.get("/", status_code=HTTPStatus.OK)
 async def list_knowledge_bases(current_user: CurrentActiveUser) -> list[KnowledgeBaseInfo]:
-    """List all available knowledge bases."""
+    """列出当前用户的全部知识库。
+
+    契约：
+    - 输入：`current_user`
+    - 输出：`KnowledgeBaseInfo` 列表
+    - 副作用：遍历文件系统并读取元数据
+    - 失败语义：异常转 `HTTPException(500)`
+    """
     try:
         kb_root_path = get_kb_root_path()
         kb_user = current_user.username
@@ -316,10 +373,10 @@ async def list_knowledge_bases(current_user: CurrentActiveUser) -> list[Knowledg
                 continue
 
             try:
-                # Get size of the directory
+                # 实现：统计目录大小。
                 size = get_directory_size(kb_dir)
 
-                # Get metadata from KB files
+                # 实现：读取知识库元数据。
                 metadata = get_kb_metadata(kb_dir)
 
                 kb_info = KnowledgeBaseInfo(
@@ -337,11 +394,11 @@ async def list_knowledge_bases(current_user: CurrentActiveUser) -> list[Knowledg
                 knowledge_bases.append(kb_info)
 
             except OSError as _:
-                # Log the exception and skip directories that can't be read
+                # 注意：无法读取的目录直接跳过。
                 await logger.aexception("Error reading knowledge base directory '%s'", kb_dir)
                 continue
 
-        # Sort by name alphabetically
+        # 实现：按名称排序，确保前端稳定展示。
         knowledge_bases.sort(key=lambda x: x.name)
 
     except Exception as e:
@@ -352,7 +409,7 @@ async def list_knowledge_bases(current_user: CurrentActiveUser) -> list[Knowledg
 
 @router.get("/{kb_name}", status_code=HTTPStatus.OK)
 async def get_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -> KnowledgeBaseInfo:
-    """Get detailed information about a specific knowledge base."""
+    """获取指定知识库的详细信息。"""
     try:
         kb_root_path = get_kb_root_path()
         kb_user = current_user.username
@@ -361,10 +418,9 @@ async def get_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -> K
         if not kb_path.exists() or not kb_path.is_dir():
             raise HTTPException(status_code=404, detail=f"Knowledge base '{kb_name}' not found")
 
-        # Get size of the directory
+        # 实现：统计目录大小与元数据。
         size = get_directory_size(kb_path)
 
-        # Get metadata from KB files
         metadata = get_kb_metadata(kb_path)
 
         return KnowledgeBaseInfo(
@@ -387,7 +443,7 @@ async def get_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -> K
 
 @router.delete("/{kb_name}", status_code=HTTPStatus.OK)
 async def delete_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -> dict[str, str]:
-    """Delete a specific knowledge base."""
+    """删除单个知识库目录。"""
     try:
         kb_root_path = get_kb_root_path()
         kb_user = current_user.username
@@ -396,7 +452,7 @@ async def delete_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -
         if not kb_path.exists() or not kb_path.is_dir():
             raise HTTPException(status_code=404, detail=f"Knowledge base '{kb_name}' not found")
 
-        # Delete the entire knowledge base directory
+        # 注意：目录删除不可逆。
         shutil.rmtree(kb_path)
 
     except HTTPException:
@@ -410,7 +466,13 @@ async def delete_knowledge_base(kb_name: str, current_user: CurrentActiveUser) -
 @router.delete("", status_code=HTTPStatus.OK)
 @router.delete("/", status_code=HTTPStatus.OK)
 async def delete_knowledge_bases_bulk(request: BulkDeleteRequest, current_user: CurrentActiveUser) -> dict[str, object]:
-    """Delete multiple knowledge bases."""
+    """批量删除知识库目录。
+
+    契约：
+    - 输入：`BulkDeleteRequest.kb_names`
+    - 输出：删除数量与未找到列表
+    - 失败语义：全部未命中返回 404，部分失败继续处理并记录日志
+    """
     try:
         kb_root_path = get_kb_root_path()
         kb_user = current_user.username
@@ -426,12 +488,12 @@ async def delete_knowledge_bases_bulk(request: BulkDeleteRequest, current_user: 
                 continue
 
             try:
-                # Delete the entire knowledge base directory
+                # 注意：目录删除不可逆。
                 shutil.rmtree(kb_path)
                 deleted_count += 1
             except (OSError, PermissionError) as e:
                 await logger.aexception("Error deleting knowledge base '%s': %s", kb_name, e)
-                # Continue with other deletions even if one fails
+                # 注意：单个删除失败不影响其他任务。
 
         if not_found_kbs and deleted_count == 0:
             raise HTTPException(status_code=404, detail=f"Knowledge bases not found: {', '.join(not_found_kbs)}")

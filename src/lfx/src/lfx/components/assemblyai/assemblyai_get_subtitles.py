@@ -1,3 +1,19 @@
+"""
+模块名称：assemblyai_get_subtitles
+
+本模块提供 AssemblyAI 字幕导出组件，实现 SRT/VTT 导出能力。
+主要功能包括：
+- 根据转写结果 ID 拉取字幕
+- 输出字幕文本与格式信息
+
+关键组件：
+- `AssemblyAIGetSubtitles`：字幕导出组件
+
+设计背景：转写完成后需要生成字幕文件以供发布
+使用场景：从转写结果导出 SRT/VTT
+注意事项：仅支持已完成的转写任务
+"""
+
 import assemblyai as aai
 
 from lfx.custom.custom_component.component import Component
@@ -7,6 +23,14 @@ from lfx.schema.data import Data
 
 
 class AssemblyAIGetSubtitles(Component):
+    """AssemblyAI 字幕导出组件。
+
+    契约：需要 `api_key` 与有效的转写结果 `id`。
+    副作用：调用 AssemblyAI API 并可能写 `status`。
+    失败语义：上游错误或 API 异常会返回带 `error` 的 `Data`。
+    排障入口：日志 `logger.debug` + `status` 错误信息。
+    """
+
     display_name = "AssemblyAI Get Subtitles"
     description = "Export your transcript in SRT or VTT format for subtitles and closed captions"
     documentation = "https://www.assemblyai.com/docs"
@@ -46,9 +70,21 @@ class AssemblyAIGetSubtitles(Component):
     ]
 
     def get_subtitles(self) -> Data:
+        """拉取字幕并返回结果。
+
+        契约：`transcription_result` 需包含 `id`，字幕格式为 `srt`/`vtt`。
+        副作用：设置 `aai.settings.api_key` 并进行网络请求。
+        失败语义：上游错误直接透传；异常捕获后返回 `error`。
+        关键路径（三步）：1) 读取转写 ID 2) 拉取转写状态 3) 导出字幕。
+        决策：仅在状态完成时导出字幕。
+        问题：未完成状态导出会返回错误或空结果。
+        方案：检查状态，不满足则返回错误。
+        代价：调用方需先确保转写完成。
+        重评：当 API 支持预完成字幕或异步导出时。
+        """
         aai.settings.api_key = self.api_key
 
-        # check if it's an error message from the previous step
+        # 注意：上一步已失败则直接透传错误。
         if self.transcription_result.data.get("error"):
             self.status = self.transcription_result.data["error"]
             return self.transcription_result

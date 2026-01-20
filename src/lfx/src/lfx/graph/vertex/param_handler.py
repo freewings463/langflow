@@ -1,4 +1,19 @@
-"""Base module for vertex-related functionality."""
+"""
+模块名称：Vertex 参数处理器
+
+模块目的：将节点模板字段与边连接转换为可执行参数。
+使用场景：节点构建前对输入参数进行装配、清洗与类型转换。
+主要功能包括：
+- 解析边连接参数并映射到节点输入
+- 处理模板字段（文件/表格/代码/直接类型）
+- 记录需要从数据库加载的字段信息
+
+关键组件：
+- `ParameterHandler`：参数解析与装配入口
+
+设计背景：统一参数来源与类型处理逻辑，减少散落在 Vertex 的复杂度。
+注意：部分字段会触发存储服务访问与类型转换，需关注副作用。
+"""
 
 from __future__ import annotations
 
@@ -19,14 +34,24 @@ if TYPE_CHECKING:
 
 
 class ParameterHandler:
-    """Handles parameter processing for vertices."""
+    """节点参数处理器。
+
+    契约：输入 `Vertex` 与可选存储服务，输出构建所需参数字典。
+    关键路径：`process_edge_parameters` 解析边参数，`process_field_parameters` 解析模板字段。
+    决策：将参数解析逻辑集中在此类，避免 Vertex 过度膨胀。
+    问题：参数来源多样且类型分支复杂。
+    方案：按字段类型分派处理函数。
+    代价：新增字段类型需同步维护解析逻辑。
+    重评：当字段类型增长过快或需插件化处理时。
+    """
 
     def __init__(self, vertex: Vertex, storage_service) -> None:
-        """Initialize the parameter handler.
+        """初始化参数处理器。
 
-        Args:
-            vertex: The vertex to handle parameters for.
-            storage_service: The storage service to use.
+        契约：绑定目标 `Vertex` 并提取模板字段字典。
+        副作用：可能延迟初始化存储服务。
+        异常流：模板结构缺失时会触发 KeyError。
+        排障：检查 `vertex.data["node"]["template"]` 是否存在。
         """
         self.vertex = vertex
         self.template_dict: dict[str, dict] = {
@@ -34,13 +59,17 @@ class ParameterHandler:
         }
         self.params: dict[str, Any] = {}
         self.load_from_db_fields: list[str] = []
-        # Lazy initialization of storage service
         self._storage_service = storage_service
         self._storage_service_initialized = False
 
     @property
     def storage_service(self):
-        """Lazily initialize storage service only when accessed."""
+        """按需初始化存储服务。
+
+        契约：首次访问时创建存储服务实例。
+        副作用：调用 `get_storage_service` 获取全局服务。
+        异常流：服务不可用时抛异常。
+        """
         if not self._storage_service_initialized:
             if self._storage_service is None:
                 self._storage_service = get_storage_service()
@@ -48,17 +77,12 @@ class ParameterHandler:
         return self._storage_service
 
     def process_edge_parameters(self, edges: list[CycleEdge]) -> dict[str, Any]:
-        """Process parameters from edges.
+        """从边连接解析参数。
 
-        Some params are required, some are optional, and some params are Python base classes
-        (like str) while others are LangChain objects (like LLMChain, BasePromptTemplate).
-        This method distinguishes between them and sets the appropriate parameters.
-
-        Args:
-            edges: A list of edges connected to the vertex.
-
-        Returns:
-            A dictionary of processed parameters.
+        契约：输入边列表，返回边参数字典。
+        异常流：不抛异常，无法处理的边会被跳过。
+        性能：遍历边列表，复杂度与边数量线性相关。
+        排障：检查边是否包含 `target_param`。
         """
         params: dict[str, Any] = {}
         for edge in edges:
@@ -68,6 +92,11 @@ class ParameterHandler:
         return params
 
     def _set_params_from_normal_edge(self, params: dict[str, Any], edge: CycleEdge) -> dict[str, Any]:
+        """将单条边映射为参数。
+
+        契约：返回更新后的 `params`。
+        注意：若目标参数在 `output_names`，视为循环回边处理。
+        """
         param_key = edge.target_param
 
         if param_key in self.template_dict and edge.target_id == self.vertex.id:
@@ -79,31 +108,24 @@ class ParameterHandler:
             else:
                 params[param_key] = self.process_non_list_edge_param(field, edge)
         elif param_key in self.vertex.output_names:
-            # If the param_key is in the output_names, it means that the loop is run
-            #  if the loop is run the param_key item will be set over here
-            # validate the edge
             params[param_key] = self.vertex.graph.get_vertex(edge.source_id)
         return params
 
     def process_non_list_edge_param(self, field: dict, edge: CycleEdge) -> Any:
-        """Process non-list edge parameters."""
+        """处理非列表类型的边参数。"""
         param_dict = field.get("value")
         if isinstance(param_dict, dict) and len(param_dict) == 1:
             return {key: self.vertex.graph.get_vertex(edge.source_id) for key in param_dict}
         return self.vertex.graph.get_vertex(edge.source_id)
 
     def process_field_parameters(self) -> tuple[dict[str, Any], list[str]]:
-        """Process parameters from template fields.
+        """从模板字段解析参数与加载清单。
 
-        For each key in the template dictionary:
-            - If the field type is 'file', process file-related parameters.
-            - If the field type is in DIRECT_TYPES, handle direct type parameters.
-            - Handle optional fields by setting default values or removing them.
-
-        Returns:
-            A tuple containing:
-                - A dictionary of processed field parameters.
-                - A list of fields that need to be loaded from the database.
+        契约：返回 `(params, load_from_db_fields)`。
+        关键路径：遍历字段 -> 按类型分派处理 -> 处理可选字段。
+        异常流：未知字段类型抛 `ValueError`。
+        性能：复杂度与字段数量线性相关。
+        排障：检查字段 `type` 与 `DIRECT_TYPES` 是否匹配。
         """
         params: dict[str, Any] = {}
         load_from_db_fields: list[str] = []
@@ -127,7 +149,11 @@ class ParameterHandler:
         return params, load_from_db_fields
 
     def should_skip_field(self, field_name: str, field: dict, params: dict[str, Any]) -> bool:
-        """Determine if field should be skipped."""
+        """判断字段是否应跳过解析。
+
+        契约：返回 `True` 表示跳过处理。
+        注意：`override_skip` 为真时强制不跳过。
+        """
         if field.get("override_skip"):
             return False
         return (
@@ -138,9 +164,12 @@ class ParameterHandler:
         )
 
     def process_file_field(self, field_name: str, field: dict, params: dict[str, Any]) -> dict[str, Any]:
-        """Process file type fields.
+        """处理文件类型字段。
 
-        Converts logical paths (flow_id/filename) to component-ready paths.
+        契约：将逻辑路径转换为可用文件路径并写入 `params`。
+        副作用：调用存储服务解析路径。
+        异常流：路径解析失败时可能抛 `ValueError`。
+        排障：确认 `file_path` 格式与存储服务配置。
         """
         if file_path := field.get("file_path"):
             try:
@@ -178,7 +207,7 @@ class ParameterHandler:
     def _process_direct_type_field(
         self, field_name: str, field: dict, params: dict[str, Any], load_from_db_fields: list[str]
     ) -> tuple[dict[str, Any], list[str]]:
-        """Process direct type fields."""
+        """处理直接类型字段（非文件）。"""
         val = field.get("value")
 
         if field.get("type") == "code":
@@ -202,26 +231,27 @@ class ParameterHandler:
         params: dict[str, Any],
         load_from_db_fields: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Handle table field type with load_from_db column support."""
+        """处理表格字段并记录需从数据库加载的列。
+
+        契约：表格值必须为 `list[dict]`，否则抛 `ValueError`。
+        副作用：在 `params` 中追加 `*_load_from_db_columns` 元数据。
+        排障：检查 `table_schema` 与输入表格结构一致性。
+        """
         if load_from_db_fields is None:
             load_from_db_fields = []
         if val is None:
             params[field_name] = []
             return params
 
-        # Store the table data as-is for now
-        # The actual column processing will happen in the loading phase
         if isinstance(val, list) and all(isinstance(item, dict) for item in val):
             params[field_name] = val
         else:
             msg = f"Invalid value type {type(val)} for table field {field_name}"
             raise ValueError(msg)
 
-        # Get table schema from the field to identify load_from_db columns
         field_template = self.template_dict.get(field_name, {})
         table_schema = field_template.get("table_schema", [])
 
-        # Track which columns need database loading
         load_from_db_columns = []
         for column_schema in table_schema:
             if isinstance(column_schema, dict) and column_schema.get("load_from_db"):
@@ -229,21 +259,17 @@ class ParameterHandler:
             elif hasattr(column_schema, "load_from_db") and column_schema.load_from_db:
                 load_from_db_columns.append(column_schema.name)
 
-        # Store metadata for later processing
         if load_from_db_columns:
-            # Store table column metadata for the loading phase
             table_load_metadata_key = f"{field_name}_load_from_db_columns"
             params[table_load_metadata_key] = load_from_db_columns
 
-            # Add to load_from_db_fields so it gets processed
-            # We'll use a special naming convention to identify table fields
             load_from_db_fields.append(f"table:{field_name}")
             self.load_from_db_fields.append(f"table:{field_name}")
 
         return params
 
     def handle_optional_field(self, field_name: str, field: dict, params: dict[str, Any]) -> None:
-        """Handle optional fields."""
+        """处理可选字段默认值。"""
         if not field.get("required") and params.get(field_name) is None:
             if field.get("default"):
                 params[field_name] = field.get("default")
@@ -251,7 +277,7 @@ class ParameterHandler:
                 params.pop(field_name, None)
 
     def _handle_code_field(self, field_name: str, val: Any, params: dict[str, Any]) -> dict[str, Any]:
-        """Handle code field type."""
+        """处理代码字段，必要时进行 `literal_eval`。"""
         try:
             if field_name == "code":
                 params[field_name] = val
@@ -263,7 +289,7 @@ class ParameterHandler:
         return params
 
     def _handle_dict_field(self, field_name: str, val: Any, params: dict[str, Any]) -> dict[str, Any]:
-        """Handle dictionary field type."""
+        """处理字典字段（支持列表聚合）。"""
         match val:
             case list():
                 params[field_name] = {k: v for item in val for k, v in item.items()}
@@ -274,7 +300,7 @@ class ParameterHandler:
     def _handle_other_direct_types(
         self, field_name: str, field: dict, val: Any, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Handle other direct type fields."""
+        """处理其他直接类型字段（int/float/str/bool/table/tools）。"""
         if val is None:
             return params
 

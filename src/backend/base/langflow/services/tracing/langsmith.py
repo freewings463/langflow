@@ -1,3 +1,19 @@
+"""
+模块名称：LangSmith Tracer 适配
+
+本模块实现 LangSmith tracing 适配，维护 RunTree 与子 span。
+主要功能包括：
+- 初始化 LangSmith 客户端并创建运行树
+- 记录组件级 trace 并关联输出/日志
+- 生成可追溯的 run 链接
+
+关键组件：
+- `LangSmithTracer`
+
+设计背景：通过 LangSmith 提供链路级别可观测性与调试能力。
+注意事项：需要配置 `LANGCHAIN_API_KEY` 才会启用。
+"""
+
 from __future__ import annotations
 
 import os
@@ -26,6 +42,12 @@ if TYPE_CHECKING:
 
 class LangSmithTracer(BaseTracer):
     def __init__(self, trace_name: str, trace_type: str, project_name: str, trace_id: UUID):
+        """初始化 LangSmith tracer 并创建根 RunTree。
+
+        契约：初始化失败时 `ready=False`。
+        副作用：向 LangSmith 服务发送创建与 post 请求。
+        失败语义：SDK 不可用或网络异常时禁用。
+        """
         try:
             self._ready = self.setup_langsmith()
             if not self._ready:
@@ -62,9 +84,21 @@ class LangSmithTracer(BaseTracer):
 
     @property
     def ready(self):
+        """指示 tracer 是否可用。"""
         return self._ready
 
     def get_run_type(self, run_type: str) -> str:
+        """校验并规范化 LangSmith 的 run_type。
+
+        契约：非法类型回退为 `chain`。
+        失败语义：无异常抛出。
+
+        决策：非法 run_type 回退为 `chain`
+        问题：LangSmith 仅接受固定集合
+        方案：不合法时统一回退
+        代价：实际类型可能被覆盖
+        重评：若需要严格失败则改为抛错
+        """
         from typing import get_args
 
         from langsmith import client
@@ -76,6 +110,7 @@ class LangSmithTracer(BaseTracer):
         return run_type
 
     def setup_langsmith(self) -> bool:
+        """初始化 LangSmith 客户端并开启 tracing。"""
         if os.getenv("LANGCHAIN_API_KEY") is None:
             return False
         try:
@@ -97,6 +132,7 @@ class LangSmithTracer(BaseTracer):
         metadata: dict[str, Any] | None = None,
         vertex: Vertex | None = None,  # noqa: ARG002
     ) -> None:
+        """创建组件级 trace 并挂载到根 RunTree。"""
         if not self._ready or not self._run_tree:
             return
         processed_inputs = {}
@@ -118,12 +154,14 @@ class LangSmithTracer(BaseTracer):
         self._children_traces[trace_id] = child_trace
 
     def _convert_to_langchain_types(self, io_dict: dict[str, Any]):
+        """批量转换为 LangChain 兼容类型。"""
         converted = {}
         for key, value in io_dict.items():
             converted[key] = self._convert_to_langchain_type(value)
         return converted
 
     def _convert_to_langchain_type(self, value):
+        """递归转换为 LangChain 兼容类型。"""
         from langflow.schema.message import Message
 
         if isinstance(value, dict):
@@ -152,6 +190,7 @@ class LangSmithTracer(BaseTracer):
         error: Exception | None = None,
         logs: Sequence[Log | dict] = (),
     ):
+        """结束组件级 trace 并写入输出/日志/错误。"""
         if not self._ready or not self._run_tree:
             return
         if trace_id not in self._children:
@@ -173,6 +212,7 @@ class LangSmithTracer(BaseTracer):
 
     @staticmethod
     def _error_to_string(error: Exception | None):
+        """将异常转换为包含堆栈的字符串。"""
         error_message = None
         if error:
             string_stacktrace = traceback.format_exception(error)
@@ -186,6 +226,7 @@ class LangSmithTracer(BaseTracer):
         error: Exception | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """结束根 RunTree 并写入最终输出。"""
         if not self._ready or not self._run_tree:
             return
         self._run_tree.add_metadata({"inputs": serialize(inputs)})
@@ -199,10 +240,12 @@ class LangSmithTracer(BaseTracer):
 
     @property
     def run_link(self):
+        """返回 LangSmith run 链接（若可用）。"""
         if not self._ready or not self._run_tree:
             return None
         return self._run_tree.get_url()
 
     @override
     def get_langchain_callback(self) -> BaseCallbackHandler | None:
+        """LangSmith tracer 不提供 LangChain callback。"""
         return None

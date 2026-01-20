@@ -1,3 +1,12 @@
+"""Data/Message/DataFrame 辅助函数。
+
+本模块提供数据清洗、序列化与模板格式化等工具函数。
+主要功能包括：
+- Document 与 Data 互转
+- 文本清洗与安全转换为字符串
+- 基于模板生成文本列表或聚合文本
+"""
+
 import re
 from collections import defaultdict
 from typing import Any
@@ -12,36 +21,39 @@ from lfx.schema.message import Message
 
 
 def docs_to_data(documents: list[Document]) -> list[Data]:
-    """Converts a list of Documents to a list of Data.
+    """将 Document 列表转换为 Data 列表。
 
-    Args:
-        documents (list[Document]): The list of Documents to convert.
-
-    Returns:
-        list[Data]: The converted list of Data.
+    契约：输入为 Document 列表；输出为 Data 列表。
     """
     return [Data.from_document(document) for document in documents]
 
 
 def clean_string(s):
-    # Remove empty lines
+    """清理空行并压缩多余换行。"""
+    # 移除空行
     s = re.sub(r"^\s*$", "", s, flags=re.MULTILINE)
-    # Replace three or more newlines with a double newline
+    # 将三个以上换行压缩为两个
     return re.sub(r"\n{3,}", "\n\n", s)
 
 
 def _serialize_data(data: Data) -> str:
-    """Serialize Data object to JSON string."""
-    # Convert data.data to JSON-serializable format
+    """将 Data 序列化为 JSON 字符串。"""
+    # 实现：先转换为可 JSON 化结构
     serializable_data = jsonable_encoder(data.data)
-    # Serialize with orjson, enabling pretty printing with indentation
+    # 实现：使用 orjson 并开启缩进
     json_bytes = orjson.dumps(serializable_data, option=orjson.OPT_INDENT_2)
-    # Convert bytes to string and wrap in Markdown code blocks
+    # 实现：包装为 Markdown 代码块
     return "```json\n" + json_bytes.decode("utf-8") + "\n```"
 
 
 def safe_convert(data: Any, *, clean_data: bool = False) -> str:
-    """Safely convert input data to string."""
+    """安全地将输入转换为字符串。
+
+    关键路径（三步）：
+    1) 按类型选择序列化策略；
+    2) 可选清洗 DataFrame 内容；
+    3) 返回可读字符串或抛出异常。
+    """
     try:
         if isinstance(data, str):
             return clean_string(data)
@@ -51,14 +63,14 @@ def safe_convert(data: Any, *, clean_data: bool = False) -> str:
             return clean_string(_serialize_data(data))
         if isinstance(data, DataFrame):
             if clean_data:
-                # Remove empty rows
+                # 移除空行
                 data = data.dropna(how="all")
-                # Remove empty lines in each cell
+                # 移除单元格内空行
                 data = data.replace(r"^\s*$", "", regex=True)
-                # Replace multiple newlines with a single newline
+                # 多个换行压缩为一个
                 data = data.replace(r"\n+", "\n", regex=True)
 
-            # Replace pipe characters to avoid markdown table issues
+            # 注意：转义管道符避免 Markdown 表格错位
             processed_data = data.replace(r"\|", r"\\|", regex=True)
 
             return processed_data.to_markdown(index=False)
@@ -70,43 +82,16 @@ def safe_convert(data: Any, *, clean_data: bool = False) -> str:
 
 
 def data_to_text_list(template: str, data: Data | list[Data]) -> tuple[list[str], list[Data]]:
-    """Format text from Data objects using a template string.
+    """使用模板格式化 Data 文本。
 
-    This function processes Data objects and formats their content using a template string.
-    It handles various data structures and ensures consistent text formatting across different
-    input types.
-
-    Key Features:
-    - Supports single Data object or list of Data objects
-    - Handles nested dictionaries and extracts text from various locations
-    - Uses safe string formatting with fallback for missing keys
-    - Preserves original Data objects in output
-
-    Args:
-        template: Format string with placeholders (e.g., "Hello {text}")
-                 Placeholders are replaced with values from Data objects
-        data: Either a single Data object or a list of Data objects to format
-              Each object can contain text, dictionaries, or nested data
-
-    Returns:
-        A tuple containing:
-        - List[str]: Formatted strings based on the template
-        - List[Data]: Original Data objects in the same order
-
-    Raises:
-        ValueError: If template is None
-        TypeError: If template is not a string
-
-    Examples:
-        >>> result = data_to_text_list("Hello {text}", Data(text="world"))
-        >>> assert result == (["Hello world"], [Data(text="world")])
-
-        >>> result = data_to_text_list(
-        ...     "{name} is {age}",
-        ...     Data(data={"name": "Alice", "age": 25})
-        ... )
-        >>> assert result == (["Alice is 25"], [Data(data={"name": "Alice", "age": 25})])
+    契约：输入为模板字符串与 Data/列表；输出为 (文本列表, 原 Data 列表)。
+    失败语义：模板为空或非字符串时抛 `ValueError`/`TypeError`。
+    关键路径（三步）：
+    1) 规范化输入并构建 Data 列表；
+    2) 组合格式化字典并安全渲染；
+    3) 返回文本列表与原始 Data。
     """
+    # 注意：模板必须为字符串
     if data is None:
         return [], []
 
@@ -152,16 +137,11 @@ def data_to_text_list(template: str, data: Data | list[Data]) -> tuple[list[str]
 
 
 def data_to_text(template: str, data: Data | list[Data], sep: str = "\n") -> str:
-    r"""Converts data into a formatted text string based on a given template.
+    r"""将 Data 按模板转换为文本并合并。
 
-    Args:
-        template (str): The template string used to format each data item.
-        data (Data | list[Data]): A single data item or a list of data items to be formatted.
-        sep (str, optional): The separator to use between formatted data items. Defaults to "\n".
-
-    Returns:
-        str: A string containing the formatted data items separated by the specified separator.
+    契约：输入为模板与 Data/列表；输出为合并后的字符串。
     """
+    # 实现：复用 data_to_text_list
     formatted_text, _ = data_to_text_list(template, data)
     sep = "\n" if sep is None else sep
     return sep.join(formatted_text)

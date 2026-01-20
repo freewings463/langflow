@@ -1,3 +1,15 @@
+"""
+模块名称：监控与审计接口
+
+本模块提供构建记录、消息记录与交易日志的查询与维护能力。
+主要功能：
+- 查询/删除顶点构建记录
+- 查询/更新/删除消息记录与会话
+- 分页获取交易日志
+设计背景：为运维与排障提供统一的监控入口。
+注意事项：接口需鉴权，异常统一转为 500。
+"""
+
 from typing import Annotated
 from uuid import UUID
 
@@ -26,6 +38,7 @@ router = APIRouter(prefix="/monitor", tags=["Monitor"])
 
 @router.get("/builds", dependencies=[Depends(get_current_active_user)])
 async def get_vertex_builds(flow_id: Annotated[UUID, Query()], session: DbSession) -> VertexBuildMapModel:
+    """获取指定流程的顶点构建记录映射。"""
     try:
         vertex_builds = await get_vertex_builds_by_flow_id(session, flow_id)
         return VertexBuildMapModel.from_list_of_dicts(vertex_builds)
@@ -35,6 +48,7 @@ async def get_vertex_builds(flow_id: Annotated[UUID, Query()], session: DbSessio
 
 @router.delete("/builds", status_code=204, dependencies=[Depends(get_current_active_user)])
 async def delete_vertex_builds(flow_id: Annotated[UUID, Query()], session: DbSession) -> None:
+    """删除指定流程的顶点构建记录。"""
     try:
         await delete_vertex_builds_by_flow_id(session, flow_id)
     except Exception as e:
@@ -47,8 +61,9 @@ async def get_message_sessions(
     current_user: Annotated[User, Depends(get_current_active_user)],
     flow_id: Annotated[UUID | None, Query()] = None,
 ) -> list[str]:
+    """获取当前用户的消息会话 ID 列表。"""
     try:
-        # Use JOIN instead of subquery for better performance
+        # 性能：使用 JOIN 替代子查询。
         stmt = select(MessageTable.session_id).distinct()
         stmt = stmt.join(Flow, MessageTable.flow_id == Flow.id)
         stmt = stmt.where(col(MessageTable.session_id).isnot(None))
@@ -73,8 +88,9 @@ async def get_messages(
     sender_name: Annotated[str | None, Query()] = None,
     order_by: Annotated[str | None, Query()] = "timestamp",
 ) -> list[MessageResponse]:
+    """按条件查询消息列表。"""
     try:
-        # Use JOIN instead of subquery for better performance
+        # 性能：使用 JOIN 替代子查询。
         stmt = select(MessageTable)
         stmt = stmt.join(Flow, MessageTable.flow_id == Flow.id)
         stmt = stmt.where(Flow.user_id == current_user.id)
@@ -101,6 +117,7 @@ async def get_messages(
 
 @router.delete("/messages", status_code=204, dependencies=[Depends(get_current_active_user)])
 async def delete_messages(message_ids: list[UUID], session: DbSession) -> None:
+    """批量删除消息记录。"""
     try:
         await session.exec(delete(MessageTable).where(MessageTable.id.in_(message_ids)))  # type: ignore[attr-defined]
     except Exception as e:
@@ -113,6 +130,7 @@ async def update_message(
     message: MessageUpdate,
     session: DbSession,
 ):
+    """更新单条消息内容并标记编辑状态。"""
     try:
         db_message = await session.get(MessageTable, message_id)
     except Exception as e:
@@ -143,8 +161,9 @@ async def update_session_id(
     new_session_id: Annotated[str, Query(..., description="The new session ID to update to")],
     session: DbSession,
 ) -> list[MessageResponse]:
+    """批量更新会话 ID。"""
     try:
-        # Get all messages with the old session ID
+        # 实现：查询旧会话下全部消息。
         stmt = select(MessageTable).where(MessageTable.session_id == old_session_id)
         messages = (await session.exec(stmt)).all()
     except Exception as e:
@@ -154,7 +173,7 @@ async def update_session_id(
         raise HTTPException(status_code=404, detail="No messages found with the given session ID")
 
     try:
-        # Update all messages with the new session ID
+        # 实现：批量替换会话 ID。
         for message in messages:
             message.session_id = new_session_id
 
@@ -176,6 +195,7 @@ async def delete_messages_session(
     session_id: str,
     session: DbSession,
 ):
+    """删除指定会话的全部消息。"""
     try:
         await session.exec(
             delete(MessageTable)
@@ -194,6 +214,7 @@ async def get_transactions(
     session: DbSession,
     params: Annotated[Params | None, Depends(custom_params)],
 ) -> Page[TransactionLogsResponse]:
+    """分页获取流程交易日志。"""
     try:
         stmt = (
             select(TransactionTable)

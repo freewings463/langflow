@@ -1,3 +1,18 @@
+"""
+模块名称：日志查询与流式输出路由
+
+本模块提供日志的批量查询与 `SSE` 流式输出接口，主要用于运维排障与调试。主要功能包括：
+- 通过 `/logs` 按时间窗口获取日志片段
+- 通过 `/logs-stream` 以 SSE 推送实时日志
+
+关键组件：
+- event_generator：从 `log_buffer` 生成 SSE 数据
+- log_router：路由聚合器
+
+设计背景：避免直接暴露日志文件，通过内存缓冲提供受控查询。
+注意事项：接口必须鉴权；未启用日志缓冲时返回 501。
+"""
+
 import asyncio
 import json
 from http import HTTPStatus
@@ -8,7 +23,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from lfx.log.logger import log_buffer
 
 from langflow.services.auth.utils import get_current_active_user
-
 log_router = APIRouter(tags=["Log"])
 
 
@@ -16,6 +30,16 @@ NUMBER_OF_NOT_SENT_BEFORE_KEEPALIVE = 5
 
 
 async def event_generator(request: Request):
+    """生成 `SSE` 日志流。
+
+    契约：每条日志以 `json` 字符串输出，空闲时输出 `keepalive`。
+    副作用：读取 `log_buffer` 并持有写锁进行快照。
+    关键路径（三步）：
+    1) 读取缓冲区快照并定位上次读取位置。
+    2) 输出新增日志或 `keepalive`。
+    3) 休眠 1 秒后继续轮询。
+    失败语义：无显式异常；断开由 `request.is_disconnected()` 控制。
+    """
     global log_buffer  # noqa: PLW0602
     last_read_item = None
     current_not_sent = 0
@@ -35,7 +59,6 @@ async def event_generator(request: Request):
                         found_last = True
                         continue
 
-                # in case the last item is nomore in the buffer
                 if not found_last:
                     for item in log_buffer.buffer:
                         to_write.append(item)
@@ -56,11 +79,16 @@ async def event_generator(request: Request):
 async def stream_logs(
     request: Request,
 ):
-    """HTTP/2 Server-Sent-Event (SSE) endpoint for streaming logs.
+    """实时日志流接口（`SSE`）。
 
-    Requires authentication to prevent exposure of sensitive log data.
-    It establishes a long-lived connection to the server and receives log messages in real-time.
-    The client should use the header "Accept: text/event-stream".
+    契约：需要鉴权；返回 `text/event-stream`。
+    副作用：建立长连接并持续消费 `log_buffer`。
+    关键路径（三步）：
+    1) 校验日志缓冲是否启用。
+    2) 绑定 `event_generator` 生成器。
+    3) 返回流式响应。
+    失败语义：日志缓冲未启用时返回 `HTTPException(501)`。
+    安全：日志可能含敏感信息，必须鉴权。
     """
     global log_buffer  # noqa: PLW0602
     if log_buffer.enabled() is False:
@@ -78,9 +106,16 @@ async def logs(
     lines_after: Annotated[int, Query(description="The number of logs after the timestamp")] = 0,
     timestamp: Annotated[int, Query(description="The timestamp to start getting logs from")] = 0,
 ):
-    """Retrieve application logs with authentication required.
+    """按时间窗口获取日志片段。
 
-    SECURITY: Logs may contain sensitive information and require authentication.
+    契约：`lines_before` 与 `lines_after` 互斥；`timestamp<=0` 默认取尾部日志。
+    关键路径（三步）：
+    1) 校验参数互斥关系与时间戳要求。
+    2) 选择合适的缓冲读取策略。
+    3) 返回 `JSONResponse`。
+    失败语义：互斥条件冲突或缺失 `timestamp` 返回 `HTTPException(400)`；
+    日志缓冲未启用返回 `HTTPException(501)`。
+    安全：日志可能含敏感信息，必须鉴权。
     """
     global log_buffer  # noqa: PLW0602
     if log_buffer.enabled() is False:

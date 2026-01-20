@@ -1,3 +1,12 @@
+"""模块名称：图状态模型生成
+
+本模块基于图结构动态生成 Pydantic 状态模型，用于读取各顶点状态。
+使用场景：在运行时按顶点访问状态，或为可视化/调试提供统一入口。
+主要功能包括：
+- 驼峰转蛇形命名
+- 根据图顶点生成状态模型
+"""
+
 import re
 
 from lfx.graph.state.model import create_state_model
@@ -5,49 +14,17 @@ from lfx.helpers.base_model import BaseModel
 
 
 def camel_to_snake(camel_str: str) -> str:
+    """将驼峰字符串转换为蛇形命名。"""
     return re.sub(r"(?<!^)(?=[A-Z])", "_", camel_str).lower()
 
 
 def create_state_model_from_graph(graph: BaseModel) -> type[BaseModel]:
-    """Create a Pydantic state model from a graph representation.
+    """从图结构生成 Pydantic 状态模型。
 
-    This function generates a Pydantic model that represents the state of an entire graph.
-    It creates getter methods for each vertex in the graph, allowing access to the state
-    of individual components within the graph structure.
-
-    Args:
-        graph (BaseModel): The graph object from which to create the state model.
-            This should be a Pydantic model representing the graph structure,
-            with a 'vertices' attribute containing all graph vertices.
-
-    Returns:
-        type[BaseModel]: A dynamically created Pydantic model class representing
-            the state of the entire graph. This model will have properties
-            corresponding to each vertex in the graph, with names converted from
-            the vertex IDs to snake case.
-
-    Raises:
-        ValueError: If any vertex in the graph does not have a properly initialized
-            component instance (i.e., if vertex.custom_component is None).
-
-    Notes:
-        - Each vertex in the graph must have a 'custom_component' attribute.
-        - The 'custom_component' must have a 'get_state_model_instance_getter' method.
-        - Vertex IDs are converted from camel case to snake case for the resulting model's field names.
-        - The resulting model uses the 'create_state_model' function with validation disabled.
-
-    Example:
-        >>> class Vertex(BaseModel):
-        ...     id: str
-        ...     custom_component: Any
-        >>> class Graph(BaseModel):
-        ...     vertices: List[Vertex]
-        >>> # Assume proper setup of vertices and components
-        >>> graph = Graph(vertices=[...])
-        >>> GraphStateModel = create_state_model_from_graph(graph)
-        >>> graph_state = GraphStateModel()
-        >>> # Access component states, e.g.:
-        >>> print(graph_state.some_component_name)
+    契约：要求每个顶点具备 `custom_component` 且提供 getter
+    关键路径：1) 校验顶点组件 2) 收集 getter 3) 生成动态模型
+    异常流：缺少组件实例时抛 `ValueError`
+    注意：顶点 ID 会被转换为蛇形字段名
     """
     for vertex in graph.vertices:
         if hasattr(vertex, "custom_component") and vertex.custom_component is None:

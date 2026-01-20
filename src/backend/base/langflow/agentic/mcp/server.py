@@ -1,6 +1,17 @@
-"""FastMCP server for Langflow Agentic tools.
+"""
+模块名称：Langflow Agentic `MCP` 服务工具
 
-This module exposes template search and creation functions as MCP tools using FastMCP decorators.
+本模块提供 `MCP` 工具注册与实现，主要用于对外暴露模板检索/创建、组件检索、`Flow` 图可视化与组件字段读写能力。主要功能包括：
+- 模板查询与基于模板创建 `Flow`
+- 组件索引检索与字段读取/更新
+- `Flow` 图结构的 `ASCII`/文本表示与摘要
+
+关键组件：
+- `mcp`：`FastMCP` 服务器实例，作为工具注册入口
+- 各 `@mcp.tool()` 函数：`MCP` 工具实现
+
+设计背景：为 Agentic 场景提供统一 `MCP` 接口，避免外部直接耦合内部服务层实现
+注意事项：大多数工具为只读；写操作仅限明确接口且异常通常原样抛出或以 `error` 字段返回
 """
 
 from typing import Any
@@ -39,7 +50,7 @@ from langflow.agentic.utils.template_search import (
 )
 from langflow.services.deps import get_settings_service, session_scope
 
-# Initialize FastMCP server
+# 实现：工具注册依赖单例 `mcp`，模块导入即完成注册
 mcp = FastMCP("langflow-agentic")
 
 DEFAULT_TEMPLATE_FIELDS = ["id", "name", "description", "tags", "endpoint_name", "icon"]
@@ -48,40 +59,17 @@ DEFAULT_COMPONENT_FIELDS = ["name", "type", "display_name", "description"]
 
 @mcp.tool()
 def search_templates(query: str | None = None, fields: list[str] = DEFAULT_TEMPLATE_FIELDS) -> list[dict[str, Any]]:
-    """Search and load template data with configurable field selection.
+    """按关键词检索模板并裁剪字段。
 
-    Args:
-        query: Optional search term to filter templates by name or description.
-               Case-insensitive substring matching.
-        fields: List of fields to include in the results. If None, returns default fields:
-               DEFAULT_TEMPLATE_FIELDS
-               Common fields: id, name, description, tags, is_component, last_tested_version,
-               endpoint_name, data, icon, icon_bg_color, gradient, updated_at
-        tags: Optional list of tags to filter templates. Returns templates that have ANY of these tags.
-
-    Returns:
-        List of dictionaries containing the selected fields for each matching template.
-
-    Example:
-        >>> # Get default fields for all templates
-        >>> templates = search_templates()
-
-        >>> # Get only specific fields
-        >>> templates = search_templates(fields=["id", "name", "description"])
-
-        >>> # Search for "agent" templates with specific fields
-        >>> templates = search_templates(
-        ...     query="agent",
-        ...     fields=["id", "name", "description", "tags"]
-        ... )
-
-        >>> # Get templates by tag
-        >>> templates = search_templates(
-        ...     tags=["chatbots", "rag"],
-        ...     fields=["name", "description"]
-        ... )
+    契约：输入 `query`/`fields`；输出模板字段列表；只读。
+    关键路径：1) 兜底 `fields` 2) 调用 `list_templates` 返回结果。
+    失败语义：模板索引读取异常原样抛出。
+    决策：默认裁剪字段集合
+    问题：模板完整 `JSON` 体积较大，影响 `MCP` 传输与 `LLM` 负载
+    方案：缺省返回 `DEFAULT_TEMPLATE_FIELDS`，允许调用方覆盖
+    代价：需要全量字段时需显式传 `fields`
+    重评：当常见调用都需要完整模板时
     """
-    # Set default fields if not provided
     if fields is None:
         fields = DEFAULT_TEMPLATE_FIELDS
     return list_templates(query=query, fields=fields)
@@ -92,69 +80,69 @@ def get_template(
     template_id: str,
     fields: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Get a specific template by its ID.
+    """按模板 ID 获取模板数据。
 
-    Args:
-        template_id: The UUID string of the template to retrieve.
-        fields: Optional list of fields to include. If None, returns all fields.
-
-    Returns:
-        Dictionary containing the template data with selected fields, or None if not found.
-
-    Example:
-        >>> template = get_template(
-        ...     template_id="0dbee653-41ae-4e51-af2e-55757fb24be3",
-        ...     fields=["name", "description"]
-        ... )
+    契约：输入 `template_id`/可选 `fields`；输出模板 `dict` 或 `None`；只读。
+    关键路径：1) 透传参数 2) 调用 `get_template_by_id`。
+    失败语义：未命中返回 `None`；上游读取异常原样抛出。
+    决策：保留 `fields=None` 表示返回全字段
+    问题：不同调用方字段需求差异大
+    方案：空字段列表不设默认裁剪
+    代价：可能返回较大 `payload`
+    重评：当全量返回成为性能瓶颈时
     """
     return get_template_by_id(template_id=template_id, fields=fields)
 
 
 @mcp.tool()
 def list_all_tags() -> list[str]:
-    """Get a list of all unique tags used across all templates.
+    """列出模板使用过的全部标签。
 
-    Returns:
-        Sorted list of unique tag names.
-
-    Example:
-        >>> tags = list_all_tags()
-        >>> print(tags)
-        ['agents', 'chatbots', 'rag', 'tools', ...]
+    契约：无输入；输出去重且排序后的标签列表；只读。
+    关键路径：调用 `get_all_tags` 汇总标签并排序。
+    失败语义：上游读取异常按其实现处理（可能记录日志或抛出）。
+    决策：提供稳定排序输出
+    问题：无序列表会导致 `MCP` 响应不稳定
+    方案：上游统一排序并返回
+    代价：排序带来微小 `CPU` 开销
+    重评：当标签量级显著增长且需分页时
     """
     return get_all_tags()
 
 
 @mcp.tool()
 def count_templates() -> int:
-    """Get the total count of available templates.
+    """统计模板总数。
 
-    Returns:
-        Number of JSON template files found.
-
-    Example:
-        >>> count = count_templates()
-        >>> print(f"Found {count} templates")
+    契约：无输入；输出模板数量；只读。
+    关键路径：调用 `get_templates_count` 统计模板文件。
+    失败语义：上游文件系统异常原样抛出。
+    决策：以文件计数作为权威来源
+    问题：模板来源为本地 `starter_projects` 文件集
+    方案：直接统计 `JSON` 文件数量
+    代价：每次调用都会触发目录扫描
+    重评：当模板迁移到数据库或索引服务时
     """
     return get_templates_count()
 
 
-# Flow creation from template
+# 模板创建工具
 @mcp.tool()
 async def create_flow_from_template(
     template_id: str,
     user_id: str,
     folder_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new flow from a starter template and return its id and UI link.
+    """基于模板创建 `Flow` 并返回 ID 与 `UI` 链接。
 
-    Args:
-        template_id: ID field inside the starter template JSON file.
-        user_id: UUID string of the owner user.
-        folder_id: Optional target folder UUID; default folder is used if omitted.
-
-    Returns:
-        Dict with keys: {"id": str, "link": str}
+    契约：输入 `template_id`/`user_id`/`folder_id`；输出 `{id, link}`；副作用为数据库写入。
+    关键路径：1) 进入 `session_scope` 2) 解析 `UUID` 3) 调用创建逻辑返回结果。
+    失败语义：`UUID` 非法抛 `ValueError`；上游创建失败异常原样抛出。
+    决策：工具层直接返回 `UI` 链接
+    问题：调用方需要创建后立即跳转/访问
+    方案：创建完成后返回 `id` + `link`
+    代价：接口绑定 `UI` 路径语义
+    重评：当 `UI` 路由或访问策略调整时
     """
     async with session_scope() as session:
         return await create_flow_from_template_and_get_link(
@@ -165,7 +153,7 @@ async def create_flow_from_template(
         )
 
 
-# Component search and retrieval tools
+# 组件检索工具
 @mcp.tool()
 async def search_components(
     query: str | None = None,
@@ -174,38 +162,17 @@ async def search_components(
     *,
     add_search_text: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Search and retrieve component data with configurable field selection.
+    """检索组件并可附加检索文本字段。
 
-    Args:
-        query: Optional search term to filter components by name or description.
-               Case-insensitive substring matching.
-        component_type: Optional component type to filter by (e.g., "agents", "embeddings", "llms").
-        fields: List of fields to include in the results. If None, returns default fields:
-               DEFAULT_COMPONENT_FIELDS
-               All fields: name, display_name, description, type, template, documentation,
-               icon, is_input, is_output, lazy_loaded, field_order
-        add_search_text: Whether to add a 'text' key to each component with all key-value pairs joined by newline.
-
-    Returns:
-        List of dictionaries containing the selected fields for each matching component.
-
-    Example:
-        >>> # Get all components with default fields
-        >>> components = search_components()
-
-        >>> # Search for "openai" components
-        >>> components = search_components(
-        ...     query="openai",
-        ...     fields=["name", "description", "type"]
-        ... )
-
-        >>> # Get all LLM components
-        >>> components = search_components(
-        ...     component_type="llms",
-        ...     fields=["name", "display_name"]
-        ... )
+    契约：输入 `query`/`component_type`/`fields`/`add_search_text`；输出组件列表；空值/缺失字段统一为 `Not available`；只读。
+    关键路径：1) 兜底默认参数 2) 拉取组件列表 3) 追加 `text` 并做空值归一化。
+    失败语义：上游组件加载异常原样抛出。
+    决策：默认补充 `text` 字段用于检索
+    问题：检索端需要单字段文本进行匹配
+    方案：将每条记录的键值拼接为 `text`
+    代价：返回体体积增大
+    重评：当调用方更偏好结构化字段时
     """
-    # Set default fields if not provided
     if add_search_text is None:
         add_search_text = True
     if fields is None:
@@ -218,8 +185,6 @@ async def search_components(
         fields=fields,
         settings_service=settings_service,
     )
-    # For each component dict in result, add a 'text' key with all key-value pairs joined by newline.
-
     if add_search_text:
         for comp in result:
             text_lines = [f"{k} {v}" for k, v in comp.items() if k != "text"]
@@ -233,21 +198,16 @@ async def get_component(
     component_type: str | None = None,
     fields: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Get a specific component by its name.
+    """按组件名获取组件信息。
 
-    Args:
-        component_name: The name of the component to retrieve.
-        component_type: Optional component type to narrow search (e.g., "llms", "agents").
-        fields: Optional list of fields to include. If None, returns all fields.
-
-    Returns:
-        Dictionary containing the component data with selected fields, or None if not found.
-
-    Example:
-        >>> component = get_component(
-        ...     component_name="OpenAIModel",
-        ...     fields=["display_name", "description", "template"]
-        ... )
+    契约：输入 `component_name`/`component_type`/`fields`；输出组件 `dict` 或 `None`；只读。
+    关键路径：1) 透传查询参数 2) 调用 `get_component_by_name`。
+    失败语义：未命中返回 `None`；上游读取异常原样抛出。
+    决策：提供 `component_type` 限定
+    问题：同名组件可能跨类型存在
+    方案：允许调用方传类型缩小范围
+    代价：需要调用方了解类型枚举
+    重评：当组件命名规则稳定且无歧义时
     """
     settings_service = get_settings_service()
     return await get_component_by_name(
@@ -260,15 +220,16 @@ async def get_component(
 
 @mcp.tool()
 async def list_component_types() -> list[str]:
-    """Get a list of all available component types.
+    """列出可用组件类型。
 
-    Returns:
-        Sorted list of component type names.
-
-    Example:
-        >>> types = list_component_types()
-        >>> print(types)
-        ['agents', 'data', 'embeddings', 'llms', 'memories', 'tools', ...]
+    契约：无输入；输出组件类型列表；只读。
+    关键路径：获取 `settings_service` 后调用 `get_all_component_types`。
+    失败语义：配置加载或上游查询异常原样抛出。
+    决策：每次调用实时读取配置
+    问题：组件类型可能由配置动态扩展
+    方案：从 `settings_service` 拉取最新配置
+    代价：调用成本高于静态缓存
+    重评：当类型列表长期稳定且调用频繁时
     """
     settings_service = get_settings_service()
     return await get_all_component_types(settings_service=settings_service)
@@ -276,20 +237,16 @@ async def list_component_types() -> list[str]:
 
 @mcp.tool()
 async def count_components(component_type: str | None = None) -> int:
-    """Get the total count of available components.
+    """统计组件数量，可按类型过滤。
 
-    Args:
-        component_type: Optional component type to count only that type.
-
-    Returns:
-        Number of components found.
-
-    Example:
-        >>> count = count_components()
-        >>> print(f"Found {count} total components")
-
-        >>> llm_count = count_components(component_type="llms")
-        >>> print(f"Found {llm_count} LLM components")
+    契约：输入可选 `component_type`；输出组件数量；只读。
+    关键路径：获取 `settings_service` 后调用 `get_components_count`。
+    失败语义：上游统计异常原样抛出。
+    决策：统计逻辑下沉到服务层
+    问题：组件来源与配置关联，需统一统计口径
+    方案：复用内部统计函数
+    代价：无法在此层做额外聚合
+    重评：当需要按更多维度统计时
     """
     settings_service = get_settings_service()
     return await get_components_count(component_type=component_type, settings_service=settings_service)
@@ -300,22 +257,17 @@ async def get_components_by_type_tool(
     component_type: str,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Get all components of a specific type.
+    """按类型批量获取组件列表。
 
-    Args:
-        component_type: The component type to retrieve (e.g., "llms", "agents", "embeddings").
-        fields: Optional list of fields to include. If None, returns default fields.
-
-    Returns:
-        List of components of the specified type.
-
-    Example:
-        >>> llms = get_components_by_type_tool(
-        ...     component_type="llms",
-        ...     fields=["name", "display_name", "description"]
-        ... )
+    契约：输入 `component_type`/`fields`；输出组件列表；只读。
+    关键路径：1) 兜底 `fields` 2) 调用 `get_components_by_type`。
+    失败语义：上游查询异常原样抛出。
+    决策：默认字段裁剪以控制返回体积
+    问题：完整组件定义包含大字段（如 `template`）
+    方案：缺省使用 `DEFAULT_COMPONENT_FIELDS`
+    代价：调用方需显式请求额外字段
+    重评：当默认字段无法满足多数场景时
     """
-    # Set default fields if not provided
     if fields is None:
         fields = DEFAULT_COMPONENT_FIELDS
 
@@ -327,37 +279,22 @@ async def get_components_by_type_tool(
     )
 
 
-# Flow graph visualization tools
+# `Flow` 图可视化工具
 @mcp.tool()
 async def visualize_flow_graph(
     flow_id_or_name: str,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get both ASCII and text representations of a flow graph.
+    """获取 `Flow` 图的 `ASCII`+文本双视图。
 
-    This tool provides comprehensive visualization of a flow's graph structure,
-    including an ASCII art diagram and a detailed text representation of all
-    vertices and edges.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name to visualize.
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Dictionary containing:
-        - flow_id: The flow ID
-        - flow_name: The flow name
-        - ascii_graph: ASCII art representation of the graph
-        - text_repr: Text representation with vertices and edges
-        - vertex_count: Number of vertices in the graph
-        - edge_count: Number of edges in the graph
-        - error: Error message if any (only present if operation fails)
-
-    Example:
-        >>> result = visualize_flow_graph("my-flow-id")
-        >>> print(result["ascii_graph"])
-        >>> print(result["text_repr"])
-        >>> print(f"Graph has {result['vertex_count']} vertices")
+    契约：输入 `flow_id_or_name`/`user_id`；输出包含 `ascii_graph`/`text_repr`/统计信息的 `dict`；失败时返回含 `error` 的 `dict`。
+    关键路径：调用 `get_flow_graph_representations` 聚合视图。
+    失败语义：`Flow` 不存在或无数据时返回 `error` 字段；异常以 `error` 返回。
+    决策：单次调用返回两种视图
+    问题：分开调用会增加 `RPC` 与数据库读取开销
+    方案：上游一次性生成两种表示
+    代价：返回体更大
+    重评：当客户端长期只需要单一视图时
     """
     return await get_flow_graph_representations(flow_id_or_name, user_id)
 
@@ -367,21 +304,16 @@ async def get_flow_ascii_diagram(
     flow_id_or_name: str,
     user_id: str | None = None,
 ) -> str:
-    """Get ASCII art diagram of a flow graph.
+    """获取 `Flow` 的 `ASCII` 图。
 
-    Returns a visual ASCII representation of the flow's graph structure,
-    showing how components are connected.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        ASCII art string representation of the graph, or error message.
-
-    Example:
-        >>> ascii_art = get_flow_ascii_diagram("my-flow-id")
-        >>> print(ascii_art)
+    契约：输入 `flow_id_or_name`/`user_id`；输出 `ASCII` 字符串；失败时返回以 `Error:` 开头的字符串或无图提示。
+    关键路径：调用 `get_flow_ascii_graph`。
+    失败语义：上游返回 `error` 时转换为文本错误提示。
+    决策：保持字符串输出而非结构化对象
+    问题：`MCP` 消费端需要可直接渲染的文本
+    方案：统一返回 `ASCII` 文本
+    代价：缺少结构化错误码
+    重评：当客户端需要结构化错误时
     """
     return await get_flow_ascii_graph(flow_id_or_name, user_id)
 
@@ -391,29 +323,16 @@ async def get_flow_text_representation(
     flow_id_or_name: str,
     user_id: str | None = None,
 ) -> str:
-    """Get text representation of a flow graph.
+    """获取 `Flow` 图的文本结构表示。
 
-    Returns a structured text representation showing all vertices (components)
-    and edges (connections) in the flow.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Text representation string with vertices and edges, or error message.
-
-    Example:
-        >>> text = get_flow_text_representation("my-flow-id")
-        >>> print(text)
-        Graph Representation:
-        ----------------------
-        Vertices (3):
-          ChatInput, OpenAIModel, ChatOutput
-
-        Edges (2):
-          ChatInput --> OpenAIModel
-          OpenAIModel --> ChatOutput
+    契约：输入 `flow_id_or_name`/`user_id`；输出文本表示字符串；失败时返回以 `Error:` 开头的字符串或无文本提示。
+    关键路径：调用 `get_flow_text_repr`。
+    失败语义：上游返回 `error` 时转换为文本错误提示。
+    决策：以文本形式暴露顶点/边信息
+    问题：调试和解释需要可读文本
+    方案：复用上游 `repr` 结果
+    代价：难以被程序化解析
+    重评：当客户端需要结构化图数据时
     """
     return await get_flow_text_repr(flow_id_or_name, user_id)
 
@@ -423,66 +342,37 @@ async def get_flow_structure_summary(
     flow_id_or_name: str,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get a summary of flow graph structure and metadata.
+    """获取 `Flow` 结构摘要（不含图形视图）。
 
-    Returns flow metadata including vertex and edge lists without the
-    full visual representations. Useful for quickly understanding the
-    flow structure.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Dictionary with flow metadata:
-        - flow_id: The flow ID
-        - flow_name: The flow name
-        - vertex_count: Number of vertices
-        - edge_count: Number of edges
-        - vertices: List of vertex IDs (component names)
-        - edges: List of edge tuples (source_id, target_id)
-
-    Example:
-        >>> summary = get_flow_structure_summary("my-flow-id")
-        >>> print(f"Flow '{summary['flow_name']}' has {summary['vertex_count']} components")
-        >>> print(f"Components: {', '.join(summary['vertices'])}")
+    契约：输入 `flow_id_or_name`/`user_id`；输出结构统计 `dict`；失败时返回含 `error` 的 `dict`。
+    关键路径：调用 `get_flow_graph_summary` 获取节点/边摘要。
+    失败语义：`Flow` 不存在或无数据时返回 `error`；异常以 `error` 返回。
+    决策：摘要接口不返回 `ASCII`/文本图
+    问题：部分调用只需结构统计，不需要完整视图
+    方案：只返回计数与节点/边列表
+    代价：无法直接展示可视化结构
+    重评：当多数调用需要可视化时
     """
     return await get_flow_graph_summary(flow_id_or_name, user_id)
 
 
-# Flow component operations tools
+# `Flow` 组件字段工具
 @mcp.tool()
 async def get_flow_component_details(
     flow_id_or_name: str,
     component_id: str,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get detailed information about a specific component in a flow.
+    """获取 `Flow` 内指定组件的详细信息。
 
-    Returns comprehensive details about a component including its type,
-    template configuration, inputs, outputs, and all field definitions.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        component_id: The component/vertex ID to retrieve (e.g., "ChatInput-abc123").
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Dictionary containing:
-        - component_id: The component ID
-        - component_type: The type/class of the component
-        - display_name: Display name of the component
-        - description: Component description
-        - template: Full template configuration with all fields
-        - outputs: List of output definitions
-        - inputs: List of input connections
-        - flow_id: The parent flow ID
-        - flow_name: The parent flow name
-
-    Example:
-        >>> details = get_flow_component_details("my-flow", "ChatInput-abc123")
-        >>> print(details["display_name"])
-        >>> print(details["template"]["input_value"]["value"])
+    契约：输入 `flow_id_or_name`/`component_id`/`user_id`；输出包含组件模板与连线信息的 `dict`；失败时返回含 `error` 的 `dict`。
+    关键路径：调用 `get_component_details` 读取组件与连线信息。
+    失败语义：`Flow`/组件不存在时返回 `error` 字段；异常以 `error` 返回。
+    决策：返回完整模板与连线数据
+    问题：编辑与排障需要完整字段与连接关系
+    方案：透传上游完整节点信息
+    代价：返回体积较大
+    重评：当仅需摘要字段时
     """
     return await get_component_details(flow_id_or_name, component_id, user_id)
 
@@ -494,29 +384,16 @@ async def get_flow_component_field_value(
     field_name: str,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get the value of a specific field in a flow component.
+    """获取 `Flow` 组件字段的当前值与配置。
 
-    Retrieves the current value and metadata for a single field in a component.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        component_id: The component/vertex ID.
-        field_name: The name of the field to retrieve (e.g., "input_value", "temperature").
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Dictionary containing:
-        - field_name: The field name
-        - value: The current value of the field
-        - field_type: The type of the field
-        - display_name: Human-readable field name
-        - required: Whether the field is required
-        - component_id: The component ID
-        - flow_id: The flow ID
-
-    Example:
-        >>> result = get_flow_component_field_value("my-flow", "ChatInput-abc", "input_value")
-        >>> print(f"Current value: {result['value']}")
+    契约：输入 `flow_id_or_name`/`component_id`/`field_name`/`user_id`；输出字段信息 `dict`；失败时返回含 `error` 的 `dict`。
+    关键路径：调用 `get_component_field_value` 读取字段。
+    失败语义：字段不存在时返回 `error` 且包含 `available_fields`；异常以 `error` 返回。
+    决策：返回字段配置而非仅返回值
+    问题：调用方往往需要 `field_type`/`required` 等元信息
+    方案：透传上游字段配置
+    代价：响应体更大
+    重评：当调用方仅需值时
     """
     return await get_component_field_value(flow_id_or_name, component_id, field_name, user_id)
 
@@ -529,38 +406,16 @@ async def update_flow_component_field(
     new_value: str,
     user_id: str,
 ) -> dict[str, Any]:
-    """Update the value of a specific field in a flow component.
+    """更新 `Flow` 组件字段并持久化到数据库。
 
-    Updates a component field value and persists the change to the database.
-    This modifies the flow's JSON data structure.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        component_id: The component/vertex ID.
-        field_name: The name of the field to update (e.g., "input_value", "temperature").
-        new_value: The new value to set (type must match field type).
-        user_id: User ID (UUID string, required for authorization).
-
-    Returns:
-        Dictionary containing:
-        - success: Boolean indicating if update was successful
-        - field_name: The field name that was updated
-        - old_value: The previous value
-        - new_value: The new value that was set
-        - component_id: The component ID
-        - flow_id: The flow ID
-        - flow_name: The flow name
-
-    Example:
-        >>> result = update_flow_component_field(
-        ...     "my-flow",
-        ...     "ChatInput-abc",
-        ...     "input_value",
-        ...     "Hello, world!",
-        ...     user_id="user-123"
-        ... )
-        >>> if result["success"]:
-        ...     print(f"Updated from {result['old_value']} to {result['new_value']}")
+    契约：输入 `flow_id_or_name`/`component_id`/`field_name`/`new_value`/`user_id`；输出含 `success` 的结果 `dict`；副作用为数据库写入。
+    关键路径：调用 `update_component_field_value` 完成定位、写入与提交。
+    失败语义：`Flow`/组件/字段不存在或权限不匹配时返回 `success=False` 且包含 `error`；异常以 `error` 返回。
+    决策：强制要求 `user_id` 参与授权校验
+    问题：字段更新属于高风险写操作
+    方案：在写入前校验 `Flow` 所属用户
+    代价：调用方必须提供有效 `user_id`
+    重评：当引入服务端身份上下文或统一鉴权中间件时
     """
     return await update_component_field_value(flow_id_or_name, component_id, field_name, new_value, user_id)
 
@@ -571,36 +426,19 @@ async def list_flow_component_fields(
     component_id: str,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """List all available fields in a flow component with their current values.
+    """列出组件全部字段及当前值。
 
-    Returns a comprehensive list of all fields in a component, including
-    their values, types, and metadata.
-
-    Args:
-        flow_id_or_name: Flow ID (UUID) or endpoint name.
-        component_id: The component/vertex ID.
-        user_id: Optional user ID to filter flows (UUID string).
-
-    Returns:
-        Dictionary containing:
-        - component_id: The component ID
-        - component_type: The component type
-        - display_name: Component display name
-        - flow_id: The flow ID
-        - flow_name: The flow name
-        - fields: Dictionary of field_name -> field_info
-        - field_count: Number of fields
-
-    Example:
-        >>> result = list_flow_component_fields("my-flow", "ChatInput-abc")
-        >>> print(f"Component has {result['field_count']} fields")
-        >>> for field_name, field_info in result["fields"].items():
-        ...     print(f"{field_name}: {field_info['value']} (type: {field_info['field_type']})")
+    契约：输入 `flow_id_or_name`/`component_id`/`user_id`；输出字段字典与 `field_count`；失败时返回含 `error` 的 `dict`。
+    关键路径：调用 `list_component_fields` 汇总字段信息。
+    失败语义：`Flow`/组件不存在时返回 `error`；异常以 `error` 返回。
+    决策：返回 `field_count` 便于快速判断字段规模
+    问题：调用方需要在 `UI` 中快速显示字段数量
+    方案：在结果中附带字段计数
+    代价：需一次遍历统计字段数
+    重评：当字段数量统计不再被消费时
     """
     return await list_component_fields(flow_id_or_name, component_id, user_id)
 
 
-# Entry point for running the server
 if __name__ == "__main__":
-    # Run the FastMCP server
     mcp.run()

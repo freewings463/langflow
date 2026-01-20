@@ -1,3 +1,15 @@
+"""
+模块名称：项目管理接口
+
+本模块提供项目（Folder）创建、查询、更新与删除等操作，并兼容 MCP 相关配置。
+主要功能：
+- 创建项目并可自动注册 MCP Server
+- 查询项目列表与详情
+- 更新项目属性与关联流程
+设计背景：统一项目管理入口，并逐步替代旧 `/folders` 路由。
+注意事项：涉及权限校验与配置联动，异常统一转为 4xx/5xx。
+"""
+
 import io
 import json
 import zipfile
@@ -58,6 +70,10 @@ async def create_project(
     project: FolderCreate,
     current_user: CurrentActiveUser,
 ):
+    """创建项目并初始化关联资源。
+
+    失败语义：名称冲突返回 409；其余异常返回 500。
+    """
     try:
         new_project = Folder.model_validate(project, from_attributes=True)
         new_project.user_id = current_user.id
@@ -219,6 +235,7 @@ async def read_projects(
     session: DbSession,
     current_user: CurrentActiveUser,
 ):
+    """读取当前用户可见的项目列表。"""
     try:
         projects = (
             await session.exec(
@@ -249,6 +266,7 @@ async def read_project(
     is_flow: bool = False,
     search: str = "",
 ):
+    """读取单个项目及其流程信息。"""
     try:
         project = (
             await session.exec(
@@ -309,6 +327,7 @@ async def update_project(
     current_user: CurrentActiveUser,
     background_tasks: BackgroundTasks,
 ):
+    """更新项目属性与关联流程。"""
     try:
         existing_project = (
             await session.exec(select(Folder).where(Folder.id == project_id, Folder.user_id == current_user.id))
@@ -496,6 +515,7 @@ async def delete_project(
     project_id: UUID,
     current_user: CurrentActiveUser,
 ):
+    """删除项目并级联清理关联流程。"""
     try:
         flows = (
             await session.exec(select(Flow).where(Flow.folder_id == project_id, Flow.user_id == current_user.id))

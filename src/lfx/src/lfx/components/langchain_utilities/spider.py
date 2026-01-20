@@ -1,3 +1,16 @@
+"""模块名称：Spider 爬取组件
+
+本模块封装 Spider API 的爬取/抓取能力，支持按模式获取网页内容并输出 `Data`。
+主要功能包括：组装参数、调用 Spider API、转换结果为结构化数据。
+
+关键组件：
+- `SpiderTool`：Spider API 组件入口
+- `SpiderToolError`：组件自定义异常类型
+
+设计背景：在 Langflow 中统一接入 Spider 的抓取能力。
+注意事项：`params` 一旦提供将覆盖其他输入参数。
+"""
+
 from spider.spider import Spider
 
 from lfx.base.langchain_utilities.spider_constants import MODES
@@ -15,6 +28,17 @@ from lfx.schema.data import Data
 
 
 class SpiderTool(Component):
+    """Spider API 组件。
+
+    契约：输入 `spider_api_key/url/mode/params` 等配置；输出 `list[Data]`；
+    副作用：调用外部 Spider API；失败语义：非法 `mode` 抛 `ValueError`。
+    关键路径：1) 组装参数 2) 调用 `scrape` 或 `crawl` 3) 转换响应为 `Data`。
+    决策：`params` 优先级最高
+    问题：高级用户需要完整参数控制
+    方案：直接透传 `params["data"]`
+    代价：其他输入字段将被忽略
+    重评：当需要部分覆盖时改为合并策略
+    """
     display_name: str = "Spider Web Crawler & Scraper"
     description: str = "Spider API for web crawling and scraping."
     output_types: list[str] = ["Document"]
@@ -96,6 +120,21 @@ class SpiderTool(Component):
     ]
 
     def crawl(self) -> list[Data]:
+        """执行抓取或爬取并返回结果列表。
+
+        关键路径（三步）：
+        1) 生成请求参数（含默认值）
+        2) 根据 `mode` 调用 Spider API
+        3) 解析返回记录并转换为 `Data`
+
+        异常流：`mode` 非法抛 `ValueError`；API 调用异常透传。
+        排障入口：Spider API 返回的错误信息。
+        决策：`scrape` 强制 `limit=1`
+        问题：单页抓取不应多页输出
+        方案：在 `scrape` 分支覆盖 `limit`
+        代价：无法在 scrape 模式抓多页
+        重评：当 Spider 支持分页抓取时开放配置
+        """
         if self.params:
             parameters = self.params["data"]
         else:
@@ -139,4 +178,12 @@ class SpiderTool(Component):
 
 
 class SpiderToolError(Exception):
-    """SpiderTool error."""
+    """SpiderTool 专用异常类型。
+
+    契约：用于标识 Spider 组件相关错误；副作用无。
+    决策：保留独立异常类型以便上游区分
+    问题：需要与其他组件错误区分
+    方案：单独定义异常类
+    代价：未在当前流程中使用
+    重评：当引入统一错误体系时合并
+    """

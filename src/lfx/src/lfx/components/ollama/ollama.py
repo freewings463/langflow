@@ -34,19 +34,20 @@ TABLE_ROW_PLACEHOLDER = {"name": "field", "description": "description of field",
 
 
 class ChatOllamaComponent(LCModelComponent):
+    # Ollama 本地模型组件配置
     display_name = "Ollama"
     description = "Generate text using Ollama Local LLMs."
     icon = "Ollama"
     name = "OllamaModel"
 
-    # Define constants for JSON keys
+    # JSON 字段常量
     JSON_MODELS_KEY = "models"
     JSON_NAME_KEY = "name"
     JSON_CAPABILITIES_KEY = "capabilities"
     DESIRED_CAPABILITY = "completion"
     TOOL_CALLING_CAPABILITY = "tools"
 
-    # Define the table schema for the format input
+    # 结构化输出格式的表格定义
     TABLE_SCHEMA = [
         {
             "name": "name",
@@ -235,13 +236,13 @@ class ChatOllamaComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
-        # Mapping mirostat settings to their corresponding values
+        # 将 Mirostat 选项映射为对应数值
         mirostat_options = {"Mirostat": 1, "Mirostat 2.0": 2}
 
-        # Default to None for 'Disabled'
+        # 未启用时使用 None
         mirostat_value = mirostat_options.get(self.mirostat, None)
 
-        # Set mirostat_eta and mirostat_tau to None if mirostat is disabled
+        # 关闭 Mirostat 时清空 eta/tau
         if mirostat_value is None:
             mirostat_eta = None
             mirostat_tau = None
@@ -251,7 +252,7 @@ class ChatOllamaComponent(LCModelComponent):
 
         transformed_base_url = transform_localhost_url(self.base_url)
 
-        # Check if URL contains /v1 suffix (OpenAI-compatible mode)
+        # 若 base_url 带 /v1，提示并自动移除
         if transformed_base_url and transformed_base_url.rstrip("/").endswith("/v1"):
             # Strip /v1 suffix and log warning
             transformed_base_url = transformed_base_url.rstrip("/").removesuffix("/v1")
@@ -263,12 +264,13 @@ class ChatOllamaComponent(LCModelComponent):
             )
 
         try:
+            # 解析结构化输出格式
             output_format = self._parse_format_field(self.format) if self.enable_structured_output else None
         except Exception as e:
             msg = f"Failed to parse the format field: {e}"
             raise ValueError(msg) from e
 
-        # Mapping system settings to their corresponding values
+        # 组装 Ollama 参数
         llm_params = {
             "base_url": transformed_base_url,
             "model": self.model_name,
@@ -295,9 +297,10 @@ class ChatOllamaComponent(LCModelComponent):
         }
         headers = self.headers
         if headers is not None:
+            # 透传鉴权头到客户端
             llm_params["client_kwargs"] = {"headers": headers}
 
-        # Remove parameters with None values
+        # 清理空值参数
         llm_params = {k: v for k, v in llm_params.items() if v is not None}
 
         try:
@@ -312,6 +315,7 @@ class ChatOllamaComponent(LCModelComponent):
         return output
 
     async def is_valid_ollama_url(self, url: str) -> bool:
+        # 校验 Ollama API 是否可用
         try:
             async with httpx.AsyncClient() as client:
                 url = transform_localhost_url(url)
@@ -328,6 +332,7 @@ class ChatOllamaComponent(LCModelComponent):
             return False
 
     async def update_build_config(self, build_config: dict, field_value: Any, field_name: str | None = None):
+        # 根据配置变更动态更新表单
         if field_name == "enable_structured_output":  # bind enable_structured_output boolean to format show value
             build_config["format"]["show"] = field_value
 
@@ -407,7 +412,7 @@ class ChatOllamaComponent(LCModelComponent):
 
             async with httpx.AsyncClient() as client:
                 headers = self.headers
-                # Fetch available models
+                # 拉取可用模型列表
                 tags_response = await client.get(url=tags_url, headers=headers)
                 tags_response.raise_for_status()
                 models = tags_response.json()
@@ -415,7 +420,7 @@ class ChatOllamaComponent(LCModelComponent):
                     models = await models
                 await logger.adebug(f"Available models: {models}")
 
-                # Filter models that are NOT embedding models
+                # 过滤掉 embedding 模型，并可选筛选支持工具调用的模型
                 model_ids = []
                 for model in models[self.JSON_MODELS_KEY]:
                     model_name = model[self.JSON_NAME_KEY]
@@ -462,6 +467,7 @@ class ChatOllamaComponent(LCModelComponent):
 
         schema = format_value
         if isinstance(format_value, list):
+            # 将表格行转换为 JSON Schema
             schema = build_model_from_schema(format_value).model_json_schema()
             if schema == self.default_table_row_schema:
                 return None  # the rows are generic placeholder rows
@@ -483,6 +489,7 @@ class ChatOllamaComponent(LCModelComponent):
         Raises:
             ValueError: If the response is not valid JSON
         """
+        # 先获取文本响应，再尝试解析为 JSON
         message = await self.text_response()
         text = message.text if hasattr(message, "text") else str(message)
 
@@ -548,6 +555,7 @@ class ChatOllamaComponent(LCModelComponent):
     @property
     def headers(self) -> dict[str, str] | None:
         """Get the headers for the Ollama API."""
+        # 仅在提供 API Key 时附加鉴权头
         if self.api_key and self.api_key.strip():
             return {"Authorization": f"Bearer {self.api_key}"}
         return None

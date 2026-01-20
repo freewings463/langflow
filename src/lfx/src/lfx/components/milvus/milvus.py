@@ -1,3 +1,21 @@
+"""
+模块名称：Milvus 向量库组件
+
+本模块提供 LFX 的 Milvus 组件封装，主要用于配置连接、写入向量并执行相似度检索。主要功能包括：
+- 定义 Milvus 组件的输入项与默认值
+- 构建并缓存 LangChain Milvus 向量库实例
+- 将检索结果转换为 `Data` 返回给流程
+
+关键组件：
+- `MilvusVectorStoreComponent`：组件主体
+- `build_vector_store`：连接 Milvus 并写入文档
+- `search_documents`：相似度检索入口
+
+设计背景：统一向量库组件契约并复用 LangChain Milvus 集成。
+使用场景：在流程中接入 Milvus 作为向量存储与检索后端。
+注意事项：依赖 `langchain-milvus`；`drop_old=True` 会删除同名集合；网络/权限错误由 SDK 抛出。
+"""
+
 from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
 from lfx.helpers.data import docs_to_data
 from lfx.io import (
@@ -14,7 +32,13 @@ from lfx.schema.data import Data
 
 
 class MilvusVectorStoreComponent(LCVectorStoreComponent):
-    """Milvus vector store with search capabilities."""
+    """Milvus 向量库组件，基于 LangChain Milvus 适配。
+
+    契约：输入来自组件表单（如 `collection_name`/`uri`/`embedding`），输出 `search_documents` 的 `list[Data]`。
+    副作用：构建时可能创建/删除集合并写入向量；更新 `self.status`。
+    失败语义：缺少依赖抛 `ImportError`；连接/检索异常由 LangChain/Milvus SDK 抛出。
+    关键路径：`build_vector_store` 构建并写入 -> `search_documents` 执行检索。
+    """
 
     display_name: str = "Milvus"
     description: str = "Milvus vector store with search capabilities"
@@ -63,6 +87,15 @@ class MilvusVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self):
+        """创建并返回 Milvus 向量库实例，必要时写入文档。
+
+        契约：使用组件字段构建连接参数并返回 LangChain Milvus 实例；当 `ingest_data` 非空时写入文档。
+        副作用：可能创建/删除集合（`drop_old`），并执行网络 I/O 与写入。
+        关键路径（三步）：1) 校验依赖并构建连接参数 2) 初始化 Milvus 实例 3) 预处理并批量写入文档。
+        异常流：缺少 `langchain-milvus` 抛 `ImportError`；连接/写入异常由 SDK 上抛。
+        性能瓶颈：`add_documents` 受文档量与向量化成本影响。
+        排障入口：ImportError 提示 `pip install langchain-milvus`；Milvus 服务端日志与 SDK 报错信息。
+        """
         try:
             from langchain_milvus.vectorstores import Milvus as LangchainMilvus
         except ImportError as e:
@@ -85,7 +118,7 @@ class MilvusVectorStoreComponent(LCVectorStoreComponent):
             timeout=self.timeout,
         )
 
-        # Convert DataFrame to Data if needed using parent's method
+        # 实现：沿用父类预处理，将 DataFrame 统一为 Data，便于后续转成 LangChain Document。
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -101,6 +134,12 @@ class MilvusVectorStoreComponent(LCVectorStoreComponent):
         return milvus_store
 
     def search_documents(self) -> list[Data]:
+        """执行相似度检索并返回 `Data` 列表。
+
+        契约：结果数量由 `number_of_results` 控制；`search_query` 为空/仅空白时返回空列表。
+        副作用：调用 `build_vector_store`（可能触发构建或命中缓存）并更新 `self.status`。
+        失败语义：`build_vector_store` 或 `similarity_search` 的异常原样上抛。
+        """
         vector_store = self.build_vector_store()
 
         if self.search_query and isinstance(self.search_query, str) and self.search_query.strip():

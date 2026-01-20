@@ -1,8 +1,27 @@
+"""
+模块名称：Data 键提取组件（已停用）
+
+本模块提供从 `Data` 对象中提取指定键的能力，主要用于旧流程的字段裁剪。主要功能包括：
+- 按键名提取属性并构造新的 `Data`
+
+关键组件：
+- `ExtractKeyFromDataComponent`：键提取组件
+
+设计背景：在旧版流程中用于简化 `Data` 输出。
+注意事项：可通过 `silent_error` 控制是否忽略缺失键。
+"""
+
 from lfx.custom.custom_component.custom_component import CustomComponent
 from lfx.schema.data import Data
 
 
 class ExtractKeyFromDataComponent(CustomComponent):
+    """Data 键提取组件。
+
+    契约：输入 `Data` 与键列表，输出仅包含指定键的新 `Data`。
+    失败语义：`silent_error=False` 时缺失键抛 `KeyError`。
+    副作用：更新组件 `status`。
+    """
     display_name = "Extract Key From Data"
     description = "Extracts a key from a data."
     beta: bool = True
@@ -23,15 +42,11 @@ class ExtractKeyFromDataComponent(CustomComponent):
     }
 
     def build(self, data: Data, keys: list[str], *, silent_error: bool = True) -> Data:
-        """Extracts the keys from a data.
+        """从 `Data` 中提取指定键并返回新 `Data`。
 
-        Args:
-            data (Data): The data from which to extract the keys.
-            keys (list[str]): The keys to extract from the data.
-            silent_error (bool): If True, errors will not be raised.
-
-        Returns:
-            dict: The extracted keys.
+        契约：仅复制指定键，不存在的键在静默模式下被忽略。
+        失败语义：`silent_error=False` 且键不存在时抛 `KeyError`。
+        副作用：更新组件 `status`。
         """
         extracted_keys = {}
         for key in keys:

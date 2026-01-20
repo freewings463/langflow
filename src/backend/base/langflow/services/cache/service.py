@@ -1,3 +1,20 @@
+"""
+模块名称：缓存服务实现
+
+本模块提供内存与 `Redis` 缓存的具体实现，主要用于统一缓存行为并提供同步/异步访问。主要功能包括：
+- 基于 `OrderedDict` 的 `LRU` 内存缓存
+- 基于 `redis.asyncio` 的外部缓存
+- 异步内存缓存实现
+
+关键组件：
+- `ThreadingInMemoryCache`：线程安全内存缓存
+- `RedisCache`：`Redis` 缓存
+- `AsyncInMemoryCache`：异步内存缓存
+
+设计背景：不同运行模式需要可替换的缓存实现
+注意事项：命中失败使用 `CACHE_MISS` 哨兵；序列化使用 `pickle`/`dill`
+"""
+
 import asyncio
 import pickle
 import threading
@@ -20,35 +37,18 @@ from langflow.services.cache.base import (
 
 
 class ThreadingInMemoryCache(CacheService, Generic[LockType]):
-    """A simple in-memory cache using an OrderedDict.
+    """线程安全的内存缓存实现。
 
-    This cache supports setting a maximum size and expiration time for cached items.
-    When the cache is full, it uses a Least Recently Used (LRU) eviction policy.
-    Thread-safe using a threading Lock.
-
-    Attributes:
-        max_size (int, optional): Maximum number of items to store in the cache.
-        expiration_time (int, optional): Time in seconds after which a cached item expires. Default is 1 hour.
-
-    Example:
-        cache = InMemoryCache(max_size=3, expiration_time=5)
-
-        # setting cache values
-        cache.set("a", 1)
-        cache.set("b", 2)
-        cache["c"] = 3
-
-        # getting cache values
-        a = cache.get("a")
-        b = cache["b"]
+    契约：提供同步缓存接口；命中失败返回 `CACHE_MISS`。
+    关键路径：使用 `OrderedDict` 实现 `LRU`；以时间戳控制过期。
+    失败语义：缓存值为不可反序列化的 `bytes` 时抛 `pickle.UnpicklingError`。
+    注意：`expiration_time=None` 表示不过期。
     """
 
     def __init__(self, max_size=None, expiration_time=60 * 60) -> None:
-        """Initialize a new InMemoryCache instance.
+        """初始化内存缓存。
 
-        Args:
-            max_size (int, optional): Maximum number of items to store in the cache.
-            expiration_time (int, optional): Time in seconds after which a cached item expires. Default is 1 hour.
+        契约：输入 `max_size`/`expiration_time`；原地初始化缓存与锁。
         """
         self._cache: OrderedDict = OrderedDict()
         self._lock = threading.RLock()
@@ -56,59 +56,39 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
         self.expiration_time = expiration_time
 
     def get(self, key, lock: Union[threading.Lock, None] = None):  # noqa: UP007
-        """Retrieve an item from the cache.
+        """读取缓存项。
 
-        Args:
-            key: The key of the item to retrieve.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The value associated with the key, or CACHE_MISS if the key is not found or the item has expired.
+        契约：输入 `key` 与可选锁；输出命中值或 `CACHE_MISS`。
+        失败语义：缓存值为不可反序列化 `bytes` 时抛异常。
         """
         with lock or self._lock:
             return self._get_without_lock(key)
 
     def _get_without_lock(self, key):
-        """Retrieve an item from the cache without acquiring the lock."""
         if item := self._cache.get(key):
             if self.expiration_time is None or time.time() - item["time"] < self.expiration_time:
-                # Move the key to the end to make it recently used
                 self._cache.move_to_end(key)
-                # Check if the value is pickled
                 return pickle.loads(item["value"]) if isinstance(item["value"], bytes) else item["value"]
             self.delete(key)
         return CACHE_MISS
 
     def set(self, key, value, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Add an item to the cache.
+        """写入缓存项。
 
-        If the cache is full, the least recently used item is evicted.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
+        契约：输入 `key`/`value` 与可选锁；无返回值；容量满时淘汰最久未使用项。
         """
         with lock or self._lock:
             if key in self._cache:
-                # Remove existing key before re-inserting to update order
                 self.delete(key)
             elif self.max_size and len(self._cache) >= self.max_size:
-                # Remove least recently used item
                 self._cache.popitem(last=False)
-            # pickle locally to mimic Redis
 
             self._cache[key] = {"value": value, "time": time.time()}
 
     def upsert(self, key, value, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Inserts or updates a value in the cache.
+        """插入或更新缓存项。
 
-        If the existing value and the new value are both dictionaries, they are merged.
-
-        Args:
-            key: The key of the item.
-            value: The value to insert or update.
-            lock: A lock to use for the operation.
+        契约：若旧值与新值均为 `dict`，则合并后写回。
         """
         with lock or self._lock:
             existing_value = self._get_without_lock(key)
@@ -119,18 +99,7 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
             self.set(key, value)
 
     def get_or_set(self, key, value, lock: Union[threading.Lock, None] = None):  # noqa: UP007
-        """Retrieve an item from the cache.
-
-        If the item does not exist, set it with the provided value.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache if the item doesn't exist.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The cached value associated with the key.
-        """
+        """读取缓存项，未命中则写入并返回给定值。"""
         with lock or self._lock:
             if key in self._cache:
                 return self.get(key)
@@ -138,76 +107,55 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
             return value
 
     def delete(self, key, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
+        """删除缓存项。"""
         with lock or self._lock:
             self._cache.pop(key, None)
 
     def clear(self, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Clear all items from the cache."""
+        """清空缓存。"""
         with lock or self._lock:
             self._cache.clear()
 
     def contains(self, key) -> bool:
-        """Check if the key is in the cache."""
+        """判断键是否存在于缓存。"""
         return key in self._cache
 
     def __contains__(self, key) -> bool:
-        """Check if the key is in the cache."""
+        """`in` 操作的存在性判断。"""
         return self.contains(key)
 
     def __getitem__(self, key):
-        """Retrieve an item from the cache using the square bracket notation."""
+        """下标读取语义，等价于 `get`。"""
         return self.get(key)
 
     def __setitem__(self, key, value) -> None:
-        """Add an item to the cache using the square bracket notation."""
+        """下标写入语义，等价于 `set`。"""
         self.set(key, value)
 
     def __delitem__(self, key) -> None:
-        """Remove an item from the cache using the square bracket notation."""
+        """下标删除语义，等价于 `delete`。"""
         self.delete(key)
 
     def __len__(self) -> int:
-        """Return the number of items in the cache."""
+        """返回缓存项数量。"""
         return len(self._cache)
 
     def __repr__(self) -> str:
-        """Return a string representation of the InMemoryCache instance."""
+        """返回实例信息字符串。"""
         return f"InMemoryCache(max_size={self.max_size}, expiration_time={self.expiration_time})"
 
 
 class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
-    """A Redis-based cache implementation.
+    """基于 `Redis` 的异步缓存实现。
 
-    This cache supports setting an expiration time for cached items.
-
-    Attributes:
-        expiration_time (int, optional): Time in seconds after which a cached item expires. Default is 1 hour.
-
-    Example:
-        cache = RedisCache(expiration_time=5)
-
-        # setting cache values
-        cache.set("a", 1)
-        cache.set("b", 2)
-        cache["c"] = 3
-
-        # getting cache values
-        a = cache.get("a")
-        b = cache["b"]
+    契约：使用 `dill` 序列化值；未命中返回 `CACHE_MISS`。
+    关键路径：写入使用 `setex`，过期时间由 `expiration_time` 控制。
+    失败语义：连接失败在 `is_connected` 返回 `False`；序列化失败抛 `TypeError`。
+    注意：该实现标记为实验特性，初始化时会记录告警日志。
     """
 
     def __init__(self, host="localhost", port=6379, db=0, url=None, expiration_time=60 * 60) -> None:
-        """Initialize a new RedisCache instance.
-
-        Args:
-            host (str, optional): Redis host.
-            port (int, optional): Redis port.
-            db (int, optional): Redis DB.
-            url (str, optional): Redis URL.
-            expiration_time (int, optional): Time in seconds after which a
-                cached item expires. Default is 1 hour.
-        """
-        # Redis is a main dependency, no need to import check
+        """初始化 `Redis` 缓存客户端。"""
         from redis.asyncio import StrictRedis
 
         logger.warning(
@@ -221,7 +169,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
         self.expiration_time = expiration_time
 
     async def is_connected(self) -> bool:
-        """Check if the Redis client is connected."""
+        """检查 `Redis` 客户端连通性。"""
         import redis
 
         try:
@@ -234,6 +182,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
 
     @override
     async def get(self, key, lock=None):
+        """读取缓存值。"""
         if key is None:
             return CACHE_MISS
         value = await self._client.get(str(key))
@@ -241,6 +190,7 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
 
     @override
     async def set(self, key, value, lock=None) -> None:
+        """写入缓存值。"""
         try:
             if pickled := dill.dumps(value, recurse=True):
                 result = await self._client.setex(str(key), self.expiration_time, pickled)
@@ -253,14 +203,9 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
 
     @override
     async def upsert(self, key, value, lock=None) -> None:
-        """Inserts or updates a value in the cache.
+        """插入或更新缓存项。
 
-        If the existing value and the new value are both dictionaries, they are merged.
-
-        Args:
-            key: The key of the item.
-            value: The value to insert or update.
-            lock: A lock to use for the operation.
+        契约：若旧值与新值均为 `dict`，则合并后写回。
         """
         if key is None:
             return
@@ -273,25 +218,33 @@ class RedisCache(ExternalAsyncBaseCacheService, Generic[LockType]):
 
     @override
     async def delete(self, key, lock=None) -> None:
+        """删除缓存项。"""
         await self._client.delete(key)
 
     @override
     async def clear(self, lock=None) -> None:
-        """Clear all items from the cache."""
+        """清空缓存数据库。"""
         await self._client.flushdb()
 
     async def contains(self, key) -> bool:
-        """Check if the key is in the cache."""
+        """判断键是否存在于缓存。"""
         if key is None:
             return False
         return bool(await self._client.exists(str(key)))
 
     def __repr__(self) -> str:
-        """Return a string representation of the RedisCache instance."""
+        """返回实例信息字符串。"""
         return f"RedisCache(expiration_time={self.expiration_time})"
 
 
 class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
+    """异步内存缓存实现。
+
+    契约：提供异步缓存接口；命中失败返回 `CACHE_MISS`。
+    关键路径：使用 `OrderedDict` 维护访问顺序并记录时间戳。
+    失败语义：缓存值为不可反序列化的 `bytes` 时抛异常。
+    """
+
     def __init__(self, max_size=None, expiration_time=3600) -> None:
         self.cache: OrderedDict = OrderedDict()
 
@@ -300,6 +253,7 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
         self.expiration_time = expiration_time
 
     async def get(self, key, lock: asyncio.Lock | None = None):
+        """读取缓存项。"""
         async with lock or self.lock:
             return await self._get(key)
 
@@ -310,10 +264,11 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
                 self.cache.move_to_end(key)
                 return pickle.loads(item["value"]) if isinstance(item["value"], bytes) else item["value"]
             await logger.ainfo(f"Cache item for key '{key}' has expired and will be deleted.")
-            await self._delete(key)  # Log before deleting the expired item
+            await self._delete(key)
         return CACHE_MISS
 
     async def set(self, key, value, lock: asyncio.Lock | None = None) -> None:
+        """写入缓存项。"""
         async with lock or self.lock:
             await self._set(
                 key,
@@ -327,6 +282,7 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
         self.cache.move_to_end(key)
 
     async def delete(self, key, lock: asyncio.Lock | None = None) -> None:
+        """删除缓存项。"""
         async with lock or self.lock:
             await self._delete(key)
 
@@ -335,6 +291,7 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
             del self.cache[key]
 
     async def clear(self, lock: asyncio.Lock | None = None) -> None:
+        """清空缓存。"""
         async with lock or self.lock:
             await self._clear()
 
@@ -342,6 +299,7 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
         self.cache.clear()
 
     async def upsert(self, key, value, lock: asyncio.Lock | None = None) -> None:
+        """插入或更新缓存项。"""
         await self._upsert(key, value, lock)
 
     async def _upsert(self, key, value, lock: asyncio.Lock | None = None) -> None:
@@ -352,4 +310,5 @@ class AsyncInMemoryCache(AsyncBaseCacheService, Generic[AsyncLockType]):
         await self.set(key, value, lock)
 
     async def contains(self, key) -> bool:
+        """判断键是否存在于缓存。"""
         return key in self.cache

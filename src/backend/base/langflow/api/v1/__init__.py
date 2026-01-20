@@ -1,3 +1,12 @@
+"""
+模块名称：API v1 路由聚合
+
+本模块集中导出 v1 版本的所有路由对象，供应用启动时统一注册。
+主要功能：聚合各业务子模块的 `router` 并暴露 `__all__`。
+设计背景：保持路由注册入口单一，降低模块间耦合。
+注意事项：新增接口模块时需同步加入此处导出。
+"""
+
 from langflow.api.v1.api_key import router as api_key_router
 from langflow.api.v1.chat import router as chat_router
 from langflow.api.v1.endpoints import router as endpoints_router

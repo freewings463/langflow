@@ -1,3 +1,22 @@
+"""
+模块名称：统一模型元数据与选项构建
+
+本模块聚合各提供方模型元数据，并提供统一的模型选项构建、API key 解析与
+模型实例化逻辑，主要用于 UI 选择与运行时模型构建。
+主要功能包括：
+- 聚合各提供方模型元数据并提供过滤查询
+- 根据用户配置构建可用模型/嵌入模型选项
+- 校验提供方 API key 并构建模型实例
+
+关键组件：
+- `get_unified_models_detailed`
+- `get_language_model_options` / `get_embedding_model_options`
+- `get_llm` / `update_model_options_in_build_config`
+
+设计背景：将分散的模型元数据与运行时构建逻辑集中管理，减少跨模块重复。
+注意事项：本模块会访问数据库变量与外部 SDK，异常需在上层处理。
+"""
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -23,7 +42,7 @@ from lfx.utils.async_helpers import run_until_complete
 
 @lru_cache(maxsize=1)
 def get_model_classes():
-    """Lazy load model classes to avoid importing optional dependencies at module level."""
+    """延迟加载模型类，避免模块级导入可选依赖。"""
     from langchain_anthropic import ChatAnthropic
     from langchain_ibm import ChatWatsonx
     from langchain_ollama import ChatOllama
@@ -42,7 +61,7 @@ def get_model_classes():
 
 @lru_cache(maxsize=1)
 def get_embedding_classes():
-    """Lazy load embedding classes to avoid importing optional dependencies at module level."""
+    """延迟加载嵌入模型类，避免模块级导入可选依赖。"""
     from langchain_google_genai import GoogleGenerativeAIEmbeddings
     from langchain_ibm import WatsonxEmbeddings
     from langchain_ollama import OllamaEmbeddings
@@ -58,6 +77,7 @@ def get_embedding_classes():
 
 @lru_cache(maxsize=1)
 def get_model_provider_metadata():
+    """返回模型提供方的图标与变量名映射。"""
     return {
         "OpenAI": {
             "icon": "OpenAI",
@@ -92,6 +112,7 @@ model_provider_metadata = get_model_provider_metadata()
 
 @lru_cache(maxsize=1)
 def get_models_detailed():
+    """汇总所有提供方的模型元数据列表。"""
     return [
         ANTHROPIC_MODELS_DETAILED,
         OPENAI_MODELS_DETAILED,
@@ -108,11 +129,12 @@ MODELS_DETAILED = get_models_detailed()
 
 @lru_cache(maxsize=1)
 def get_model_provider_variable_mapping() -> dict[str, str]:
+    """返回提供方名称到环境变量名的映射。"""
     return {provider: meta["variable_name"] for provider, meta in model_provider_metadata.items()}
 
 
 def get_model_providers() -> list[str]:
-    """Return a sorted list of unique provider names."""
+    """返回去重且排序后的提供方名称列表。"""
     return sorted({md.get("provider", "Unknown") for group in MODELS_DETAILED for md in group})
 
 
@@ -126,53 +148,41 @@ def get_unified_models_detailed(
     only_defaults: bool = False,
     **metadata_filters,
 ):
-    """Return a list of providers and their models, optionally filtered.
+    """返回统一模型元数据列表，并支持多维过滤。
 
-    Parameters
-    ----------
-    providers : list[str] | None
-        If given, only models from these providers are returned.
-    model_name : str | None
-        If given, only the model with this exact name is returned.
-    model_type : str | None
-        Optional. Restrict to models whose metadata "model_type" matches this value.
-    include_unsupported : bool
-        When False (default) models whose metadata contains ``not_supported=True``
-        are filtered out.
-    include_deprecated : bool
-        When False (default) models whose metadata contains ``deprecated=True``
-        are filtered out.
-    only_defaults : bool
-        When True, only models marked as default are returned.
-        The first 5 models from each provider (in list order) are automatically
-        marked as default. Defaults to False to maintain backward compatibility.
-    **metadata_filters
-        Arbitrary key/value pairs to match against the model's metadata.
-        Example: ``get_unified_models_detailed(size="4k", context_window=8192)``
+    契约：返回按提供方聚合的模型清单，包含 `provider`/`models`/`num_models` 等字段。
+    关键路径（三步）：
+    1) 汇总所有 `_MODELS_DETAILED` 列表
+    2) 按参数与元数据过滤模型
+    3) 按提供方分组并标记默认模型
+    异常流：该函数不主动捕获异常，依赖上游确保元数据结构正确。
+    性能瓶颈：主要为线性过滤与分组。
+    排障入口：检查 `include_unsupported`/`include_deprecated` 与过滤参数是否一致。
 
-    Notes:
-    • Filtering is exact-match on the metadata values.
-    • If you *do* want to see unsupported models set ``include_unsupported=True``.
-    • If you *do* want to see deprecated models set ``include_deprecated=True``.
+    说明：
+    - `providers` 指定提供方白名单；
+    - `model_name` 精确匹配模型名；
+    - `model_type` 匹配元数据字段；
+    - `only_defaults=True` 时仅返回默认模型（每个提供方前 5 个标记为默认）。
     """
     if include_unsupported is None:
         include_unsupported = False
     if include_deprecated is None:
         include_deprecated = False
 
-    # Gather all models from imported *_MODELS_DETAILED lists
+    # 汇总所有 *_MODELS_DETAILED 列表
     all_models: list[dict] = []
     for models_detailed in MODELS_DETAILED:
         all_models.extend(models_detailed)
 
-    # Apply filters
+    # 应用过滤规则
     filtered_models: list[dict] = []
     for md in all_models:
-        # Skip models flagged as not_supported unless explicitly included
+        # 非显式包含时跳过不支持模型
         if (not include_unsupported) and md.get("not_supported", False):
             continue
 
-        # Skip models flagged as deprecated unless explicitly included
+        # 非显式包含时跳过弃用模型
         if (not include_deprecated) and md.get("deprecated", False):
             continue
 
@@ -182,13 +192,13 @@ def get_unified_models_detailed(
             continue
         if model_type and md.get("model_type") != model_type:
             continue
-        # Match arbitrary metadata key/value pairs
+        # 任意元数据键值精确匹配
         if any(md.get(k) != v for k, v in metadata_filters.items()):
             continue
 
         filtered_models.append(md)
 
-    # Group by provider
+    # 按提供方分组
     provider_map: dict[str, list[dict]] = {}
     for metadata in filtered_models:
         prov = metadata.get("provider", "Unknown")
@@ -199,9 +209,9 @@ def get_unified_models_detailed(
             }
         )
 
-    # Mark the first 5 models in each provider as default (based on list order)
-    # and optionally filter to only defaults
-    default_model_count = 5  # Number of default models per provider
+    # 标记每个提供方的前 5 个模型为默认（按列表顺序）
+    # 并可选仅保留默认模型
+    default_model_count = 5  # 每个提供方的默认数量
 
     for prov, models in provider_map.items():
         for i, model in enumerate(models):
@@ -210,11 +220,11 @@ def get_unified_models_detailed(
             else:
                 model["metadata"]["default"] = False
 
-        # If only_defaults is True, filter to only default models
+        # 若仅需要默认模型则过滤
         if only_defaults:
             provider_map[prov] = [m for m in models if m["metadata"].get("default", False)]
 
-    # Format as requested
+    # 组装返回结构
     return [
         {
             "provider": prov,
@@ -227,25 +237,20 @@ def get_unified_models_detailed(
 
 
 def get_api_key_for_provider(user_id: UUID | str | None, provider: str, api_key: str | None = None) -> str | None:
-    """Get API key from self.api_key or global variables.
+    """从用户输入或全局变量中获取 API key。
 
-    Args:
-        user_id: The user ID to look up global variables for
-        provider: The provider name (e.g., "OpenAI", "Anthropic")
-        api_key: An optional API key provided directly
-
-    Returns:
-        The API key if found, None otherwise
+    契约：优先使用显式传入的 `api_key`；否则按用户变量查找。
+    失败语义：查不到返回 `None`。
     """
-    # First check if user provided an API key directly
+    # 优先使用显式传入的 API key
     if api_key:
         return api_key
 
-    # If no user_id or user_id is the string "None", we can't look up global variables
+    # 无用户信息时无法读取全局变量
     if user_id is None or (isinstance(user_id, str) and user_id == "None"):
         return None
 
-    # Map provider to global variable name
+    # 提供方到变量名映射
     provider_variable_map = {
         "OpenAI": "OPENAI_API_KEY",
         "Anthropic": "ANTHROPIC_API_KEY",
@@ -257,7 +262,7 @@ def get_api_key_for_provider(user_id: UUID | str | None, provider: str, api_key:
     if not variable_name:
         return None
 
-    # Try to get from global variables
+    # 从全局变量中读取
     async def _get_variable():
         async with session_scope() as session:
             variable_service = get_variable_service()
@@ -274,16 +279,12 @@ def get_api_key_for_provider(user_id: UUID | str | None, provider: str, api_key:
 
 
 def validate_model_provider_key(variable_name: str, api_key: str) -> None:
-    """Validate a model provider API key by making a minimal test call.
+    """通过最小调用校验提供方 API key。
 
-    Args:
-        variable_name: The variable name (e.g., OPENAI_API_KEY)
-        api_key: The API key to validate
-
-    Raises:
-        HTTPException: If the API key is invalid
+    契约：校验失败抛 `ValueError`；其余异常默认视为网络问题并忽略。
+    注意：此校验不覆盖所有错误场景，仅用于快速发现无效密钥。
     """
-    # Map variable names to providers
+    # 变量名到提供方映射
     provider_map = {
         "OPENAI_API_KEY": "OpenAI",
         "ANTHROPIC_API_KEY": "Anthropic",
@@ -294,19 +295,19 @@ def validate_model_provider_key(variable_name: str, api_key: str) -> None:
 
     provider = provider_map.get(variable_name)
     if not provider:
-        return  # Not a model provider key we validate
+        return  # 非可校验的提供方变量
 
-    # Get the first available model for this provider
+    # 获取该提供方的第一个可用模型
     try:
         models = get_unified_models_detailed(providers=[provider])
         if not models or not models[0].get("models"):
-            return  # No models available, skip validation
+            return  # 无可用模型，跳过校验
 
         first_model = models[0]["models"][0]["model_name"]
     except Exception:  # noqa: BLE001
-        return  # Can't get models, skip validation
+        return  # 无法获取模型，跳过校验
 
-    # Test the API key based on provider
+    # 按提供方执行最小化测试
     try:
         if provider == "OpenAI":
             from langchain_openai import ChatOpenAI
@@ -331,13 +332,13 @@ def validate_model_provider_key(variable_name: str, api_key: str) -> None:
                 apikey=api_key,
                 url=default_url,
                 model_id=first_model,
-                project_id="dummy_project_for_validation",  # Dummy project_id for validation
+                project_id="dummy_project_for_validation",  # 校验用的虚拟 project_id
                 params={"max_new_tokens": 1},
             )
             llm.invoke("test")
 
         elif provider == "Ollama":
-            # Ollama is local, just verify the URL is accessible
+            # Ollama 为本地地址，仅校验可访问性
             import requests
 
             response = requests.get(f"{api_key}/api/tags", timeout=5)
@@ -345,33 +346,32 @@ def validate_model_provider_key(variable_name: str, api_key: str) -> None:
                 msg = "Invalid Ollama base URL"
                 raise ValueError(msg)
     except ValueError:
-        # Re-raise ValueError (validation failed)
+        # 校验失败直接抛出
         raise
     except Exception as e:
         error_msg = str(e)
         if "401" in error_msg or "authentication" in error_msg.lower() or "api key" in error_msg.lower():
             msg = f"Invalid API key for {provider}"
             raise ValueError(msg) from e
-        # For other errors, we'll allow the key to be saved (might be network issues, etc.)
+        # 其他错误视为网络/环境问题，允许继续保存
         return
 
 
 def get_language_model_options(
     user_id: UUID | str | None = None, *, tool_calling: bool | None = None
 ) -> list[dict[str, Any]]:
-    """Return a list of available language model providers with their configuration.
+    """返回可用语言模型选项列表（含运行时元数据）。
 
-    This function uses get_unified_models_detailed() which respects the enabled/disabled
-    status from the settings page and automatically filters out deprecated/unsupported models.
-
-    Args:
-        user_id: Optional user ID to filter by user-specific enabled/disabled models
-        tool_calling: If True, only return models that support tool calling.
-                     If False, only return models that don't support tool calling.
-                     If None (default), return all models regardless of tool calling support.
+    契约：返回适配 UI 的 `options` 列表，包含 `name/icon/category/metadata`。
+    关键路径（三步）：
+    1) 获取统一模型元数据并按 `tool_calling` 过滤
+    2) 结合用户禁用/启用模型与凭据过滤可见项
+    3) 组装 UI 选项并补齐运行时参数
+    异常流：变量服务不可用时回退为全量显示。
+    排障入口：检查 `__disabled_models__`/`__enabled_models__` 与凭据变量。
     """
-    # Get all LLM models (excluding embeddings, deprecated, and unsupported by default)
-    # Apply tool_calling filter if specified
+    # 获取 LLM 模型（默认排除 embeddings/弃用/不支持）
+    # 若指定 tool_calling 则额外过滤
     if tool_calling is not None:
         all_models = get_unified_models_detailed(
             model_type="llm",
@@ -386,7 +386,7 @@ def get_language_model_options(
             include_unsupported=False,
         )
 
-    # Get disabled and explicitly enabled models for this user if user_id is provided
+    # 获取用户级禁用/显式启用模型
     disabled_models = set()
     explicitly_enabled_models = set()
     if user_id:
@@ -420,10 +420,10 @@ def get_language_model_options(
 
             disabled_models, explicitly_enabled_models = run_until_complete(_get_model_status())
         except Exception:  # noqa: BLE001, S110
-            # If we can't get model status, continue without filtering
+                    # 获取失败则不进行过滤
             pass
 
-    # Get enabled providers (those with credentials configured)
+    # 获取已配置凭据的提供方
     enabled_providers = set()
     if user_id:
         try:
@@ -450,7 +450,7 @@ def get_language_model_options(
 
             enabled_providers = run_until_complete(_get_enabled_providers())
         except Exception:  # noqa: BLE001, S110
-            # If we can't get enabled providers, show all
+                    # 获取失败则不限制提供方
             pass
 
     options = []
@@ -470,7 +470,7 @@ def get_language_model_options(
         "IBM WatsonX": "apikey",
     }
 
-    # Track which providers have models
+    # 记录有模型的提供方
     providers_with_models = set()
 
     for provider_data in all_models:
@@ -478,14 +478,14 @@ def get_language_model_options(
         models = provider_data.get("models", [])
         icon = provider_data.get("icon", "Bot")
 
-        # Check if provider is enabled
+        # 判断提供方是否启用
         is_provider_enabled = not user_id or not enabled_providers or provider in enabled_providers
 
-        # Track this provider
+        # 记录启用的提供方
         if is_provider_enabled:
             providers_with_models.add(provider)
 
-        # Skip provider if user_id is provided and provider is not enabled
+        # 若指定 user_id 且提供方未启用则跳过
         if user_id and enabled_providers and provider not in enabled_providers:
             continue
 
@@ -494,40 +494,40 @@ def get_language_model_options(
             metadata = model_data.get("metadata", {})
             is_default = metadata.get("default", False)
 
-            # Determine if model should be shown:
-            # - If not default and not explicitly enabled, skip it
-            # - If in disabled list, skip it
-            # - Otherwise, show it
+            # 可见性规则：
+            # - 非默认且未显式启用则跳过
+            # - 位于禁用列表则跳过
+            # - 其余情况显示
             if not is_default and model_name not in explicitly_enabled_models:
                 continue
             if model_name in disabled_models:
                 continue
 
-            # Build the option dict
+            # 组装选项字典
             option = {
                 "name": model_name,
                 "icon": icon,
                 "category": provider,
                 "provider": provider,
                 "metadata": {
-                    "context_length": 128000,  # Default, can be overridden
+                    "context_length": 128000,  # 默认值，可被覆盖
                     "model_class": model_class_mapping.get(provider, "ChatOpenAI"),
                     "model_name_param": "model",
                     "api_key_param": api_key_param_mapping.get(provider, "api_key"),
                 },
             }
 
-            # Add reasoning models list for OpenAI
+            # 为 OpenAI 推理模型追加列表
             if provider == "OpenAI" and metadata.get("reasoning"):
                 if "reasoning_models" not in option["metadata"]:
                     option["metadata"]["reasoning_models"] = []
                 option["metadata"]["reasoning_models"].append(model_name)
 
-            # Add base_url_param for Ollama
+            # Ollama 追加 base_url 参数名
             if provider == "Ollama":
                 option["metadata"]["base_url_param"] = "base_url"
 
-            # Add extra params for WatsonX
+            # WatsonX 追加参数名
             if provider == "IBM WatsonX":
                 option["metadata"]["model_name_param"] = "model_id"
                 option["metadata"]["url_param"] = "url"
@@ -535,11 +535,11 @@ def get_language_model_options(
 
             options.append(option)
 
-    # Add disabled providers (providers that exist in metadata but have no enabled models)
+    # 追加“未启用提供方”占位项
     if user_id:
         for provider, metadata in model_provider_metadata.items():
             if provider not in providers_with_models:
-                # This provider has no enabled models, add it as a disabled provider entry
+                # 该提供方暂无可用模型，用占位项提示启用
                 options.append(
                     {
                         "name": f"__enable_provider_{provider}__",
@@ -557,22 +557,15 @@ def get_language_model_options(
 
 
 def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[str, Any]]:
-    """Return a list of available embedding model providers with their configuration.
-
-    This function uses get_unified_models_detailed() which respects the enabled/disabled
-    status from the settings page and automatically filters out deprecated/unsupported models.
-
-    Args:
-        user_id: Optional user ID to filter by user-specific enabled/disabled models
-    """
-    # Get all embedding models (excluding deprecated and unsupported by default)
+    """返回可用嵌入模型选项列表（含运行时元数据）。"""
+    # 获取嵌入模型（默认排除弃用/不支持）
     all_models = get_unified_models_detailed(
         model_type="embeddings",
         include_deprecated=False,
         include_unsupported=False,
     )
 
-    # Get disabled and explicitly enabled models for this user if user_id is provided
+    # 获取用户级禁用/显式启用模型
     disabled_models = set()
     explicitly_enabled_models = set()
     if user_id:
@@ -606,10 +599,10 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
 
             disabled_models, explicitly_enabled_models = run_until_complete(_get_model_status())
         except Exception:  # noqa: BLE001, S110
-            # If we can't get model status, continue without filtering
+            # 获取失败则不进行过滤
             pass
 
-    # Get enabled providers (those with credentials configured)
+    # 获取已配置凭据的提供方
     enabled_providers = set()
     if user_id:
         try:
@@ -636,7 +629,7 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
 
             enabled_providers = run_until_complete(_get_enabled_providers())
         except Exception:  # noqa: BLE001, S110
-            # If we can't get enabled providers, show all
+            # 获取失败则不限制提供方
             pass
 
     options = []
@@ -647,7 +640,7 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
         "IBM WatsonX": "WatsonxEmbeddings",
     }
 
-    # Provider-specific param mappings
+    # 提供方参数映射
     param_mappings = {
         "OpenAI": {
             "model": "model",
@@ -683,7 +676,7 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
         },
     }
 
-    # Track which providers have models
+    # 记录有模型的提供方
     providers_with_models = set()
 
     for provider_data in all_models:
@@ -691,14 +684,14 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
         models = provider_data.get("models", [])
         icon = provider_data.get("icon", "Bot")
 
-        # Check if provider is enabled
+        # 判断提供方是否启用
         is_provider_enabled = not user_id or not enabled_providers or provider in enabled_providers
 
-        # Track this provider
+        # 记录启用的提供方
         if is_provider_enabled:
             providers_with_models.add(provider)
 
-        # Skip provider if user_id is provided and provider is not enabled
+        # 若指定 user_id 且提供方未启用则跳过
         if user_id and enabled_providers and provider not in enabled_providers:
             continue
 
@@ -707,16 +700,16 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
             metadata = model_data.get("metadata", {})
             is_default = metadata.get("default", False)
 
-            # Determine if model should be shown:
-            # - If not default and not explicitly enabled, skip it
-            # - If in disabled list, skip it
-            # - Otherwise, show it
+            # 可见性规则：
+            # - 非默认且未显式启用则跳过
+            # - 位于禁用列表则跳过
+            # - 其余情况显示
             if not is_default and model_name not in explicitly_enabled_models:
                 continue
             if model_name in disabled_models:
                 continue
 
-            # Build the option dict
+            # 组装选项字典
             option = {
                 "name": model_name,
                 "icon": icon,
@@ -725,17 +718,17 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
                 "metadata": {
                     "embedding_class": embedding_class_mapping.get(provider, "OpenAIEmbeddings"),
                     "param_mapping": param_mappings.get(provider, param_mappings["OpenAI"]),
-                    "model_type": "embeddings",  # Mark as embedding model
+                    "model_type": "embeddings",  # 标记为嵌入模型
                 },
             }
 
             options.append(option)
 
-    # Add disabled providers (providers that exist in metadata but have no enabled models)
+    # 追加“未启用提供方”占位项
     if user_id:
         for provider, metadata in model_provider_metadata.items():
             if provider not in providers_with_models and provider in embedding_class_mapping:
-                # This provider has no enabled models and supports embeddings, add it as a disabled provider entry
+                # 该提供方暂无可用模型，用占位项提示启用
                 options.append(
                     {
                         "name": f"__enable_provider_{provider}__",
@@ -753,33 +746,19 @@ def get_embedding_model_options(user_id: UUID | str | None = None) -> list[dict[
 
 
 def normalize_model_names_to_dicts(model_names: list[str] | str) -> list[dict[str, Any]]:
-    """Convert simple model name(s) to list of dicts format.
-
-    Args:
-        model_names: A string or list of strings representing model names
-
-    Returns:
-        A list of dicts with full model metadata including runtime info
-
-    Examples:
-        >>> normalize_model_names_to_dicts('gpt-4o')
-        [{'name': 'gpt-4o', 'provider': 'OpenAI', 'metadata': {'model_class': 'ChatOpenAI', ...}}]
-
-        >>> normalize_model_names_to_dicts(['gpt-4o', 'claude-3'])
-        [{'name': 'gpt-4o', ...}, {'name': 'claude-3', ...}]
-    """
-    # Convert single string to list
+    """将模型名（字符串/列表）规范化为字典列表。"""
+    # 单个字符串转为列表
     if isinstance(model_names, str):
         model_names = [model_names]
 
-    # Get all available models to look up metadata
+    # 获取模型元数据用于补全
     try:
         all_models = get_unified_models_detailed()
     except Exception:  # noqa: BLE001
-        # If we can't get models, just create basic dicts
+        # 元数据不可用时返回最小结构
         return [{"name": name} for name in model_names]
 
-    # Model class mapping for runtime metadata
+    # 运行时模型类映射
     model_class_mapping = {
         "OpenAI": "ChatOpenAI",
         "Anthropic": "ChatAnthropic",
@@ -796,7 +775,7 @@ def normalize_model_names_to_dicts(model_names: list[str] | str) -> list[dict[st
         "IBM WatsonX": "apikey",
     }
 
-    # Build a lookup map of model_name -> full model data with runtime metadata
+    # 构建 model_name -> 运行时元数据映射
     model_lookup = {}
     for provider_data in all_models:
         provider = provider_data.get("provider")
@@ -805,29 +784,29 @@ def normalize_model_names_to_dicts(model_names: list[str] | str) -> list[dict[st
             model_name = model_data.get("model_name")
             base_metadata = model_data.get("metadata", {})
 
-            # Build runtime metadata similar to get_language_model_options
+            # 构建运行时元数据（与 get_language_model_options 保持一致）
             runtime_metadata = {
-                "context_length": 128000,  # Default
+                "context_length": 128000,  # 默认值
                 "model_class": model_class_mapping.get(provider, "ChatOpenAI"),
                 "model_name_param": "model",
                 "api_key_param": api_key_param_mapping.get(provider, "api_key"),
             }
 
-            # Add reasoning models list for OpenAI
+            # OpenAI 推理模型追加列表
             if provider == "OpenAI" and base_metadata.get("reasoning"):
                 runtime_metadata["reasoning_models"] = [model_name]
 
-            # Add base_url_param for Ollama
+            # Ollama 追加 base_url 参数名
             if provider == "Ollama":
                 runtime_metadata["base_url_param"] = "base_url"
 
-            # Add extra params for WatsonX
+            # WatsonX 追加参数名
             if provider == "IBM WatsonX":
                 runtime_metadata["model_name_param"] = "model_id"
                 runtime_metadata["url_param"] = "url"
                 runtime_metadata["project_id_param"] = "project_id"
 
-            # Merge base metadata with runtime metadata
+            # 合并基础元数据与运行时元数据
             full_metadata = {**base_metadata, **runtime_metadata}
 
             model_lookup[model_name] = {
@@ -838,19 +817,19 @@ def normalize_model_names_to_dicts(model_names: list[str] | str) -> list[dict[st
                 "metadata": full_metadata,
             }
 
-    # Convert string list to dict list
+    # 转换为目标字典列表
     result = []
     for name in model_names:
         if name in model_lookup:
             result.append(model_lookup[name])
         else:
-            # Model not found in registry, create basic entry with minimal required metadata
+            # 注册表中未找到时返回最小结构
             result.append(
                 {
                     "name": name,
                     "provider": "Unknown",
                     "metadata": {
-                        "model_class": "ChatOpenAI",  # Default fallback
+                        "model_class": "ChatOpenAI",  # 默认回退
                         "model_name_param": "model",
                         "api_key_param": "api_key",
                     },
@@ -871,38 +850,48 @@ def get_llm(
     watsonx_project_id=None,
     ollama_base_url=None,
 ) -> Any:
-    # Check if model is already a BaseLanguageModel instance (from a connection)
+    """根据选中的模型配置构建 LLM 实例。
+
+    契约：返回可调用的模型实例；必要参数缺失时抛 `ValueError`。
+    关键路径（三步）：
+    1) 解析模型选择与提供方元数据
+    2) 获取 API key 并组装参数
+    3) 实例化模型类并返回
+    异常流：缺失 API key 或必要参数会抛 `ValueError`。
+    排障入口：关注提供方变量名与模型元数据字段映射。
+    """
+    # 若已是 BaseLanguageModel 实例则直接返回
     try:
         from langchain_core.language_models import BaseLanguageModel
 
         if isinstance(model, BaseLanguageModel):
-            # Model is already instantiated, return it directly
+            # 已实例化，直接返回
             return model
     except ImportError:
         pass
 
-    # Safely extract model configuration
+    # 解析模型选择
     if not model or not isinstance(model, list) or len(model) == 0:
         msg = "A model selection is required"
         raise ValueError(msg)
 
-    # Extract the first model (only one expected)
+    # 仅使用第一个模型（当前只支持单选）
     model = model[0]
 
-    # Extract model configuration from metadata
+    # 读取模型元数据
     model_name = model.get("name")
     provider = model.get("provider")
     metadata = model.get("metadata", {})
 
-    # Get model class and parameter names from metadata
+    # 读取模型类与参数名
     api_key_param = metadata.get("api_key_param", "api_key")
 
-    # Get API key from user input or global variables
+    # 获取 API key（用户输入或全局变量）
     api_key = get_api_key_for_provider(user_id, provider, api_key)
 
-    # Validate API key (Ollama doesn't require one)
+    # 校验 API key（Ollama 不需要）
     if not api_key and provider != "Ollama":
-        # Get the correct variable name from the provider variable mapping
+        # 获取提供方变量名用于提示
         provider_variable_map = get_model_provider_variable_mapping()
         variable_name = provider_variable_map.get(provider, f"{provider.upper().replace(' ', '_')}_API_KEY")
         msg = (
@@ -911,19 +900,19 @@ def get_llm(
         )
         raise ValueError(msg)
 
-    # Get model class from metadata
+    # 获取模型类
     model_class = get_model_classes().get(metadata.get("model_class"))
     if model_class is None:
         msg = f"No model class defined for {model_name}"
         raise ValueError(msg)
     model_name_param = metadata.get("model_name_param", "model")
 
-    # Check if this is a reasoning model that doesn't support temperature
+    # 推理模型不支持温度参数
     reasoning_models = metadata.get("reasoning_models", [])
     if model_name in reasoning_models:
         temperature = None
 
-    # Build kwargs dynamically
+    # 组装参数
     kwargs = {
         model_name_param: model_name,
         "streaming": stream,
@@ -933,12 +922,11 @@ def get_llm(
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    # Add provider-specific parameters
+    # 提供方特定参数
     if provider == "IBM WatsonX":
-        # For watsonx, url and project_id are required parameters
-        # Only add them if both are provided by the component
-        # If neither are provided, let ChatWatsonx handle it with its native error
-        # This allows components without WatsonX-specific fields to fail gracefully
+        # WatsonX 需要 url 与 project_id
+        # 若未提供则交由 ChatWatsonx 抛出原生错误
+        # 允许缺少字段的组件优雅失败
 
         url_param = metadata.get("url_param", "url")
         project_id_param = metadata.get("project_id_param", "project_id")
@@ -947,11 +935,11 @@ def get_llm(
         has_project_id = watsonx_project_id is not None
 
         if has_url and has_project_id:
-            # Both provided - add them to kwargs
+            # 两者齐备，写入参数
             kwargs[url_param] = watsonx_url
             kwargs[project_id_param] = watsonx_project_id
         elif has_url or has_project_id:
-            # Only one provided - this is a misconfiguration in the component
+            # 仅提供其一，视为配置错误
             missing = "project ID" if has_url else "URL"
             provided = "URL" if has_url else "project ID"
             msg = (
@@ -961,16 +949,16 @@ def get_llm(
                 f"which fully supports IBM WatsonX configuration."
             )
             raise ValueError(msg)
-        # else: neither provided - let ChatWatsonx handle it (will fail with its own error)
+        # else: 两者均缺失，交由 ChatWatsonx 处理
     elif provider == "Ollama" and ollama_base_url:
-        # For Ollama, handle custom base_url
+        # Ollama 使用自定义 base_url
         base_url_param = metadata.get("base_url_param", "base_url")
         kwargs[base_url_param] = ollama_base_url
 
     try:
         return model_class(**kwargs)
     except Exception as e:
-        # If instantiation fails and it's WatsonX, provide additional context
+        # WatsonX 初始化失败时提供额外提示
         if provider == "IBM WatsonX" and ("url" in str(e).lower() or "project" in str(e).lower()):
             msg = (
                 f"Failed to initialize IBM WatsonX model: {e}\n\n"
@@ -979,7 +967,7 @@ def get_llm(
                 "Consider using the 'Language Model' component instead, which fully supports IBM WatsonX."
             )
             raise ValueError(msg) from e
-        # Re-raise the original exception for other cases
+        # 其他情况直接抛出原异常
         raise
 
 
@@ -991,82 +979,72 @@ def update_model_options_in_build_config(
     field_name: str | None = None,
     field_value: Any = None,
 ) -> dict:
-    """Helper function to update build config with cached model options.
+    """更新 build_config 中的模型选项并使用缓存。
 
-    Uses instance-level caching to avoid expensive database calls on every field change.
-    Cache is refreshed when:
-    - api_key changes (may enable/disable providers)
-    - Initial load (field_name is None)
-    - Cache is empty or expired
-    - Model field is being refreshed (field_name == "model")
-
-    Args:
-        component: Component instance with cache, user_id, and log attributes
-        build_config: The build configuration dict to update
-        cache_key_prefix: Prefix for the cache key (e.g., "language_model_options" or "embedding_model_options")
-        get_options_func: Function to call to get model options (e.g., get_language_model_options)
-        field_name: The name of the field being changed, if any
-        field_value: The current value of the field being changed, if any
-
-    Returns:
-        Updated build_config dict with model options and providers set
+    关键路径（三步）：
+    1) 判断是否需要刷新缓存（初始加载/字段变化/缓存过期）
+    2) 调用 `get_options_func` 获取选项并缓存
+    3) 写回 build_config 并设置默认模型与可见性
+    失败语义：选项获取失败时回退为空列表。
+    性能瓶颈：变量服务查询与选项构建。
+    排障入口：检查 `component.cache` 与 `is_refresh` 标志。
     """
     import time
 
-    # Cache key based on user_id
+    # 基于 user_id 的缓存键
     cache_key = f"{cache_key_prefix}_{component.user_id}"
     cache_timestamp_key = f"{cache_key}_timestamp"
-    cache_ttl = 30  # 30 seconds TTL to catch global variable changes faster
+    cache_ttl = 30  # 30 秒 TTL 以更快捕捉变量变化
 
-    # Check if cache is expired
+    # 判断缓存是否过期
     cache_expired = False
     if cache_timestamp_key in component.cache:
         time_since_cache = time.time() - component.cache[cache_timestamp_key]
         cache_expired = time_since_cache > cache_ttl
 
-    # Check if is_refresh flag is set in build_config (from frontend refresh request)
+    # 前端刷新请求标记
     is_refresh_request = build_config.get("is_refresh", False)
 
-    # Check if we need to refresh
+    # 判断是否需要刷新
     should_refresh = (
-        field_name == "api_key"  # API key changed
-        or field_name is None  # Initial load
-        or field_name == "model"  # Model field refresh button clicked
-        or cache_key not in component.cache  # Cache miss
-        or cache_expired  # Cache expired
-        or is_refresh_request  # Frontend requested a refresh
+        field_name == "api_key"  # API key 变化
+        or field_name is None  # 初次加载
+        or field_name == "model"  # 模型字段刷新按钮触发
+        or cache_key not in component.cache  # 缓存未命中
+        or cache_expired  # 缓存过期
+        or is_refresh_request  # 前端请求刷新
     )
 
     if should_refresh:
-        # Fetch options based on user's enabled models
+        # 根据用户可用模型获取选项
         try:
             options = get_options_func(user_id=component.user_id)
-            # Cache the results with timestamp
+            # 缓存结果与时间戳
             component.cache[cache_key] = {"options": options}
             component.cache[cache_timestamp_key] = time.time()
         except KeyError as exc:
-            # If we can't get user-specific options, fall back to empty
+            # 获取失败则回退为空
             component.log("Failed to fetch user-specific model options: %s", exc)
             component.cache[cache_key] = {"options": []}
             component.cache[cache_timestamp_key] = time.time()
 
-    # Use cached results
+    # 使用缓存结果
     cached = component.cache.get(cache_key, {"options": []})
     build_config["model"]["options"] = cached["options"]
 
-    # Set default value on initial load when model field is empty
-    # Only set default when: initial load (field_name is None) or model field is being set and is empty
-    # Get the current model value to check if it's empty
+    # 初次加载或模型字段为空时设置默认值
+    # 仅在初始加载或模型字段被设置且为空时生效
+    # 获取当前值用于判断是否为空
     current_model_value = build_config.get("model", {}).get("value")
     model_is_empty = not current_model_value or current_model_value == "" or current_model_value == []
     should_set_default = field_name is None or (field_name == "model" and model_is_empty)
     if should_set_default:
         options = cached.get("options", [])
         if options:
-            # Determine model type based on cache_key_prefix
+            # 根据前缀判断模型类型
             model_type = "embeddings" if cache_key_prefix == "embedding_model_options" else "language"
 
-            # Try to get user's default model from the variable service
+            # 尝试从变量服务获取用户默认模型
             default_model_name = None
             default_model_provider = None
             try:
@@ -1081,7 +1059,7 @@ def update_model_options_in_build_config(
                         if not isinstance(variable_service, DatabaseVariableService):
                             return None, None
 
-                        # Variable names match those in the API
+                        # 变量名与 API 保持一致
                         var_name = (
                             "__default_embedding_model__"
                             if model_type == "embeddings"
@@ -1103,43 +1081,43 @@ def update_model_options_in_build_config(
                                 if isinstance(parsed_value, dict):
                                     return parsed_value.get("model_name"), parsed_value.get("provider")
                         except (ValueError, json.JSONDecodeError, TypeError):
-                            # Variable not found or invalid format
+                            # 变量不存在或格式不正确
                             logger.info("Variable not found or invalid format", exc_info=True)
                         return None, None
 
                 default_model_name, default_model_provider = run_until_complete(_get_default_model())
             except Exception:  # noqa: BLE001
-                # If we can't get default model, continue without it
+                # 获取默认模型失败则继续
                 logger.info("Failed to get default model, continue without it", exc_info=True)
 
-            # Find the default model in options
+            # 在选项中查找默认模型
             default_model = None
             if default_model_name and default_model_provider:
-                # Look for the user's preferred default model
+                # 用户偏好优先
                 for opt in options:
                     if opt.get("name") == default_model_name and opt.get("provider") == default_model_provider:
                         default_model = opt
                         break
 
-            # If user's default not found, fallback to first option
+            # 用户默认未命中时回退第一个选项
             if not default_model and options:
                 default_model = options[0]
 
-            # Set the value
+            # 写入默认值
             if default_model:
                 build_config["model"]["value"] = [default_model]
 
-    # Handle visibility logic:
-    # - Show handle ONLY when field_value is "connect_other_models"
-    # - Hide handle in all other cases (default, model selection, etc.)
+    # 可见性逻辑：
+    # - 仅当 field_value 为 "connect_other_models" 时显示 handle
+    # - 其他情况隐藏
     if field_value == "connect_other_models":
-        # User explicitly selected "Connect other models", show the handle
+        # 显式选择“连接其他模型”
         if cache_key_prefix == "embedding_model_options":
             build_config["model"]["input_types"] = ["Embeddings"]
         else:
             build_config["model"]["input_types"] = ["LanguageModel"]
     else:
-        # Default case or model selection: hide the handle
+        # 默认或选择模型时隐藏
         build_config["model"]["input_types"] = []
 
     return build_config

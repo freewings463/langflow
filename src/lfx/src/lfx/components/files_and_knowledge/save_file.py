@@ -1,3 +1,19 @@
+"""
+模块名称：文件保存组件
+
+本模块提供文件保存与上传能力，支持本地、AWS S3 与 Google Drive 三类存储。
+主要功能包括：
+- 根据输入类型选择保存格式并写入文件
+- 处理本地/云端存储的配置与上传流程
+- 返回保存路径或上传链接
+
+关键组件：
+- SaveToFileComponent：文件保存组件
+
+设计背景：统一写文件入口并支持多存储后端。
+注意事项：Astra Cloud 禁用本地存储；非文本格式不支持追加写入。
+"""
+
 import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -18,7 +34,7 @@ from lfx.utils.validate_cloud import is_astra_cloud_environment
 
 
 def _get_storage_location_options():
-    """Get storage location options, filtering out Local if in Astra cloud environment."""
+    """获取存储位置选项（云环境隐藏本地存储）。"""
     all_options = [{"name": "AWS", "icon": "Amazon"}, {"name": "Google Drive", "icon": "google"}]
     if is_astra_cloud_environment():
         return all_options
@@ -26,13 +42,20 @@ def _get_storage_location_options():
 
 
 class SaveToFileComponent(Component):
+    """文件保存组件。
+
+    契约：必须提供 `file_name` 与 `input`；需选择存储位置与格式。
+    副作用：写入本地或上传到云端存储。
+    失败语义：参数缺失/权限不足/上传失败会抛 `ValueError` 或运行时异常。
+    """
+
     display_name = "Write File"
     description = "Save data to local file, AWS S3, or Google Drive in the selected format."
     documentation: str = "https://docs.langflow.org/write-file"
     icon = "file-text"
     name = "SaveToFile"
 
-    # File format options for different storage types
+    # 不同存储类型的格式选项
     LOCAL_DATA_FORMAT_CHOICES = ["csv", "excel", "json", "markdown"]
     LOCAL_MESSAGE_FORMAT_CHOICES = ["txt", "json", "markdown"]
     AWS_FORMAT_CHOICES = [
@@ -53,7 +76,7 @@ class SaveToFileComponent(Component):
     GDRIVE_FORMAT_CHOICES = ["txt", "json", "csv", "xlsx", "slides", "docs", "jpg", "mp3"]
 
     inputs = [
-        # Storage location selection
+        # 存储位置选择
         SortableListInput(
             name="storage_location",
             display_name="Storage Location",
@@ -63,7 +86,7 @@ class SaveToFileComponent(Component):
             real_time_refresh=True,
             limit=1,
         ),
-        # Common inputs
+        # 通用输入
         HandleInput(
             name="input",
             display_name="File Content",
@@ -90,7 +113,7 @@ class SaveToFileComponent(Component):
             value=False,
             show=False,
         ),
-        # Format inputs (dynamic based on storage location)
+        # 格式输入（随存储位置动态显示）
         DropdownInput(
             name="local_format",
             display_name="File Format",
@@ -115,7 +138,7 @@ class SaveToFileComponent(Component):
             value="txt",
             show=False,
         ),
-        # AWS S3 specific inputs
+        # AWS S3 专属输入
         SecretStrInput(
             name="aws_access_key_id",
             display_name="AWS Access Key ID",
@@ -154,7 +177,7 @@ class SaveToFileComponent(Component):
             show=False,
             advanced=True,
         ),
-        # Google Drive specific inputs
+        # Google Drive 专属输入
         SecretStrInput(
             name="service_account_key",
             display_name="GCP Credentials Secret Key",
@@ -179,9 +202,16 @@ class SaveToFileComponent(Component):
     outputs = [Output(display_name="File Path", name="message", method="save_to_file")]
 
     def update_build_config(self, build_config, field_value, field_name=None):
-        """Update build configuration to show/hide fields based on storage location selection."""
-        # Update options dynamically based on cloud environment
-        # This ensures options are refreshed when build_config is updated
+        """根据存储位置更新界面字段显示。
+
+        关键路径（三步）：
+        1) 刷新存储位置选项。
+        2) 清空动态字段显示状态。
+        3) 依据所选位置展示对应字段组。
+
+        异常流：无显式抛错，错误由上游字段校验处理。
+        """
+        # 动态刷新存储选项（受云环境影响）
         if "storage_location" in build_config:
             updated_options = _get_storage_location_options()
             build_config["storage_location"]["options"] = updated_options
@@ -189,12 +219,12 @@ class SaveToFileComponent(Component):
         if field_name != "storage_location":
             return build_config
 
-        # Extract selected storage location
+        # 提取选择的存储位置
         selected = [location["name"] for location in field_value] if isinstance(field_value, list) else []
 
-        # Hide all dynamic fields first
+        # 先隐藏所有动态字段
         dynamic_fields = [
-            "file_name",  # Common fields (input is always visible)
+            "file_name",  # 通用字段（输入始终可见）
             "append_mode",
             "local_format",
             "aws_format",
@@ -212,15 +242,15 @@ class SaveToFileComponent(Component):
             if f_name in build_config:
                 build_config[f_name]["show"] = False
 
-        # Show fields based on selected storage location
+        # 根据存储位置展示字段
         if len(selected) == 1:
             location = selected[0]
 
-            # Show file_name when any storage location is selected
+            # 任意存储位置均展示 file_name
             if "file_name" in build_config:
                 build_config["file_name"]["show"] = True
 
-            # Show append_mode only for Local storage (not supported for cloud storage)
+            # 仅本地支持追加写
             if "append_mode" in build_config:
                 build_config["append_mode"]["show"] = location == "Local"
 
@@ -252,8 +282,16 @@ class SaveToFileComponent(Component):
         return build_config
 
     async def save_to_file(self) -> Message:
-        """Save the input to a file and upload it, returning a confirmation message."""
-        # Validate inputs
+        """保存输入并返回确认信息。
+
+        关键路径（三步）：
+        1) 校验输入与存储位置。
+        2) 分发到本地/AWS/Google Drive 的保存实现。
+        3) 返回保存或上传结果。
+
+        异常流：参数缺失或存储不可用时抛 `ValueError`。
+        """
+        # 校验输入
         if not self.file_name:
             msg = "File name must be provided."
             raise ValueError(msg)
@@ -261,18 +299,18 @@ class SaveToFileComponent(Component):
             msg = "Input type is not set."
             raise ValueError(msg)
 
-        # Get selected storage location
+        # 获取存储位置
         storage_location = self._get_selected_storage_location()
         if not storage_location:
             msg = "Storage location must be selected."
             raise ValueError(msg)
 
-        # Check if Local storage is disabled in cloud environment
+        # 云环境禁用本地存储
         if storage_location == "Local" and is_astra_cloud_environment():
             msg = "Local storage is not available in cloud environment. Please use AWS or Google Drive."
             raise ValueError(msg)
 
-        # Route to appropriate save method based on storage location
+        # 分发到对应存储实现
         if storage_location == "Local":
             return await self._save_to_local()
         if storage_location == "AWS":
@@ -283,10 +321,8 @@ class SaveToFileComponent(Component):
         raise ValueError(msg)
 
     def _get_input_type(self) -> str:
-        """Determine the input type based on the provided input."""
-        # Use exact type checking (type() is) instead of isinstance() to avoid inheritance issues.
-        # Since Message inherits from Data, isinstance(message, Data) would return True for Message objects,
-        # causing Message inputs to be incorrectly identified as Data type.
+        """判断输入类型（避免继承导致的误判）。"""
+        # 注意：Message 继承 Data，需用 `type()` 精确判断
         if type(self.input) is DataFrame:
             return "DataFrame"
         if type(self.input) is Message:
@@ -297,39 +333,38 @@ class SaveToFileComponent(Component):
         raise ValueError(msg)
 
     def _get_default_format(self) -> str:
-        """Return the default file format based on input type."""
+        """根据输入类型返回默认格式。"""
         if self._get_input_type() == "DataFrame":
             return "csv"
         if self._get_input_type() == "Data":
             return "json"
         if self._get_input_type() == "Message":
             return "json"
-        return "json"  # Fallback
+        return "json"  # 兜底
 
     def _adjust_file_path_with_format(self, path: Path, fmt: str) -> Path:
-        """Adjust the file path to include the correct extension."""
+        """补全文件扩展名。"""
         file_extension = path.suffix.lower().lstrip(".")
         if fmt == "excel":
             return Path(f"{path}.xlsx").expanduser() if file_extension not in ["xlsx", "xls"] else path
         return Path(f"{path}.{fmt}").expanduser() if file_extension != fmt else path
 
     def _is_plain_text_format(self, fmt: str) -> bool:
-        """Check if a file format is plain text (supports appending)."""
+        """判断是否为可追加的纯文本格式。"""
         plain_text_formats = ["txt", "json", "markdown", "md", "csv", "xml", "html", "yaml", "log", "tsv", "jsonl"]
         return fmt.lower() in plain_text_formats
 
     async def _upload_file(self, file_path: Path) -> None:
-        """Upload the saved file using the upload_user_file service."""
+        """通过上传服务持久化本地文件。"""
         from langflow.api.v2.files import upload_user_file
         from langflow.services.database.models.user.crud import get_user_by_id
 
-        # Ensure the file exists
+        # 确保文件存在
         if not file_path.exists():
             msg = f"File not found: {file_path}"
             raise FileNotFoundError(msg)
 
-        # Upload the file - always use append=False because the local file already contains
-        # the correct content (either new or appended locally)
+        # 注意：本地已完成写入，上传时固定 append=False
         with file_path.open("rb") as f:
             async with session_scope() as db:
                 if not self.user_id:
@@ -347,7 +382,7 @@ class SaveToFileComponent(Component):
                 )
 
     def _save_dataframe(self, dataframe: DataFrame, path: Path, fmt: str) -> str:
-        """Save a DataFrame to the specified file format."""
+        """保存 DataFrame 到指定格式。"""
         append_mode = getattr(self, "append_mode", False)
         should_append = append_mode and path.exists() and self._is_plain_text_format(fmt)
 
@@ -357,26 +392,24 @@ class SaveToFileComponent(Component):
             dataframe.to_excel(path, index=False, engine="openpyxl")
         elif fmt == "json":
             if should_append:
-                # Read and parse existing JSON
+                # 追加模式：读取已有 JSON
                 existing_data = []
                 try:
                     existing_content = path.read_text(encoding="utf-8").strip()
                     if existing_content:
                         parsed = json.loads(existing_content)
-                        # Handle case where existing content is a single object
                         if isinstance(parsed, dict):
                             existing_data = [parsed]
                         elif isinstance(parsed, list):
                             existing_data = parsed
                 except (json.JSONDecodeError, FileNotFoundError):
-                    # Treat parse errors or missing file as empty array
                     existing_data = []
 
-                # Append new data
+                # 追加新记录
                 new_records = json.loads(dataframe.to_json(orient="records"))
                 existing_data.extend(new_records)
 
-                # Write back as a single JSON array
+                # 写回单一 JSON 数组
                 path.write_text(json.dumps(existing_data, indent=2), encoding="utf-8")
             else:
                 dataframe.to_json(path, orient="records", indent=2)
@@ -393,7 +426,7 @@ class SaveToFileComponent(Component):
         return f"DataFrame {action} '{path}'"
 
     def _save_data(self, data: Data, path: Path, fmt: str) -> str:
-        """Save a Data object to the specified file format."""
+        """保存 Data 到指定格式。"""
         append_mode = getattr(self, "append_mode", False)
         should_append = append_mode and path.exists() and self._is_plain_text_format(fmt)
 
@@ -409,28 +442,26 @@ class SaveToFileComponent(Component):
         elif fmt == "json":
             new_data = jsonable_encoder(data.data)
             if should_append:
-                # Read and parse existing JSON
+                # 追加模式：读取已有 JSON
                 existing_data = []
                 try:
                     existing_content = path.read_text(encoding="utf-8").strip()
                     if existing_content:
                         parsed = json.loads(existing_content)
-                        # Handle case where existing content is a single object
                         if isinstance(parsed, dict):
                             existing_data = [parsed]
                         elif isinstance(parsed, list):
                             existing_data = parsed
                 except (json.JSONDecodeError, FileNotFoundError):
-                    # Treat parse errors or missing file as empty array
                     existing_data = []
 
-                # Append new data
+                # 追加新记录
                 if isinstance(new_data, list):
                     existing_data.extend(new_data)
                 else:
                     existing_data.append(new_data)
 
-                # Write back as a single JSON array
+                # 写回单一 JSON 数组
                 path.write_text(json.dumps(existing_data, indent=2), encoding="utf-8")
             else:
                 content = orjson.dumps(new_data, option=orjson.OPT_INDENT_2).decode("utf-8")
@@ -448,7 +479,7 @@ class SaveToFileComponent(Component):
         return f"Data {action} '{path}'"
 
     async def _save_message(self, message: Message, path: Path, fmt: str) -> str:
-        """Save a Message to the specified file format, handling async iterators."""
+        """保存 Message 到指定格式，并兼容异步迭代文本。"""
         content = ""
         if message.text is None:
             content = ""
@@ -472,25 +503,25 @@ class SaveToFileComponent(Component):
         elif fmt == "json":
             new_message = {"message": content}
             if should_append:
-                # Read and parse existing JSON
+            # 读取并解析已有 JSON
                 existing_data = []
                 try:
                     existing_content = path.read_text(encoding="utf-8").strip()
                     if existing_content:
                         parsed = json.loads(existing_content)
-                        # Handle case where existing content is a single object
+                        # 兼容单对象内容
                         if isinstance(parsed, dict):
                             existing_data = [parsed]
                         elif isinstance(parsed, list):
                             existing_data = parsed
                 except (json.JSONDecodeError, FileNotFoundError):
-                    # Treat parse errors or missing file as empty array
+                    # 解析失败或文件缺失时视为空数组
                     existing_data = []
 
-                # Append new message
+                # 追加新消息
                 existing_data.append(new_message)
 
-                # Write back as a single JSON array
+                # 写回单一 JSON 数组
                 path.write_text(json.dumps(existing_data, indent=2), encoding="utf-8")
             else:
                 path.write_text(json.dumps(new_message, indent=2), encoding="utf-8")
@@ -507,7 +538,7 @@ class SaveToFileComponent(Component):
         return f"Message {action} '{path}'"
 
     def _get_selected_storage_location(self) -> str:
-        """Get the selected storage location from the SortableListInput."""
+        """从选择器中获取存储位置。"""
         if hasattr(self, "storage_location") and self.storage_location:
             if isinstance(self.storage_location, list) and len(self.storage_location) > 0:
                 return self.storage_location[0].get("name", "")
@@ -516,7 +547,7 @@ class SaveToFileComponent(Component):
         return ""
 
     def _get_file_format_for_location(self, location: str) -> str:
-        """Get the appropriate file format based on storage location."""
+        """根据存储位置选择文件格式。"""
         if location == "Local":
             return getattr(self, "local_format", None) or self._get_default_format()
         if location == "AWS":
@@ -526,10 +557,10 @@ class SaveToFileComponent(Component):
         return self._get_default_format()
 
     async def _save_to_local(self) -> Message:
-        """Save file to local storage (original functionality)."""
+        """保存到本地存储。"""
         file_format = self._get_file_format_for_location("Local")
 
-        # Validate file format based on input type
+        # 校验格式与输入类型匹配
         allowed_formats = (
             self.LOCAL_MESSAGE_FORMAT_CHOICES if self._get_input_type() == "Message" else self.LOCAL_DATA_FORMAT_CHOICES
         )
@@ -537,13 +568,13 @@ class SaveToFileComponent(Component):
             msg = f"Invalid file format '{file_format}' for {self._get_input_type()}. Allowed: {allowed_formats}"
             raise ValueError(msg)
 
-        # Prepare file path
+        # 准备文件路径
         file_path = Path(self.file_name).expanduser()
         if not file_path.parent.exists():
             file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path = self._adjust_file_path_with_format(file_path, file_format)
 
-        # Save the input to file based on type
+        # 按输入类型写入文件
         if self._get_input_type() == "DataFrame":
             confirmation = self._save_dataframe(self.input, file_path, file_format)
         elif self._get_input_type() == "Data":
@@ -554,22 +585,22 @@ class SaveToFileComponent(Component):
             msg = f"Unsupported input type: {self._get_input_type()}"
             raise ValueError(msg)
 
-        # Upload the saved file
+        # 上传已保存文件
         await self._upload_file(file_path)
 
-        # Return the final file path and confirmation message
+        # 返回最终路径与确认信息
         final_path = Path.cwd() / file_path if not file_path.is_absolute() else file_path
         return Message(text=f"{confirmation} at {final_path}")
 
     async def _save_to_aws(self) -> Message:
-        """Save file to AWS S3 using S3 functionality."""
+        """保存到 AWS S3。"""
         import os
 
         import boto3
 
         from lfx.base.data.cloud_storage_utils import create_s3_client, validate_aws_credentials
 
-        # Get AWS credentials from component inputs or fall back to environment variables
+        # 获取 AWS 凭据（优先组件输入，其次环境变量）
         aws_access_key_id = getattr(self, "aws_access_key_id", None)
         if aws_access_key_id and hasattr(aws_access_key_id, "get_secret_value"):
             aws_access_key_id = aws_access_key_id.get_secret_value()
@@ -584,11 +615,11 @@ class SaveToFileComponent(Component):
 
         bucket_name = getattr(self, "bucket_name", None)
         if not bucket_name:
-            # Try to get from storage service settings
+            # 尝试从存储服务配置获取
             settings = get_settings_service().settings
             bucket_name = settings.object_storage_bucket_name
 
-        # Validate AWS credentials
+        # 校验 AWS 凭据
         if not aws_access_key_id:
             msg = (
                 "AWS Access Key ID is required for S3 storage. Provide it as a component input "
@@ -608,17 +639,16 @@ class SaveToFileComponent(Component):
             )
             raise ValueError(msg)
 
-        # Validate AWS credentials
         validate_aws_credentials(self)
 
-        # Create S3 client
+        # 创建 S3 客户端
         s3_client = create_s3_client(self)
         client_config: dict[str, Any] = {
             "aws_access_key_id": str(aws_access_key_id),
             "aws_secret_access_key": str(aws_secret_access_key),
         }
 
-        # Get region from component input, environment variable, or settings
+        # 获取区域（组件输入/环境变量/设置）
         aws_region = getattr(self, "aws_region", None)
         if not aws_region:
             aws_region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION")
@@ -627,16 +657,16 @@ class SaveToFileComponent(Component):
 
         s3_client = boto3.client("s3", **client_config)
 
-        # Extract content
+        # 提取内容并确定格式
         content = self._extract_content_for_upload()
         file_format = self._get_file_format_for_location("AWS")
 
-        # Generate file path
+        # 生成对象路径
         file_path = f"{self.file_name}.{file_format}"
         if hasattr(self, "s3_prefix") and self.s3_prefix:
             file_path = f"{self.s3_prefix.rstrip('/')}/{file_path}"
 
-        # Create temporary file
+        # 写入临时文件
         import tempfile
 
         with tempfile.NamedTemporaryFile(
@@ -646,24 +676,22 @@ class SaveToFileComponent(Component):
             temp_file_path = temp_file.name
 
         try:
-            # Upload to S3
             s3_client.upload_file(temp_file_path, bucket_name, file_path)
             s3_url = f"s3://{bucket_name}/{file_path}"
             return Message(text=f"File successfully uploaded to {s3_url}")
         finally:
-            # Clean up temp file
             if Path(temp_file_path).exists():
                 Path(temp_file_path).unlink()
 
     async def _save_to_google_drive(self) -> Message:
-        """Save file to Google Drive using Google Drive functionality."""
+        """保存到 Google Drive。"""
         import tempfile
 
         from googleapiclient.http import MediaFileUpload
 
         from lfx.base.data.cloud_storage_utils import create_google_drive_service
 
-        # Validate Google Drive credentials
+        # 校验 Google Drive 凭据
         if not getattr(self, "service_account_key", None):
             msg = "GCP Credentials Secret Key is required for Google Drive storage"
             raise ValueError(msg)
@@ -671,20 +699,20 @@ class SaveToFileComponent(Component):
             msg = "Google Drive Folder ID is required for Google Drive storage"
             raise ValueError(msg)
 
-        # Create Google Drive service with full drive scope (needed for folder operations)
+        # 创建 Google Drive 服务（需完整权限以操作文件夹）
         drive_service, credentials = create_google_drive_service(
             self.service_account_key, scopes=["https://www.googleapis.com/auth/drive"], return_credentials=True
         )
 
-        # Extract content and format
+        # 提取内容与格式
         content = self._extract_content_for_upload()
         file_format = self._get_file_format_for_location("Google Drive")
 
-        # Handle special Google Drive formats
+        # 特殊格式（Slides/Docs）
         if file_format in ["slides", "docs"]:
             return await self._save_to_google_apps(drive_service, credentials, content, file_format)
 
-        # Create temporary file
+        # 写入临时文件
         file_path = f"{self.file_name}.{file_format}"
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -696,9 +724,7 @@ class SaveToFileComponent(Component):
             temp_file_path = temp_file.name
 
         try:
-            # Upload to Google Drive
-            # Note: We skip explicit folder verification since it requires broader permissions.
-            # If the folder doesn't exist or isn't accessible, the create() call will fail with a clear error.
+            # 注意：不主动校验文件夹权限，若不可用会在创建时抛错
             file_metadata = {"name": file_path, "parents": [self.folder_id]}
             media = MediaFileUpload(temp_file_path, resumable=True)
 
@@ -719,12 +745,11 @@ class SaveToFileComponent(Component):
             file_url = f"https://drive.google.com/file/d/{file_id}/view"
             return Message(text=f"File successfully uploaded to Google Drive: {file_url}")
         finally:
-            # Clean up temp file
             if Path(temp_file_path).exists():
                 Path(temp_file_path).unlink()
 
     async def _save_to_google_apps(self, drive_service, credentials, content: str, app_type: str) -> Message:
-        """Save content to Google Apps (Slides or Docs)."""
+        """保存内容到 Google Slides/Docs。"""
         import time
 
         if app_type == "slides":
@@ -741,12 +766,11 @@ class SaveToFileComponent(Component):
             created_file = drive_service.files().create(body=file_metadata, fields="id").execute()
             presentation_id = created_file["id"]
 
-            time.sleep(2)  # Wait for file to be available  # noqa: ASYNC251
+            time.sleep(2)  # 等待文件可用  # noqa: ASYNC251
 
             presentation = slides_service.presentations().get(presentationId=presentation_id).execute()
             slide_id = presentation["slides"][0]["objectId"]
 
-            # Add content to slide
             requests = [
                 {
                     "createShape": {
@@ -790,9 +814,8 @@ class SaveToFileComponent(Component):
             created_file = drive_service.files().create(body=file_metadata, fields="id").execute()
             document_id = created_file["id"]
 
-            time.sleep(2)  # Wait for file to be available  # noqa: ASYNC251
+            time.sleep(2)  # 等待文件可用  # noqa: ASYNC251
 
-            # Add content to document
             requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
             docs_service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute()
             file_url = f"https://docs.google.com/document/d/{document_id}/edit"
@@ -800,7 +823,7 @@ class SaveToFileComponent(Component):
         return Message(text=f"File successfully created in Google {app_type.title()}: {file_url}")
 
     def _extract_content_for_upload(self) -> str:
-        """Extract content from input for upload to cloud services."""
+        """从输入中提取可上传的文本内容。"""
         if self._get_input_type() == "DataFrame":
             return self.input.to_csv(index=False)
         if self._get_input_type() == "Data":

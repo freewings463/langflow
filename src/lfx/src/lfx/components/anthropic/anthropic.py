@@ -1,3 +1,17 @@
+"""
+模块名称：`Anthropic` 模型组件
+
+本模块提供 `AnthropicModelComponent`，用于通过 `Anthropic` `Messages API` 构建并调用模型。
+主要功能包括：
+- 构建 `ChatAnthropic` 模型实例
+- 拉取模型列表并过滤工具调用能力
+- 根据输入更新组件配置与模型下拉选项
+
+关键组件：`AnthropicModelComponent`、`get_models`、`update_build_config`
+设计背景：统一 `Anthropic` 模型接入与工具调用能力筛选
+注意事项：依赖 `langchain_anthropic` 与 `anthropic`；`API Key` 为空时仅使用内置模型列表
+"""
+
 from typing import Any, cast
 
 import requests
@@ -18,6 +32,12 @@ from lfx.schema.dotdict import dotdict
 
 
 class AnthropicModelComponent(LCModelComponent):
+    """`Anthropic` 模型组件。
+    契约：输入为模型配置与认证参数；输出为 `LanguageModel` 实例。
+    关键路径：读取输入 → 构建 `ChatAnthropic` → 返回模型。
+    决策：使用 `Messages API` 接口。问题：统一模型调用路径；方案：`ChatAnthropic`；代价：依赖外部包；重评：当官方 `SDK` 接口变更时。
+    """
+
     display_name = "Anthropic"
     description = "Generate text using Anthropic's Messages API and models."
     icon = "Anthropic"
@@ -77,6 +97,11 @@ class AnthropicModelComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 `ChatAnthropic` 模型实例。
+        契约：返回 `LanguageModel`；缺少依赖或连接失败时抛异常。
+        关键路径：导入 `ChatAnthropic` → 规范化 `max_tokens` → 创建实例。
+        决策：空 `max_tokens` 兜底为 4096。问题：空值导致校验失败；方案：默认值；代价：可能偏大；重评：当默认策略调整时。
+        """
         try:
             from langchain_anthropic.chat_models import ChatAnthropic
         except ImportError as e:
@@ -102,6 +127,11 @@ class AnthropicModelComponent(LCModelComponent):
         return output
 
     def get_models(self, *, tool_model_enabled: bool | None = None) -> list[str]:
+        """获取模型列表并按工具能力筛选。
+        契约：返回模型 `ID` 列表；失败时回退到内置列表。
+        关键路径：`SDK` 拉取 → 合并内置列表 → 可选工具能力过滤。
+        决策：接口失败回退到静态列表。问题：可用性优先；方案：回退；代价：模型列表可能过期；重评：当接口稳定且可用时。
+        """
         try:
             import anthropic
 
@@ -119,7 +149,7 @@ class AnthropicModelComponent(LCModelComponent):
                 msg = "langchain_anthropic is not installed. Please install it with `pip install langchain_anthropic`."
                 raise ImportError(msg) from e
 
-            # Create a new list instead of modifying while iterating
+            # 注意：使用新列表避免遍历时修改原列表。
             filtered_models = []
             for model in model_ids:
                 if model in TOOL_CALLING_SUPPORTED_ANTHROPIC_MODELS:
@@ -127,16 +157,16 @@ class AnthropicModelComponent(LCModelComponent):
                     continue
 
                 model_with_tool = ChatAnthropic(
-                    model=model,  # Use the current model being checked
+                    model=model,  # 注意：使用当前遍历的模型进行检测
                     anthropic_api_key=self.api_key,
                     anthropic_api_url=cast("str", self.base_url) or DEFAULT_ANTHROPIC_API_URL,
                 )
 
-                if (
-                    not self.supports_tool_calling(model_with_tool)
-                    or model in TOOL_CALLING_UNSUPPORTED_ANTHROPIC_MODELS
-                ):
-                    continue
+            if (
+                not self.supports_tool_calling(model_with_tool)
+                or model in TOOL_CALLING_UNSUPPORTED_ANTHROPIC_MODELS
+            ):
+                continue
 
                 filtered_models.append(model)
 
@@ -145,13 +175,10 @@ class AnthropicModelComponent(LCModelComponent):
         return model_ids
 
     def _get_exception_message(self, exception: Exception) -> str | None:
-        """Get a message from an Anthropic exception.
-
-        Args:
-            exception (Exception): The exception to get the message from.
-
-        Returns:
-            str: The message from the exception.
+    """从 `Anthropic` 异常中提取错误消息。
+        契约：仅处理 `BadRequestError`，无匹配则返回 `None`。
+        关键路径：导入异常类型 → 匹配类型 → 读取 `body.message`。
+        决策：仅抽取 `BadRequestError`。问题：其他异常结构不稳定；方案：聚焦常见错误；代价：信息可能缺失；重评：当 `SDK` 异常类型稳定时。
         """
         try:
             from anthropic import BadRequestError
@@ -164,6 +191,11 @@ class AnthropicModelComponent(LCModelComponent):
         return None
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据字段变更更新 build_config。
+        契约：返回更新后的 `build_config`；模型列表获取失败时抛 `ValueError`。
+        关键路径：修正 `base_url` → 判断触发字段 → 拉取/回退模型列表 → 更新下拉选项。
+        决策：`API Key` 为空时仅使用内置模型。问题：避免无凭证调用远端；方案：回退静态列表；代价：列表可能不全；重评：当允许匿名查询时。
+        """
         if "base_url" in build_config and build_config["base_url"]["value"] is None:
             build_config["base_url"]["value"] = DEFAULT_ANTHROPIC_API_URL
             self.base_url = DEFAULT_ANTHROPIC_API_URL

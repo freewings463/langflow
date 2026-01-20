@@ -1,7 +1,21 @@
-"""Reusable base classes for ALTK agent components and tool wrappers.
+"""
+模块名称：`ALTK` 代理基类与工具包装框架
 
-This module abstracts common orchestration so concrete components can focus
-on user-facing configuration and small customizations.
+本模块提供 `ALTK` 代理组件的基础实现与工具包装管线，主要用于将 `LangChain` 代理与工具
+映射到 `ALTK` 运行时并统一事件处理。
+主要功能包括：
+- 消息规范化与输入清洗
+- 工具包装与 LLM 提取适配
+- 代理执行、事件流处理与异常语义
+
+关键组件：
+- `BaseToolWrapper`：工具包装器抽象
+- `ALTKBaseTool`：具备 ALTK LLM 访问能力的工具基类
+- `ToolPipelineManager`：包装器链路管理
+- `ALTKBaseAgentComponent`：ALTK 代理组件基类
+
+设计背景：`ALTK` 与 `LangChain` 对象协议不一致，需要统一适配层。
+注意事项：包装器链路受最大深度限制；LLM 类型不匹配时返回 None。
 """
 
 from __future__ import annotations
@@ -39,72 +53,106 @@ from lfx.utils.constants import MESSAGE_SENDER_AI
 
 
 def normalize_message_content(message: BaseMessage) -> str:
-    """Normalize message content to handle inconsistent formats from Data.to_lc_message().
+    """标准化消息内容以处理来自 Data.to_lc_message() 的不一致格式
 
-    Args:
-        message: A BaseMessage that may have content as either:
-                - str (for AI messages)
-                - list[dict] (for User messages in format [{"type": "text", "text": "..."}])
+    关键路径（三步）：
+    1) 检查消息内容是否为字符串格式
+    2) 检查消息内容是否为列表格式并提取文本
+    3) 返回提取的文本内容或空字符串
 
-    Returns:
-        str: The extracted text content
-
-    Note:
-        This addresses the inconsistency in lfx.schema.data.Data.to_lc_message() where:
-        - User messages: content = [{"type": "text", "text": text}] (list format)
-        - AI messages: content = text (string format)
+    异常流：消息内容格式不符合预期时返回字符串形式的内容。
+    性能瓶颈：无显著性能瓶颈。
+    排障入口：日志关键字 "normalize_message_content"。
+    
+    契约：
+    - 输入：BaseMessage 对象
+    - 输出：提取的文本内容字符串
+    - 副作用：无
+    - 失败语义：返回字符串形式的内容
     """
     content = message.content
 
-    # Handle string format (AI messages)
+    # 处理字符串格式（`AI` 消息）
     if isinstance(content, str):
         return content
 
-    # Handle list format (User messages)
+    # 处理列表格式（用户消息）
     if isinstance(content, list) and len(content) > 0:
-        # Extract text from first content block that has 'text' field
+        # 实现：提取首个包含 `text` 字段的内容
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text" and "text" in item:
                 return item["text"]
-        # If no text found, return empty string (e.g., image-only messages)
+        # 注意：未找到文本时返回空字符串（如仅包含图片）
         return ""
 
-    # Handle empty list or other formats
+    # 处理空列表或其他格式
     if isinstance(content, list):
         return ""
 
-    # Fallback for any other format
+    # 兜底处理其他格式
     return str(content)
 
 
-# === Base Tool Wrapper Architecture ===
+# === 工具包装架构 ===
 
 
 class BaseToolWrapper(ABC):
-    """Base class for all tool wrappers in the pipeline.
+    """工具包装器管道中的所有工具的基类
 
-    Tool wrappers can enhance tools by adding pre-execution validation,
-    post-execution processing, or other capabilities.
+    工具包装器可以通过添加执行前验证、执行后处理或其他功能来增强工具。
+    
+    契约：
+    - 输入：BaseTool 对象及额外参数
+    - 输出：包装后的 BaseTool 对象
+    - 副作用：根据具体实现而定
+    - 失败语义：如果包装失败，抛出相应异常
     """
 
     @abstractmethod
     def wrap_tool(self, tool: BaseTool, **kwargs) -> BaseTool:
-        """Wrap a tool with enhanced functionality."""
+        """用增强功能包装工具
+
+        契约：
+        - 输入：BaseTool 对象和关键字参数
+        - 输出：包装后的 BaseTool 对象
+        - 副作用：根据具体包装器实现而定
+        - 失败语义：如果包装失败，抛出相应异常
+        """
 
     def initialize(self, **_kwargs) -> bool:  # pragma: no cover - trivial
-        """Initialize any resources needed by the wrapper."""
+        """初始化包装器所需的任何资源
+
+        契约：
+        - 输入：关键字参数
+        - 输出：布尔值表示初始化是否成功
+        - 副作用：无
+        - 失败语义：始终返回 True
+        """
         return True
 
     @property
     def is_available(self) -> bool:  # pragma: no cover - trivial
-        """Check if the wrapper is available for use."""
+        """检查包装器是否可用
+
+        契约：
+        - 输入：无
+        - 输出：布尔值表示是否可用
+        - 副作用：无
+        - 失败语义：始终返回 True
+        """
         return True
 
 
 class ALTKBaseTool(BaseTool):
-    """Base class for tools that need agent interaction and ALTK LLM access.
+    """需要代理交互和 ALTK LLM 访问的工具的基类
 
-    Provides common functionality for tool execution and ALTK LLM object creation.
+    为工具执行和 ALTK LLM 对象创建提供通用功能。
+    
+    契约：
+    - 输入：工具名称、描述、被包装的工具和代理
+    - 输出：ALTKBaseTool 实例
+    - 副作用：继承自 BaseTool 的功能
+    - 失败语义：如果执行失败，抛出相应异常
     """
 
     name: str = Field(...)
@@ -113,24 +161,45 @@ class ALTKBaseTool(BaseTool):
     agent: Runnable | BaseSingleActionAgent | BaseMultiActionAgent | AgentExecutor = Field(...)
 
     def _run(self, *args, **kwargs) -> str:
-        """Abstract method implementation that uses the wrapped tool execution."""
+        """使用包装的工具执行的抽象方法实现
+
+        契约：
+        - 输入：位置参数和关键字参数
+        - 输出：执行结果字符串
+        - 副作用：执行包装的工具
+        - 失败语义：如果执行失败，抛出相应异常
+        """
         return self._execute_tool(*args, **kwargs)
 
     def _execute_tool(self, *args, **kwargs) -> str:
-        """Execute the wrapped tool with compatibility across LC versions."""
-        # BaseTool.run() expects tool_input as first argument
+        """使用跨 LC 版本的兼容性执行包装的工具
+
+        契约：
+        - 输入：位置参数和关键字参数
+        - 输出：工具执行结果字符串
+        - 副作用：执行被包装的工具
+        - 失败语义：如果执行失败，抛出相应异常
+        """
+        # 注意：`BaseTool.run()` 期望 `tool_input` 为第一个参数
         if args:
-            # Use first arg as tool_input, pass remaining args
+            # 实现：首参作为 `tool_input`，其余参数透传
             tool_input = args[0]
             return self.wrapped_tool.run(tool_input, *args[1:])
         if kwargs:
-            # Use kwargs dict as tool_input
+            # 实现：将 `kwargs` 作为 `tool_input`
             return self.wrapped_tool.run(kwargs)
-        # No arguments - pass empty dict as tool_input
+        # 注意：无参数时使用空字典作为 `tool_input`
         return self.wrapped_tool.run({})
 
     def _get_altk_llm_object(self, *, use_output_val: bool = True) -> Any:
-        """Extract the underlying LLM and map it to an ALTK client object."""
+        """提取底层 LLM 并将其映射到 ALTK 客户端对象
+
+        契约：
+        - 输入：use_output_val 参数决定是否使用输出值
+        - 输出：ALTK LLM 客户端对象或 None
+        - 副作用：访问代理的步骤以查找 LLM 对象
+        - 失败语义：如果不支持的模型类型，返回 None
+        """
         llm_object: BaseChatModel | None = None
         steps = getattr(self.agent, "steps", None)
         if steps:
@@ -159,27 +228,74 @@ class ALTKBaseTool(BaseTool):
 
 
 class ToolPipelineManager:
-    """Manages a sequence of tool wrappers and applies them to tools."""
+    """管理工具包装器序列并将它们应用于工具"""
 
     def __init__(self):
+        """初始化工具管道管理器
+
+        契约：
+        - 输入：无
+        - 输出：ToolPipelineManager 实例
+        - 副作用：初始化包装器列表
+        - 失败语义：无
+        """
         self.wrappers: list[BaseToolWrapper] = []
 
     def clear(self) -> None:
+        """清空包装器列表
+
+        契约：
+        - 输入：无
+        - 输出：无
+        - 副作用：清空包装器列表
+        - 失败语义：无
+        """
         self.wrappers.clear()
 
     def add_wrapper(self, wrapper: BaseToolWrapper) -> None:
+        """添加包装器到列表
+
+        契约：
+        - 输入：BaseToolWrapper 实例
+        - 输出：无
+        - 副作用：将包装器添加到列表
+        - 失败语义：无
+        """
         self.wrappers.append(wrapper)
 
     def configure_wrappers(self, wrappers: list[BaseToolWrapper]) -> None:
-        """Replace current wrappers with new configuration."""
+        """用新配置替换当前包装器
+
+        契约：
+        - 输入：BaseToolWrapper 列表
+        - 输出：无
+        - 副作用：清空当前包装器并添加新包装器
+        - 失败语义：如果配置失败，抛出相应异常
+        """
         self.clear()
         for wrapper in wrappers:
             self.add_wrapper(wrapper)
 
     def process_tools(self, tools: list[BaseTool], **kwargs) -> list[BaseTool]:
+        """处理工具列表，应用包装器
+
+        契约：
+        - 输入：BaseTool 列表和关键字参数
+        - 输出：处理后的 BaseTool 列表
+        - 副作用：应用包装器到每个工具
+        - 失败语义：如果处理失败，抛出相应异常
+        """
         return [self._apply_wrappers_to_tool(tool, **kwargs) for tool in tools]
 
     def _apply_wrappers_to_tool(self, tool: BaseTool, **kwargs) -> BaseTool:
+        """将包装器应用于单个工具
+
+        契约：
+        - 输入：BaseTool 实例和关键字参数
+        - 输出：包装后的 BaseTool 实例
+        - 副作用：按相反顺序应用包装器
+        - 失败语义：如果应用失败，抛出相应异常
+        """
         wrapped_tool = tool
         for wrapper in reversed(self.wrappers):
             if wrapper.is_available:
@@ -187,31 +303,62 @@ class ToolPipelineManager:
         return wrapped_tool
 
 
-# === Base Agent Component Orchestration ===
+# === 代理组件编排 ===
 
 
 class ALTKBaseAgentComponent(AgentComponent):
-    """Base agent component that centralizes orchestration and hooks.
+    """集中编排和钩子的基代理组件
 
-    Subclasses should override `get_tool_wrappers` to provide their wrappers
-    and can customize context building if needed.
+    子类应重写 `get_tool_wrappers` 以提供其包装器，
+    并可根据需要自定义上下文构建。
+    
+    关键路径（三步）：
+    1) 初始化组件和工具管道管理器
+    2) 构建对话上下文和配置工具管道
+    3) 运行代理并处理结果
+    
+    异常流：工具管道配置失败、对话上下文构建失败、代理执行异常。
+    性能瓶颈：工具包装器处理、复杂对话历史处理。
+    排障入口：日志关键字 "configure_tool_pipeline"、"build_conversation_context"。
     """
 
     def __init__(self, **kwargs):
+        """初始化 ALTK 基础代理组件
+
+        契约：
+        - 输入：关键字参数
+        - 输出：ALTKBaseAgentComponent 实例
+        - 副作用：初始化父类和工具管道管理器
+        - 失败语义：如果初始化失败，抛出相应异常
+        """
         super().__init__(**kwargs)
         self.pipeline_manager = ToolPipelineManager()
 
-    # ---- Hooks for subclasses ----
+    # ---- 子类扩展钩子 ----
     def configure_tool_pipeline(self) -> None:
-        """Configure the tool pipeline with wrappers. Subclasses override this."""
-        # Default: no wrappers
+        """配置工具管道与包装器。子类重写此方法。
+
+        契约：
+        - 输入：无
+        - 输出：无
+        - 副作用：配置工具管道管理器
+        - 失败语义：如果配置失败，抛出相应异常
+        """
+        # 注意：默认不启用包装器
         self.pipeline_manager.clear()
 
     def build_conversation_context(self) -> list[BaseMessage]:
-        """Create conversation context from input and chat history."""
+        """从输入和聊天历史创建对话上下文
+
+        契约：
+        - 输入：无
+        - 输出：BaseMessage 对象列表
+        - 副作用：按时间顺序组织消息
+        - 失败语义：如果构建失败，抛出相应异常
+        """
         context: list[BaseMessage] = []
 
-        # Add chat history to maintain chronological order
+        # 注意：先加入历史对话以保持时间顺序
         if hasattr(self, "chat_history") and self.chat_history:
             if isinstance(self.chat_history, Data):
                 context.append(self.chat_history.to_lc_message())
@@ -219,21 +366,21 @@ class ALTKBaseAgentComponent(AgentComponent):
                 if all(isinstance(m, Message) for m in self.chat_history):
                     context.extend([m.to_lc_message() for m in self.chat_history])
                 else:
-                    # Assume list of Data objects, let data_to_messages handle validation
+                    # 注意：假定为 `Data` 列表，交由 `data_to_messages` 验证
                     try:
                         context.extend(data_to_messages(self.chat_history))
                     except (AttributeError, TypeError) as e:
                         error_message = f"Invalid chat_history list contents: {e}"
                         raise ValueError(error_message) from e
             else:
-                # Reject all other types (strings, numbers, etc.)
+                # 注意：拒绝其他类型（字符串、数字等）
                 type_name = type(self.chat_history).__name__
                 error_message = (
                     f"chat_history must be a Data object, list of Data/Message objects, or None. Got: {type_name}"
                 )
                 raise ValueError(error_message)
 
-        # Then add current input to maintain chronological order
+        # 注意：再加入当前输入以保持时间顺序
         if hasattr(self, "input_value") and self.input_value:
             if isinstance(self.input_value, Message):
                 context.append(self.input_value.to_lc_message())
@@ -243,22 +390,43 @@ class ALTKBaseAgentComponent(AgentComponent):
         return context
 
     def get_user_query(self) -> str:
+        """获取用户查询
+
+        契约：
+        - 输入：无
+        - 输出：用户查询字符串
+        - 副作用：无
+        - 失败语义：如果获取失败，返回字符串形式的输入值
+        """
         if hasattr(self.input_value, "get_text") and callable(self.input_value.get_text):
             return self.input_value.get_text()
         return str(self.input_value)
 
-    # ---- Internal helpers reused by run/update ----
+    # ---- `run`/`update` 复用的内部辅助 ----
     def _initialize_tool_pipeline(self) -> None:
-        """Initialize the tool pipeline by calling the subclass configuration."""
+        """通过调用子类配置初始化工具管道
+
+        契约：
+        - 输入：无
+        - 输出：无
+        - 副作用：调用子类的配置方法
+        - 失败语义：如果初始化失败，抛出相应异常
+        """
         self.configure_tool_pipeline()
 
     def update_runnable_instance(
         self, agent: AgentExecutor, runnable: AgentExecutor, tools: Sequence[BaseTool]
     ) -> AgentExecutor:
-        """Update the runnable instance with processed tools.
+        """使用处理后的工具更新可运行实例
 
-        Subclasses can override this method to customize tool processing.
-        The default implementation applies the tool wrapper pipeline.
+        子类可以重写此方法以自定义工具处理。
+        默认实现应用工具包装器管道。
+        
+        契约：
+        - 输入：代理、可运行实例和工具序列
+        - 输出：更新后的 AgentExecutor 实例
+        - 副作用：处理并替换可运行实例中的工具
+        - 失败语义：如果更新失败，抛出相应异常
         """
         user_query = self.get_user_query()
         conversation_context = self.build_conversation_context()
@@ -278,10 +446,27 @@ class ALTKBaseAgentComponent(AgentComponent):
         self,
         agent: Runnable | BaseSingleActionAgent | BaseMultiActionAgent | AgentExecutor,
     ) -> Message:
+        """运行代理并返回消息
+
+        关键路径（三步）：
+        1) 准备代理执行环境
+        2) 构建输入字典
+        3) 执行代理并处理结果
+
+        异常流：输入验证失败、代理执行异常、工具调用错误。
+        性能瓶颈：长时间运行的代理迭代、复杂的工具调用。
+        排障入口：日志关键字 "ExceptionWithMessageError"、"Anthropic API errors"。
+        
+        契约：
+        - 输入：各种类型的代理实例
+        - 输出：Message 对象
+        - 副作用：设置 self.status 为结果消息
+        - 失败语义：如果代理运行失败，抛出相应异常
+        """
         if isinstance(agent, AgentExecutor):
             runnable = agent
         else:
-            # note the tools are not required to run the agent, hence the validation removed.
+            # 注意：运行代理不强制依赖工具，因此不做强校验
             handle_parsing_errors = hasattr(self, "handle_parsing_errors") and self.handle_parsing_errors
             verbose = hasattr(self, "verbose") and self.verbose
             max_iterations = hasattr(self, "max_iterations") and self.max_iterations
@@ -294,7 +479,7 @@ class ALTKBaseAgentComponent(AgentComponent):
             )
         runnable = self.update_runnable_instance(agent, runnable, self.tools)
 
-        # Convert input_value to proper format for agent
+        # 实现：将 `input_value` 规范化为代理可接受的输入
         if hasattr(self.input_value, "to_lc_message") and callable(self.input_value.to_lc_message):
             lc_message = self.input_value.to_lc_message()
             input_text = lc_message.content if hasattr(lc_message, "content") else str(lc_message)
@@ -312,14 +497,14 @@ class ALTKBaseAgentComponent(AgentComponent):
                 and self.chat_history.__class__.__name__ == "Data"
             ):
                 input_dict["chat_history"] = data_to_messages(self.chat_history)
-            # Handle both lfx.schema.message.Message and langflow.schema.message.Message types
+            # 注意：兼容 `lfx.schema.message.Message` 与 `langflow.schema.message.Message`
             if all(hasattr(m, "to_data") and callable(m.to_data) and "text" in m.data for m in self.chat_history):
                 input_dict["chat_history"] = data_to_messages(self.chat_history)
             if all(isinstance(m, Message) for m in self.chat_history):
                 input_dict["chat_history"] = data_to_messages([m.to_data() for m in self.chat_history])
         if hasattr(lc_message, "content") and isinstance(lc_message.content, list):
-            # ! Because the input has to be a string, we must pass the images in the chat_history
-            # Support both "image" (legacy) and "image_url" (standard) types
+            # 注意：输入必须是字符串，图片需转入 `chat_history`
+            # 注意：兼容 `image`（旧）与 `image_url`（标准）类型
             image_dicts = [item for item in lc_message.content if item.get("type") in ("image", "image_url")]
             lc_message.content = [item for item in lc_message.content if item.get("type") not in ("image", "image_url")]
 
@@ -331,8 +516,8 @@ class ALTKBaseAgentComponent(AgentComponent):
                 input_dict["chat_history"] = [HumanMessage(content=[image_dict]) for image_dict in image_dicts]
         input_dict["input"] = input_text
 
-        # Copied from agent.py
-        # Final safety check: ensure input is never empty (prevents Anthropic API errors)
+        # 注意：与 `agent.py` 保持一致的兜底逻辑
+        # 注意：最终兜底，避免空输入导致 `Anthropic API` 错误
         current_input = input_dict.get("input", "")
         if isinstance(current_input, list):
             current_input = " ".join(map(str, current_input))
@@ -378,7 +563,7 @@ class ALTKBaseAgentComponent(AgentComponent):
                 cast("SendMessageFunctionType", self.send_message),
             )
         except ExceptionWithMessageError as e:
-            # Only delete message from database if it has an ID (was stored)
+            # 注意：仅当消息已持久化（有 `ID`）时删除数据库记录
             if hasattr(e, "agent_message"):
                 msg_id = e.agent_message.get_id()
                 if msg_id:
@@ -387,7 +572,7 @@ class ALTKBaseAgentComponent(AgentComponent):
             logger.error(f"ExceptionWithMessageError: {e}")
             raise
         except Exception as e:
-            # Log or handle any other exceptions
+            # 注意：记录其他异常并向上抛出
             logger.error(f"Error: {e}")
             raise
 

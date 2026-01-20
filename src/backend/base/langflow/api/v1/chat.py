@@ -1,3 +1,15 @@
+"""
+模块名称：聊天与流程构建接口
+
+本模块提供流程构建、顶点构建与流式事件推送等聊天相关 API。
+主要功能：
+- 构建流程/顶点并返回执行状态
+- 获取构建事件与流式输出
+- 处理公开流程的构建请求
+设计背景：统一聊天构建流程与事件传递。
+注意事项：部分接口依赖缓存与队列服务，异常统一转为 4xx/5xx。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -435,6 +447,18 @@ async def build_vertex(
 
 
 async def _stream_vertex(flow_id: str, vertex_id: str, chat_service: ChatService):
+    """以 SSE 形式流式输出单个顶点结果。
+
+    契约：
+    - 输入：`flow_id`、`vertex_id`
+    - 输出：`StreamData` 事件流
+    - 失败语义：异常转 `error` 事件并关闭流
+
+    关键路径（三步）：
+    1) 从缓存获取图并校验顶点可流式输出
+    2) 推送历史结果或执行 `vertex.stream()`
+    3) 关闭流并回写缓存
+    """
     graph = None
     try:
         try:
@@ -561,6 +585,7 @@ async def build_vertex_stream(
 
 
 async def build_flow_and_stream(flow_id, inputs, background_tasks, current_user):
+    """构建流程并直接返回流式事件响应。"""
     queue_service = get_queue_service()
     build_response = await build_flow(
         flow_id=flow_id,

@@ -1,3 +1,20 @@
+"""
+模块名称：模型组件基类
+
+本模块提供 LFX 的语言模型组件基类，实现统一的输入处理、消息构建、流式输出与
+错误处理逻辑。
+主要功能包括：
+- 构建模型实例并提供标准输出
+- 统一处理系统消息、流式/非流式调用
+- 生成状态信息与异常提示
+
+关键组件：
+- `LCModelComponent`：模型组件基类
+
+设计背景：统一模型调用与 UI 输出协议，降低各提供方差异带来的重复实现。
+注意事项：部分逻辑依赖 LangChain 行为与输出结构，升级需同步验证。
+"""
+
 import importlib
 import json
 import warnings
@@ -16,13 +33,26 @@ from lfx.schema.message import Message
 from lfx.template.field.base import Output
 from lfx.utils.constants import MESSAGE_SENDER_AI
 
-# Enabled detailed thinking for NVIDIA reasoning models.
+# NVIDIA 推理模型使用的详细思考前缀。
 #
-# Models are trained with this exact string. Do not update.
+# 注意：模型训练时固定使用该字符串，请勿修改。
 DETAILED_THINKING_PREFIX = "detailed thinking on\n\n"
 
 
 class LCModelComponent(Component):
+    """语言模型组件基类。
+
+    契约：`build_model()` 返回 LangChain 兼容的 `LanguageModel`；
+    `text_response()` 输出 `Message`。
+    副作用：可能触发远程模型调用并更新 `self.status`。
+    失败语义：模型调用失败会抛 `ValueError`（若可提取异常信息）。
+    决策：在基类统一处理消息构建与流式输出
+    问题：各模型组件重复实现消息/流式逻辑
+    方案：在基类集中处理，子类仅负责构建模型
+    代价：基类逻辑较复杂，需与 LangChain 行为保持同步
+    重评：当组件体系拆分为独立运行时再评估下沉
+    """
+
     display_name: str = "Model Name"
     description: str = "Model Description"
     trace_type = "llm"
@@ -35,7 +65,7 @@ class LCModelComponent(Component):
         ],
     }
 
-    # Optional output parser to pass to the runnable. Subclasses may allow the user to input an `output_parser`
+    # 可选输出解析器：子类可允许用户输入 `output_parser`
     output_parser: BaseOutputParser | None = None
 
     _base_inputs: list[InputTypes] = [
@@ -55,11 +85,20 @@ class LCModelComponent(Component):
     ]
 
     def _get_exception_message(self, e: Exception):
+        """提取异常的展示信息。
+
+        契约：返回可读字符串，供上层包装为 `ValueError`。
+        """
         return str(e)
 
     def supports_tool_calling(self, model: LanguageModel) -> bool:
+        """检测模型是否支持工具调用。
+
+        契约：返回布尔值，`True` 表示可绑定工具且工具列表非空。
+        失败语义：遇到属性/类型异常返回 `False`。
+        """
         try:
-            # Check if the bind_tools method is the same as the base class's method
+            # 若 bind_tools 仍为基类实现，视为不支持
             if model.bind_tools is BaseChatModel.bind_tools:
                 return False
 
@@ -72,7 +111,8 @@ class LCModelComponent(Component):
             return False
 
     def _validate_outputs(self) -> None:
-        # At least these two outputs must be defined
+        """校验组件输出声明完整性。"""
+        # 至少需要定义以下输出
         required_output_methods = ["text_response", "build_model"]
         output_names = [output.name for output in self.outputs]
         for method_name in required_output_methods:
@@ -84,6 +124,7 @@ class LCModelComponent(Component):
                 raise ValueError(msg)
 
     async def text_response(self) -> Message:
+        """异步获取模型响应并更新状态。"""
         output = self.build_model()
         result = await self.get_chat_result(
             runnable=output, stream=self.stream, input_value=self.input_value, system_message=self.system_message
@@ -92,15 +133,10 @@ class LCModelComponent(Component):
         return result
 
     def get_result(self, *, runnable: LLM, stream: bool, input_value: str):
-        """Retrieves the result from the output of a Runnable object.
+        """从 LLM runnable 获取结果（同步）。
 
-        Args:
-            runnable (Runnable): The runnable to retrieve the result from.
-            stream (bool): Indicates whether to use streaming or invocation mode.
-            input_value (str): The input value to pass to the output object.
-
-        Returns:
-            The result obtained from the output object.
+        契约：当 `stream=True` 返回流式结果；否则返回模型输出内容。
+        失败语义：调用异常会被包装为 `ValueError`（若可提取消息）。
         """
         try:
             if stream:
@@ -117,16 +153,13 @@ class LCModelComponent(Component):
         return result
 
     def build_status_message(self, message: AIMessage):
-        """Builds a status message from an AIMessage object.
+        """根据模型响应元数据构建状态信息。
 
-        Args:
-            message (AIMessage): The AIMessage object to build the status message from.
-
-        Returns:
-            The status message.
+        契约：返回字符串或包含 token 统计的字典结构。
+        失败语义：缺少预期元数据时回退为纯文本响应。
         """
         if message.response_metadata:
-            # Build a well formatted status message
+            # 依据元数据构建结构化状态信息
             content = message.content
             response_metadata = message.response_metadata
             openai_keys = ["token_usage", "model_name", "finish_reason"]
@@ -173,7 +206,8 @@ class LCModelComponent(Component):
         input_value: str | Message,
         system_message: str | None = None,
     ) -> Message:
-        # NVIDIA reasoning models use detailed thinking
+        """根据配置生成聊天结果（含 NVIDIA 推理前缀）。"""
+        # NVIDIA 推理模型使用详细思考前缀
         if getattr(self, "detailed_thinking", False):
             system_message = DETAILED_THINKING_PREFIX + (system_message or "")
 
@@ -192,22 +226,15 @@ class LCModelComponent(Component):
         input_value: str | Message,
         system_message: str | None = None,
     ) -> Message:
-        """Get chat result from a language model.
+        """执行模型调用并返回 `Message` 结果。
 
-        This method handles the core logic of getting a response from a language model,
-        including handling different input types, streaming, and error handling.
-
-        Args:
-            runnable (LanguageModel): The language model to use for generating responses
-            stream (bool): Whether to stream the response
-            input_value (str | Message): The input to send to the model
-            system_message (str | None, optional): System message to prepend. Defaults to None.
-
-        Returns:
-            The model response, either as a Message object or raw content
-
-        Raises:
-            ValueError: If the input message is empty or if there's an error during model invocation
+        关键路径（三步）：
+        1) 将输入转换为 LangChain 消息列表（含可选系统消息）
+        2) 注入 output_parser 与运行配置并发起调用
+        3) 解析结果并更新 `self.status`
+        异常流：空输入抛 `ValueError`；模型调用异常被包装为 `ValueError`。
+        性能瓶颈：模型调用网络延迟与流式输出。
+        排障入口：检查 `self.status` 与 `response_metadata` 内容。
         """
         messages: list[BaseMessage] = []
         if not input_value and not system_message:
@@ -238,7 +265,7 @@ class LCModelComponent(Component):
         inputs: list | dict = messages or {}
         lf_message = None
         try:
-            # TODO: Depreciated Feature to be removed in upcoming release
+            # TODO: 弃用功能，后续版本将移除
             if hasattr(self, "output_parser") and self.output_parser is not None:
                 runnable |= self.output_parser
 
@@ -269,18 +296,14 @@ class LCModelComponent(Component):
         return lf_message or Message(text=result)
 
     async def _handle_stream(self, runnable, inputs):
-        """Handle streaming responses from the language model.
+        """处理流式响应并在需要时写入消息流。
 
-        Args:
-            runnable: The language model configured for streaming
-            inputs: The inputs to send to the model
-
-        Returns:
-            tuple: (Message object if connected to chat output, model result)
+        契约：返回 `(Message | None, result)`，当连接到聊天输出时返回消息对象。
+        失败语义：异常由上层捕获。
         """
         lf_message = None
         if self.is_connected_to_chat_output():
-            # Add a Message
+            # 生成并发送流式消息
             if hasattr(self, "graph"):
                 session_id = self.graph.session_id
             elif hasattr(self, "_session_id"):
@@ -304,25 +327,20 @@ class LCModelComponent(Component):
 
     @abstractmethod
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
-        """Implement this method to build the model."""
+        """构建并返回具体模型实例。"""
 
     def get_llm(self, provider_name: str, model_info: dict[str, dict[str, str | list[InputTypes]]]) -> LanguageModel:
-        """Get LLM model based on provider name and inputs.
+        """根据提供方名称与模型信息构建 LLM。
 
-        Args:
-            provider_name: Name of the model provider (e.g., "OpenAI", "Azure OpenAI")
-            inputs: Dictionary of input parameters for the model
-            model_info: Dictionary of model information
-
-        Returns:
-            Built LLM model instance
+        契约：返回可调用的 `LanguageModel`；未知提供方抛 `ValueError`。
+        失败语义：构建失败统一抛 `ValueError` 并包含提供方信息。
         """
         try:
             if provider_name not in [model.get("display_name") for model in model_info.values()]:
                 msg = f"Unknown model provider: {provider_name}"
                 raise ValueError(msg)
 
-            # Find the component class name from MODEL_INFO in a single iteration
+            # 单次遍历获取组件信息与模块名
             component_info, module_name = next(
                 ((info, key) for key, info in model_info.items() if info.get("display_name") == provider_name),
                 (None, None),
@@ -331,8 +349,8 @@ class LCModelComponent(Component):
                 msg = f"Component information not found for {provider_name}"
                 raise ValueError(msg)
             component_inputs = component_info.get("inputs", [])
-            # Get the component class from the models module
-            # Ensure component_inputs is a list of the expected types
+            # 从 models 模块获取组件类
+            # 确保 inputs 为列表
             if not isinstance(component_inputs, list):
                 component_inputs = []
 
@@ -355,18 +373,14 @@ class LCModelComponent(Component):
     def build_llm_model_from_inputs(
         self, component: Component, inputs: list[InputTypes], prefix: str = ""
     ) -> LanguageModel:
-        """Build LLM model from component and inputs.
+        """根据组件与输入字段构建 LLM。
 
-        Args:
-            component: LLM component instance
-            inputs: Dictionary of input parameters for the model
-            prefix: Prefix for the input names
-        Returns:
-            Built LLM model instance
+        契约：按 `inputs` 读取当前组件字段并调用 `component.set(...).build_model()`。
+        失败语义：字段缺失会导致模型构建失败并抛异常。
         """
-        # Ensure prefix is a string
+        # 确保 prefix 为字符串
         prefix = prefix or ""
-        # Filter inputs to only include valid component input names
+        # 仅采集组件声明的输入字段
         input_data = {
             str(component_input.name): getattr(self, f"{prefix}{component_input.name}", None)
             for component_input in inputs

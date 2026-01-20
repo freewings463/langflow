@@ -1,3 +1,18 @@
+"""
+模块名称：Astra Vectorize 配置组件
+
+本模块提供 Astra DB Vectorize 的配置生成，用于服务端嵌入向量生成。主要功能包括：
+- 选择向量化提供商与模型
+- 组装 Vectorize 配置参数并输出
+
+关键组件：
+- `AstraVectorizeComponent`
+
+设计背景：将向量化配置作为组件输出，供向量库组件复用。
+使用场景：Astra DB Collection 使用服务端向量化。
+注意事项：输出结构需与 `astrapy` 的配置约定一致。
+"""
+
 from typing import Any
 
 from lfx.custom.custom_component.component import Component
@@ -6,6 +21,17 @@ from lfx.template.field.base import Output
 
 
 class AstraVectorizeComponent(Component):
+    """Astra Vectorize 配置组件
+
+    契约：输入 provider/model/认证等参数；输出配置字典；
+    副作用：无；失败语义：provider 缺失会导致 KeyError。
+    关键路径：1) 映射 provider 名称 2) 组装认证参数 3) 返回配置结构。
+    决策：将 `api_key_name` 写入 `authentication.providerKey`。
+    问题：Astra 侧需要 providerKey 指向已存密钥。
+    方案：提供显式覆盖入口。
+    代价：配置错误会导致向量化失败。
+    重评：当统一改为 provider_api_key 直传时。
+    """
     display_name: str = "Astra Vectorize"
     description: str = "Configuration options for Astra Vectorize server-side embeddings. "
     documentation: str = "https://docs.datastax.com/en/astra-db-serverless/databases/embedding-generation.html"
@@ -105,13 +131,24 @@ class AstraVectorizeComponent(Component):
     ]
 
     def build_options(self) -> dict[str, Any]:
+        """生成 Vectorize 配置字典
+
+        契约：返回包含 `collection_vector_service_options` 的字典；
+        副作用：无；失败语义：provider 未配置时抛异常。
+        关键路径：读取 provider 映射 -> 合并认证参数 -> 返回配置。
+        决策：将模型参数留给 `model_parameters` 透传。
+        问题：不同 provider 的参数差异大。
+        方案：以字典透传避免强校验。
+        代价：运行期可能出现参数不兼容。
+        重评：当有统一的参数校验规范时。
+        """
         provider_value = self.VECTORIZE_PROVIDERS_MAPPING[self.provider][0]
         authentication = {**(self.authentication or {})}
         api_key_name = self.api_key_name
         if api_key_name:
             authentication["providerKey"] = api_key_name
         return {
-            # must match astrapy.info.VectorServiceOptions
+            # 注意：结构需与 `astrapy.info.VectorServiceOptions` 对齐
             "collection_vector_service_options": {
                 "provider": provider_value,
                 "modelName": self.model_name,

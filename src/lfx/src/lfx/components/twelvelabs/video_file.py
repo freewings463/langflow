@@ -1,3 +1,18 @@
+"""
+模块名称：视频文件输入组件
+
+本模块将本地视频文件路径封装为 `Data`，并校验文件存在性与扩展名。
+主要功能包括：
+- 校验视频文件路径与格式
+- 生成包含元数据的 `Data`/`DataFrame`
+
+关键组件：
+- `VideoFileComponent`
+
+设计背景：为 TwelveLabs 视频索引提供统一的文件输入。
+注意事项：Astra 云环境不允许本地文件访问。
+"""
+
 from pathlib import Path
 
 from lfx.base.data import BaseFileComponent
@@ -13,9 +28,13 @@ disable_component_in_astra_cloud_msg = (
 
 
 class VideoFileComponent(BaseFileComponent):
-    """Handles loading and processing of video files.
+    """视频文件输入组件。
 
-    This component supports processing video files in common video formats.
+    契约：
+    - 输入：单个视频文件路径
+    - 输出：包含 `text` 与 `metadata` 的 `DataFrame`
+    - 副作用：访问本地文件系统并记录日志
+    - 失败语义：路径不存在或扩展名不合法时抛异常/返回空结果
     """
 
     display_name = "Video File"
@@ -25,7 +44,7 @@ class VideoFileComponent(BaseFileComponent):
     documentation = "https://github.com/twelvelabs-io/twelvelabs-developer-experience/blob/main/integrations/Langflow/TWELVE_LABS_COMPONENTS_README.md"
 
     VALID_EXTENSIONS = [
-        # Common video formats
+        # 常见视频格式
         "mp4",
         "avi",
         "mov",
@@ -39,11 +58,11 @@ class VideoFileComponent(BaseFileComponent):
         "3gp",
         "3g2",
         "m2v",
-        # Professional video formats
+        # 专业视频格式
         "mxf",
         "dv",
         "vob",
-        # Additional video formats
+        # 其他视频格式
         "ogv",
         "rm",
         "rmvb",
@@ -62,7 +81,7 @@ class VideoFileComponent(BaseFileComponent):
             display_name="Video File",
             name="file_path",
             file_types=[
-                # Common video formats
+                # 常见视频格式
                 "mp4",
                 "avi",
                 "mov",
@@ -76,11 +95,11 @@ class VideoFileComponent(BaseFileComponent):
                 "3gp",
                 "3g2",
                 "m2v",
-                # Professional video formats
+                # 专业视频格式
                 "mxf",
                 "dv",
                 "vob",
-                # Additional video formats
+                # 其他视频格式
                 "ogv",
                 "rm",
                 "rmvb",
@@ -103,8 +122,15 @@ class VideoFileComponent(BaseFileComponent):
     ]
 
     def process_files(self, file_list: list[BaseFileComponent.BaseFile]) -> list[BaseFileComponent.BaseFile]:
-        """Process video files."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """校验并封装视频文件为 `Data`。
+
+        契约：
+        - 输入：文件对象列表
+        - 输出：包含 `Data` 的文件列表
+        - 副作用：访问本地文件系统并记录日志
+        - 失败语义：缺失文件或扩展名不合法时抛异常
+        """
+        # 注意：Astra 云环境禁止本地文件访问
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
         self.log(f"DEBUG: Processing video files: {len(file_list)}")
 
@@ -118,21 +144,21 @@ class VideoFileComponent(BaseFileComponent):
                 file_path = str(file.path)
                 self.log(f"DEBUG: Processing video file: {file_path}")
 
-                # Verify file exists
+                # 校验文件存在
                 file_path_obj = Path(file_path)
                 if not file_path_obj.exists():
                     error_msg = f"Video file not found: {file_path}"
                     raise FileNotFoundError(error_msg)
 
-                # Verify extension
+                # 校验扩展名
                 if not file_path.lower().endswith(tuple(self.VALID_EXTENSIONS)):
                     error_msg = f"Invalid file type. Expected: {', '.join(self.VALID_EXTENSIONS)}"
                     raise ValueError(error_msg)
 
-                # Create a dictionary instead of a Document
+                # 组装 Data 所需结构
                 doc_data = {"text": file_path, "metadata": {"source": file_path, "type": "video"}}
 
-                # Pass the dictionary to Data
+                # 将字典写入 Data
                 file.data = Data(data=doc_data)
 
                 self.log(f"DEBUG: Created data: {doc_data}")
@@ -145,8 +171,15 @@ class VideoFileComponent(BaseFileComponent):
         return processed_files
 
     def load_files(self) -> DataFrame:
-        """Load video files and return a list of Data objects."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """加载视频文件并返回 `DataFrame`。
+
+        契约：
+        - 输入：`file_path`
+        - 输出：`DataFrame`（可能为空）
+        - 副作用：读取本地文件并记录日志
+        - 失败语义：文件错误或解析异常时返回空 `DataFrame`
+        """
+        # 注意：Astra 云环境禁止本地文件访问
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
 
         try:
@@ -157,17 +190,17 @@ class VideoFileComponent(BaseFileComponent):
 
             self.log(f"DEBUG: Loading video from path: {self.file_path}")
 
-            # Verify file exists
+            # 校验文件存在
             file_path_obj = Path(self.file_path)
             if not file_path_obj.exists():
                 self.log(f"DEBUG: Video file not found at path: {self.file_path}")
                 return DataFrame()
 
-            # Verify file size
+            # 读取文件大小
             file_size = file_path_obj.stat().st_size
             self.log(f"DEBUG: Video file size: {file_size} bytes")
 
-            # Create a proper Data object with the video path
+            # 组装 Data 结构
             video_data = {
                 "text": self.file_path,
                 "metadata": {"source": self.file_path, "type": "video", "size": file_size},
@@ -176,7 +209,7 @@ class VideoFileComponent(BaseFileComponent):
             self.log(f"DEBUG: Created video data: {video_data}")
             result = DataFrame(data=[video_data])
 
-            # Log the result to verify it's a proper Data object
+            # 记录返回结果
             self.log("DEBUG: Returning list with Data objects")
         except (FileNotFoundError, PermissionError, OSError) as e:
             self.log(f"DEBUG: File error in video load_files: {e!s}", "ERROR")

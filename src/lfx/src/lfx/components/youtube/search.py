@@ -1,3 +1,18 @@
+"""模块名称：YouTube 搜索组件
+
+本模块提供 YouTube 视频搜索能力，输出为 DataFrame。
+使用场景：根据关键词检索视频并获取可选统计信息。
+主要功能包括：
+- 调用 YouTube Search API 获取视频列表
+- 可选追加统计与时长等元数据
+
+关键组件：
+- YouTubeSearchComponent：搜索组件入口
+
+设计背景：统一搜索结果结构，便于下游分析
+注意事项：开启 `include_metadata` 会触发额外 API 调用
+"""
+
 from contextlib import contextmanager
 
 import pandas as pd
@@ -11,7 +26,15 @@ from lfx.template.field.base import Output
 
 
 class YouTubeSearchComponent(Component):
-    """A component that searches YouTube videos."""
+    """YouTube 搜索组件。
+
+    契约：输入查询词与 API Key，输出视频结果 DataFrame
+    关键路径：1) Search API 获取视频列表 2) 可选拉取统计详情
+    副作用：调用 YouTube Data API，消耗配额
+    异常流：API 异常返回含 `error` 的 DataFrame
+    决策：`include_metadata` 时为每条结果拉取详情；问题：Search API 不含统计；
+    方案：额外调用 videos().list；代价：配额与延迟增加；重评：当 Search API 提供统计字段时
+    """
 
     display_name: str = "YouTube Search"
     description: str = "Searches YouTube videos based on query."
@@ -59,7 +82,7 @@ class YouTubeSearchComponent(Component):
 
     @contextmanager
     def youtube_client(self):
-        """Context manager for YouTube API client."""
+        """YouTube API 客户端上下文管理器。"""
         client = build("youtube", "v3", developerKey=self.api_key)
         try:
             yield client
@@ -67,7 +90,15 @@ class YouTubeSearchComponent(Component):
             client.close()
 
     def search_videos(self) -> DataFrame:
-        """Searches YouTube videos and returns results as DataFrame."""
+        """搜索视频并返回 DataFrame。
+
+        关键路径（三步）：
+        1) 调用 Search API 获取视频列表
+        2) 可选拉取每条视频详情
+        3) 组装结果 DataFrame
+
+        异常流：API 异常返回含 `error` 的 DataFrame
+        """
         try:
             with self.youtube_client() as youtube:
                 search_response = (
@@ -97,7 +128,7 @@ class YouTubeSearchComponent(Component):
                     }
 
                     if self.include_metadata:
-                        # Get video details for additional metadata
+                        # 注意：每条视频会触发额外请求，配额与延迟上升。
                         video_response = youtube.videos().list(part="statistics,contentDetails", id=video_id).execute()
 
                         if video_response.get("items"):

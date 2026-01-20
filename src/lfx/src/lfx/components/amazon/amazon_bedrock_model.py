@@ -1,3 +1,18 @@
+"""
+模块名称：Amazon Bedrock 旧版模型组件
+
+本模块提供基于旧版 ChatBedrock API 的 LLM 组件实现，用于兼容旧模型。主要功能包括：
+- 组装 ChatBedrock 初始化参数
+- 处理 AWS 认证、区域与模型附加参数
+
+关键组件：
+- `AmazonBedrockComponent`
+
+设计背景：旧版 API 仍被部分模型或环境使用，需要保留兼容路径。
+使用场景：在迁移到 Converse 之前继续使用旧版 Bedrock 模型。
+注意事项：该组件已标记为 legacy，建议优先使用 Converse 组件。
+"""
+
 from lfx.base.models.aws_constants import AWS_REGIONS, AWS_MODEL_IDs
 from lfx.base.models.model import LCModelComponent
 from lfx.field_typing import LanguageModel
@@ -6,6 +21,17 @@ from lfx.io import DictInput, DropdownInput
 
 
 class AmazonBedrockComponent(LCModelComponent):
+    """Bedrock 旧版模型组件
+
+    契约：输入模型 ID、AWS 凭证、区域与 `model_kwargs`；输出 `LanguageModel`；
+    副作用：创建 boto3 客户端；失败语义：依赖缺失抛 `ImportError`，连接失败抛 `ValueError`。
+    关键路径：1) 创建 Session 2) 构建 bedrock-runtime 客户端 3) 初始化 `ChatBedrock`。
+    决策：保留 legacy 组件并提供 replacement 提示。
+    问题：旧流程仍依赖 ChatBedrock API。
+    方案：标记为 legacy 且指向替代组件。
+    代价：维护双栈实现，增加长期成本。
+    重评：当旧 API 完全下线或无存量用户时。
+    """
     display_name: str = "Amazon Bedrock"
     description: str = (
         "Generate text using Amazon Bedrock LLMs with the legacy ChatBedrock API. "
@@ -83,6 +109,17 @@ class AmazonBedrockComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 ChatBedrock 语言模型
+
+        契约：读取组件输入并返回 `ChatBedrock`；副作用：创建客户端连接；
+        失败语义：依赖缺失抛 `ImportError`，会话/连接失败抛 `ValueError`。
+        关键路径（三步）：1) 解析凭证并创建 Session 2) 构建客户端 3) 初始化模型实例。
+        决策：对 Session 创建失败抛 `ValueError` 而非透传。
+        问题：底层异常信息对用户不友好且缺少上下文。
+        方案：统一错误提示。
+        代价：丢失部分异常细节。
+        重评：当错误处理统一改为结构化异常时。
+        """
         try:
             from langchain_aws import ChatBedrock
         except ImportError as e:

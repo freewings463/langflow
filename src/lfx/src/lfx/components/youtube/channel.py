@@ -1,3 +1,19 @@
+"""模块名称：YouTube 频道信息组件
+
+本模块提供 YouTube 频道信息与统计数据的获取能力，输出为 DataFrame。
+使用场景：根据频道 URL/ID 获取频道概览、统计信息与可选播放列表。
+主要功能包括：
+- 解析频道 URL 并解析为频道 ID
+- 调用 YouTube Data API 获取频道详情
+- 可选附加统计、品牌信息与播放列表
+
+关键组件：
+- YouTubeChannelComponent：频道信息组件入口
+
+设计背景：统一对 YouTube 频道数据的结构化输出，便于后续分析
+注意事项：播放列表默认最多返回 10 条
+"""
+
 from typing import Any
 from urllib.error import HTTPError
 
@@ -12,13 +28,21 @@ from lfx.template.field.base import Output
 
 
 class YouTubeChannelComponent(Component):
-    """A component that retrieves detailed information about YouTube channels."""
+    """YouTube 频道信息组件。
+
+    契约：输入频道 URL/ID 与 API Key，输出包含频道信息的 DataFrame
+    关键路径：1) 解析频道 ID 2) 拉取频道详情 3) 组装 DataFrame/播放列表
+    副作用：调用 YouTube Data API，消耗配额
+    异常流：API 异常返回含 `error` 列的 DataFrame
+    决策：限制播放列表最多 10 条；问题：频道列表可能过大；方案：MAX_PLAYLIST_RESULTS=10；
+    代价：结果不完整；重评：当需要分页或全量导出时
+    """
 
     display_name: str = "YouTube Channel"
     description: str = "Retrieves detailed information and statistics about YouTube channels as a DataFrame."
     icon: str = "YouTube"
 
-    # Constants
+    # 常量
     CHANNEL_ID_LENGTH = 24
     QUOTA_EXCEEDED_STATUS = 403
     NOT_FOUND_STATUS = 404
@@ -65,7 +89,11 @@ class YouTubeChannelComponent(Component):
     ]
 
     def _extract_channel_id(self, channel_url: str) -> str:
-        """Extracts the channel ID from various YouTube channel URL formats."""
+        """从多种频道 URL 中提取频道 ID。
+
+        契约：支持 `channel`/`c`/`user`/`@handle` 等格式；无法识别则返回原值
+        失败语义：不匹配模式时直接回退原始输入，可能触发后续 API 报错
+        """
         import re
 
         if channel_url.startswith("UC") and len(channel_url) == self.CHANNEL_ID_LENGTH:
@@ -83,17 +111,24 @@ class YouTubeChannelComponent(Component):
             if match:
                 if pattern_type == "channel_id":
                     return match.group(1)
+                # 注意：非 ID 格式需通过搜索接口解析为 channelId。
                 return self._get_channel_id_by_name(match.group(1), pattern_type)
 
         return channel_url
 
     def _get_channel_id_by_name(self, channel_name: str, identifier_type: str) -> str:
-        """Gets the channel ID using the channel name or custom URL."""
+        """通过频道名/自定义 URL/handle 获取 channelId。
+
+        契约：使用 Search API 查询并取首条结果
+        异常流：API 错误抛 `RuntimeError`；未找到抛 `ValueError`
+        排障入口：异常消息包含请求错误详情
+        """
         youtube = None
         try:
             youtube = build("youtube", "v3", developerKey=self.api_key)
 
             if identifier_type == "handle":
+                # 注意：handle 可能以 @ 开头，需去除以匹配搜索。
                 channel_name = channel_name.lstrip("@")
 
             request = youtube.search().list(part="id", q=channel_name, type="channel", maxResults=1)
@@ -116,7 +151,7 @@ class YouTubeChannelComponent(Component):
                 youtube.close()
 
     def _get_channel_playlists(self, youtube: Any, channel_id: str) -> list[dict[str, Any]]:
-        """Gets the public playlists for a channel."""
+        """获取频道公开播放列表（最多 MAX_PLAYLIST_RESULTS 条）。"""
         try:
             playlists_request = youtube.playlists().list(
                 part="snippet,contentDetails",
@@ -144,21 +179,29 @@ class YouTubeChannelComponent(Component):
             return playlists
 
     def get_channel_info(self) -> DataFrame:
-        """Retrieves channel information and returns it as a DataFrame."""
+        """获取频道信息并返回 DataFrame。
+
+        关键路径（三步）：
+        1) 解析频道 ID 并初始化客户端
+        2) 拉取频道详情并拼装字段
+        3) 可选合并播放列表数据
+
+        异常流：API 异常返回含 `error` 的 DataFrame
+        性能瓶颈：包含播放列表时需额外请求
+        """
         youtube = None
         try:
-            # Get channel ID and initialize YouTube API client
+            # 注意：频道 ID 解析失败会回退到原始输入，可能导致 API 报错。
             channel_id = self._extract_channel_id(self.channel_url)
             youtube = build("youtube", "v3", developerKey=self.api_key)
 
-            # Prepare parts for the API request
+            # 注意：按开关拼接字段以控制配额与返回大小。
             parts = ["snippet", "contentDetails"]
             if self.include_statistics:
                 parts.append("statistics")
             if self.include_branding:
                 parts.append("brandingSettings")
 
-            # Get channel information
             channel_response = youtube.channels().list(part=",".join(parts), id=channel_id).execute()
 
             if not channel_response["items"]:
@@ -166,7 +209,7 @@ class YouTubeChannelComponent(Component):
 
             channel_info = channel_response["items"][0]
 
-            # Build basic channel data
+            # 注意：DataFrame 以单行形式返回频道主数据。
             channel_data = {
                 "title": [channel_info["snippet"]["title"]],
                 "description": [channel_info["snippet"]["description"]],
@@ -176,11 +219,11 @@ class YouTubeChannelComponent(Component):
                 "channel_id": [channel_id],
             }
 
-            # Add thumbnails
+            # 注意：缩略图按 size 拆分为多个列。
             for size, thumb in channel_info["snippet"]["thumbnails"].items():
                 channel_data[f"thumbnail_{size}"] = [thumb["url"]]
 
-            # Add statistics if requested
+            # 注意：统计字段为数值型，避免字符串影响下游统计。
             if self.include_statistics:
                 stats = channel_info["statistics"]
                 channel_data.update(
@@ -192,7 +235,7 @@ class YouTubeChannelComponent(Component):
                     }
                 )
 
-            # Add branding if requested
+            # 注意：品牌信息属于可选字段，缺失时返回空字符串。
             if self.include_branding:
                 branding = channel_info.get("brandingSettings", {})
                 channel_data.update(
@@ -204,16 +247,13 @@ class YouTubeChannelComponent(Component):
                     }
                 )
 
-            # Create the initial DataFrame
+            # 注意：播放列表会扩展为多行，同一频道数据会被复制。
             channel_df = pd.DataFrame(channel_data)
 
-            # Add playlists if requested
             if self.include_playlists:
                 playlists = self._get_channel_playlists(youtube, channel_id)
                 if playlists and "error" not in playlists[0]:
-                    # Create a DataFrame for playlists
                     playlists_df = pd.DataFrame(playlists)
-                    # Join with main DataFrame
                     channel_df = pd.concat([channel_df] * len(playlists_df), ignore_index=True)
                     for column in playlists_df.columns:
                         channel_df[column] = playlists_df[column].to_numpy()

@@ -1,8 +1,13 @@
-"""Memory management functions for lfx package.
+"""
+模块名称：lfx Memory Stub 实现
 
-This module provides message storage and retrieval functionality adapted for lfx's
-service-based architecture. It mirrors the langflow.memory API but works with
-lfx's Message model and service interfaces.
+本模块提供与 langflow.memory 接口对齐的 stub 实现，用于独立运行场景。
+主要功能：
+- 提供消息的存取/更新/删除接口；
+- 兼容同步/异步调用模式。
+
+设计背景：在缺少 Langflow 完整实现时保持接口可用。
+注意事项：当前实现基于 NoopSession，默认不持久化。
 """
 
 from uuid import UUID
@@ -17,18 +22,11 @@ async def astore_message(
     message: Message,
     flow_id: str | UUID | None = None,
 ) -> list[Message]:
-    """Store a message in the memory.
+    """存储单条消息（异步）
 
-    Args:
-        message (Message): The message to store.
-        flow_id (Optional[str | UUID]): The flow ID associated with the message.
-            When running from the CustomComponent you can access this using `self.graph.flow_id`.
-
-    Returns:
-        List[Message]: A list containing the stored message.
-
-    Raises:
-        ValueError: If any of the required parameters (session_id, sender, sender_name) is not provided.
+    契约：返回包含已存储消息的列表；缺少必要字段时抛 `ValueError`。
+    关键路径：1) 校验消息 2) 补充 flow_id 3) 写入会话并提交。
+    异常流：写入失败回滚并抛异常。
     """
     if not message:
         logger.warning("No message provided.")
@@ -41,27 +39,24 @@ async def astore_message(
         )
         raise ValueError(msg)
 
-    # Set flow_id if provided
+    # 注意：flow_id 可由外部传入，用于关联流程。
     if flow_id:
         if isinstance(flow_id, str):
             flow_id = UUID(flow_id)
         message.flow_id = str(flow_id)
 
-    # In lfx, we use the service architecture - this is a simplified implementation
-    # that doesn't persist to database but maintains the message in memory
-    # Real implementation would require a database service
+    # 注意：当前为简化 stub，不持久化到数据库。
     async with session_scope() as session:
-        # Since we're using NoopSession by default, this doesn't actually persist
-        # but maintains the same interface as langflow.memory
+        # 注意：NoopSession 仅保持接口一致性。
         try:
-            # Generate an ID if not present
+            # 注意：若缺少 id，则生成唯一标识。
             if not hasattr(message, "id") or not message.id:
                 try:
                     import nanoid
 
                     message.id = nanoid.generate()
                 except ImportError:
-                    # Fallback to uuid if nanoid is not available
+                    # 注意：nanoid 不可用时回退 uuid。
                     import uuid
 
                     message.id = str(uuid.uuid4())
@@ -80,35 +75,19 @@ def store_message(
     message: Message,
     flow_id: str | UUID | None = None,
 ) -> list[Message]:
-    """DEPRECATED: Stores a message in the memory.
+    """同步存储消息（已弃用）
 
-    DEPRECATED: Use `astore_message` instead.
-
-    Args:
-        message (Message): The message to store.
-        flow_id (Optional[str | UUID]): The flow ID associated with the message.
-            When running from the CustomComponent you can access this using `self.graph.flow_id`.
-
-    Returns:
-        List[Message]: A list containing the stored message.
-
-    Raises:
-        ValueError: If any of the required parameters (session_id, sender, sender_name) is not provided.
+    契约：调用 `astore_message` 并返回结果。
+    注意：请优先使用 `astore_message`。
     """
     return run_until_complete(astore_message(message, flow_id=flow_id))
 
 
 async def aupdate_messages(messages: Message | list[Message]) -> list[Message]:
-    """Update stored messages.
+    """更新已存储消息（异步）
 
-    Args:
-        messages: Message or list of messages to update.
-
-    Returns:
-        List[Message]: Updated messages.
-
-    Raises:
-        ValueError: If message is not found for update.
+    契约：返回更新后的消息列表；消息无 id 时抛 `ValueError`。
+    关键路径：1) 归一化为列表 2) 校验 id 3) 提交更新。
     """
     if not isinstance(messages, list):
         messages = [messages]
@@ -117,14 +96,13 @@ async def aupdate_messages(messages: Message | list[Message]) -> list[Message]:
         updated_messages: list[Message] = []
         for message in messages:
             try:
-                # In a real implementation, this would update the database record
-                # For now, we just validate the message has an ID and return it
+                # 注意：stub 模式仅校验 id 并模拟更新。
                 if not hasattr(message, "id") or not message.id:
                     error_message = f"Message without ID cannot be updated: {message}"
                     logger.warning(error_message)
                     raise ValueError(error_message)
 
-                # Convert flow_id to string if it's a UUID
+                # 注意：UUID 需转换为字符串以保持一致性。
                 if message.flow_id and isinstance(message.flow_id, UUID):
                     message.flow_id = str(message.flow_id)
 
@@ -144,15 +122,13 @@ async def aupdate_messages(messages: Message | list[Message]) -> list[Message]:
 
 
 async def delete_message(id_: str) -> None:
-    """Delete a message from the memory.
+    """删除单条消息（异步）
 
-    Args:
-        id_ (str): The ID of the message to delete.
+    契约：执行删除；stub 模式为 no-op。
     """
     async with session_scope() as session:
         try:
-            # In a real implementation, this would delete from database
-            # For now, this is a no-op since we're using NoopSession
+            # 注意：stub 模式不执行真实删除。
             await session.delete(id_)
             await session.commit()
             logger.debug(f"Message deleted: {id_}")
@@ -171,26 +147,15 @@ async def aget_messages(
     flow_id: UUID | None = None,  # noqa: ARG001
     limit: int | None = None,  # noqa: ARG001
 ) -> list[Message]:
-    """Retrieve messages based on the provided filters.
+    """检索消息列表（异步）
 
-    Args:
-        sender (Optional[str]): The sender of the messages (e.g., "Machine" or "User")
-        sender_name (Optional[str]): The name of the sender.
-        session_id (Optional[str]): The session ID associated with the messages.
-        context_id (Optional[str]): The context ID associated with the messages.
-        order_by (Optional[str]): The field to order the messages by. Defaults to "timestamp".
-        order (Optional[str]): The order in which to retrieve the messages. Defaults to "DESC".
-        flow_id (Optional[UUID]): The flow ID associated with the messages.
-        limit (Optional[int]): The maximum number of messages to retrieve.
-
-    Returns:
-        List[Message]: A list of Message objects representing the retrieved messages.
+    契约：返回消息列表；stub 模式默认返回空列表。
+    关键路径：1) 进入会话 2) 执行查询 3) 返回结果。
     """
     async with session_scope() as session:
         try:
-            # In a real implementation, this would query the database
-            # For now, return empty list since we're using NoopSession
-            result = await session.query()  # This returns [] from NoopSession
+            # 注意：stub 模式不查询数据库，返回空列表。
+            result = await session.query()  # 注意：NoopSession 默认返回空列表。
             logger.debug(f"Retrieved {len(result)} messages")
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Error retrieving messages: {e}")
@@ -208,9 +173,9 @@ def get_messages(
     flow_id: UUID | None = None,
     limit: int | None = None,
 ) -> list[Message]:
-    """DEPRECATED - Retrieve messages based on the provided filters.
+    """同步检索消息（已弃用）
 
-    DEPRECATED: Use `aget_messages` instead.
+    注意：请优先使用 `aget_messages`。
     """
     return run_until_complete(
         aget_messages(
@@ -227,11 +192,9 @@ def get_messages(
 
 
 async def adelete_messages(session_id: str | None = None, context_id: str | None = None) -> None:
-    """Delete messages from the memory based on the provided session or context ID.
+    """按 session/context 删除消息（异步）
 
-    Args:
-        session_id (str): The session ID associated with the messages to delete.
-        context_id (str): The context ID associated with the messages to delete.
+    契约：session_id 或 context_id 必须至少提供一个。
     """
     if not session_id and not context_id:
         msg = "Either session_id or context_id must be provided to delete messages."
@@ -239,8 +202,7 @@ async def adelete_messages(session_id: str | None = None, context_id: str | None
 
     async with session_scope() as session:
         try:
-            # In a real implementation, this would delete from database
-            # For now, this is a no-op since we're using NoopSession
+            # 注意：stub 模式不执行真实删除。
             await session.delete(session_id or context_id)  # type: ignore  # noqa: PGH003
             await session.commit()
             logger.debug(f"Messages deleted for session: {session_id or context_id}")
@@ -250,21 +212,18 @@ async def adelete_messages(session_id: str | None = None, context_id: str | None
 
 
 def delete_messages(session_id: str | None = None, context_id: str | None = None) -> None:
-    """DEPRECATED - Delete messages based on the provided session ID.
+    """同步删除消息（已弃用）
 
-    DEPRECATED: Use `adelete_messages` instead.
+    注意：请优先使用 `adelete_messages`。
     """
     return run_until_complete(adelete_messages(session_id, context_id))
 
 
 async def aadd_messages(messages: Message | list[Message]) -> list[Message]:
-    """Add messages to the memory.
+    """批量添加消息（异步）
 
-    Args:
-        messages: Message or list of messages to add.
-
-    Returns:
-        List[Message]: Added messages.
+    契约：返回已添加消息列表。
+    关键路径：1) 归一化列表 2) 逐条调用 astore_message。
     """
     if not isinstance(messages, list):
         messages = [messages]
@@ -277,26 +236,16 @@ async def aadd_messages(messages: Message | list[Message]) -> list[Message]:
 
 
 def add_messages(messages: Message | list[Message]) -> list[Message]:
-    """Add messages to the memory (synchronous version).
+    """批量添加消息（同步）
 
-    Args:
-        messages: Message or list of messages to add.
-
-    Returns:
-        List[Message]: Added messages.
+    注意：同步包装 `aadd_messages`。
     """
     return run_until_complete(aadd_messages(messages))
 
 
 async def aadd_messagetables(messages: Message | list[Message]) -> list[Message]:
-    """Add message tables to the memory.
+    """批量添加消息表（别名）
 
-    This is an alias for aadd_messages for backwards compatibility.
-
-    Args:
-        messages: Message or list of messages to add.
-
-    Returns:
-        List[Message]: Added messages.
+    注意：为兼容历史接口，等价于 `aadd_messages`。
     """
     return await aadd_messages(messages)

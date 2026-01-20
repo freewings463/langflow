@@ -1,3 +1,8 @@
+"""消息 schema。
+
+本模块定义 Message 类型及其与 LangChain 的互转逻辑。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,28 +39,18 @@ if TYPE_CHECKING:
 
 
 class Message(Data):
-    """Message schema for Langflow.
+    """消息模型。
 
-    Message ID Semantics:
-    - Messages only have an ID after being stored in the database
-    - Messages that are skipped (via Component._should_skip_message) will NOT have an ID
-    - Always use get_id(), has_id(), or require_id() methods to safely access the ID
-    - Never access message.id directly without checking if it exists first
+    关键路径（三步）：
+    1) 规范化文本、附件与属性字段；
+    2) 支持与 LangChain Message 互转；
+    3) 提供安全的 ID 访问方法。
 
-    Safe ID Access Patterns:
-    - Use get_id() when ID may or may not exist (returns None if missing)
-    - Use has_id() to check if ID exists before operations that require it
-    - Use require_id() when ID is required (raises ValueError if missing)
-
-    Example:
-        message_id = message.get_id()  # Safe: returns None if no ID
-        if message.has_id():
-            # Safe to use message_id
-            do_something_with_id(message_id)
+    注意事项：消息 ID 仅在写入数据库后存在，需使用 `get_id/has_id/require_id` 访问。
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    # Helper class to deal with image data
+    # 图像数据辅助字段
     text_key: str = "text"
     text: str | AsyncIterator | Iterator | None = Field(default="")
     sender: str | None = None
@@ -85,7 +80,7 @@ class Message(Data):
     @field_validator("content_blocks", mode="before")
     @classmethod
     def validate_content_blocks(cls, value):
-        # value may start with [ or not
+        # 注意：字符串可能以 "[" 开头
         if isinstance(value, list):
             return [
                 ContentBlock.model_validate_json(v) if isinstance(v, str) else ContentBlock.model_validate(v)
@@ -113,10 +108,10 @@ class Message(Data):
     @field_serializer("timestamp")
     def serialize_timestamp(self, value):
         try:
-            # Try parsing with timezone
+            # 尝试解析含时区
             return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S %Z").replace(tzinfo=timezone.utc)
         except ValueError:
-            # Try parsing without timezone
+            # 尝试解析不含时区
             return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
     @field_validator("files", mode="before")
@@ -131,10 +126,10 @@ class Message(Data):
     def model_post_init(self, /, _context: Any) -> None:
         new_files: list[Any] = []
         for file in self.files or []:
-            # Skip if already an Image instance
+            # 跳过已是 Image 实例的项
             if isinstance(file, Image):
                 new_files.append(file)
-            # Get the path string if file is a dict or has path attribute
+            # 从 dict/对象中提取 path
             elif isinstance(file, dict) and "path" in file:
                 file_path = file["path"]
                 if file_path and is_image_file(file_path):
@@ -161,19 +156,8 @@ class Message(Data):
         self,
         model_name: str | None = None,
     ) -> BaseMessage:
-        """Converts the Data to a BaseMessage.
-
-        Args:
-            model_name: The model name to use for conversion. Optional.
-
-        Returns:
-            BaseMessage: The converted BaseMessage.
-        """
-        # The idea of this function is to be a helper to convert a Data to a BaseMessage
-        # It will use the "sender" key to determine if the message is Human or AI
-        # If the key is not present, it will default to AI
-        # But first we check if all required keys are present in the data dictionary
-        # they are: "text", "sender"
+        """转换为 LangChain BaseMessage。"""
+        # 注意：根据 sender 决定 Human/AI，缺失则默认 Human
         if self.text is None or not self.sender:
             logger.warning("Missing required keys ('text', 'sender') in Message, defaulting to HumanMessage.")
         text = "" if not isinstance(self.text, str) else self.text
@@ -212,14 +196,7 @@ class Message(Data):
 
     @classmethod
     def from_data(cls, data: Data) -> Message:
-        """Converts Data to a Message.
-
-        Args:
-            data: The Data to convert.
-
-        Returns:
-            The converted Message.
-        """
+        """将 Data 转换为 Message。"""
         return cls(
             text=data.text,
             sender=data.sender,
@@ -239,7 +216,7 @@ class Message(Data):
             return ""
         return value
 
-    # Keep this async method for backwards compatibility
+    # 注意：为兼容旧版本保留该方法名
     def get_file_content_dicts(self, model_name: str | None = None):
         content_dicts = []
         try:
@@ -250,7 +227,7 @@ class Message(Data):
 
         for file in files:
             if isinstance(file, Image):
-                # Pass the message's flow_id to the Image for proper path resolution
+                # 注意：传入 flow_id 以解析相对路径
                 content_dicts.append(file.to_content_dict(flow_id=self.flow_id))
             else:
                 content_dicts.append(create_image_content_dict(file, None, model_name))
@@ -260,9 +237,7 @@ class Message(Data):
         if "prompt" not in self:
             msg = "Prompt is required."
             raise ValueError(msg)
-        # self.prompt was passed through jsonable_encoder
-        # so inner messages are not BaseMessage
-        # we need to convert them to BaseMessage
+        # 注意：prompt 经 jsonable_encoder 处理，内部消息需还原为 BaseMessage
         messages = []
         for message in self.prompt.get("kwargs", {}).get("messages", []):
             match message:
@@ -290,12 +265,12 @@ class Message(Data):
 
     def format_text(self, template_format="f-string"):
         if template_format == "mustache":
-            # Use our secure mustache renderer
+            # 使用安全的 mustache 渲染器
             variables_with_str_values = dict_values_to_string(self.variables)
             formatted_prompt = safe_mustache_render(self.template, variables_with_str_values)
             self.text = formatted_prompt
             return formatted_prompt
-        # Use langchain's template for other formats
+        # 其他格式使用 LangChain 模板
         from langchain_core.prompts.prompt import PromptTemplate
 
         prompt_template = PromptTemplate.from_template(self.template, template_format=template_format)
@@ -306,11 +281,10 @@ class Message(Data):
 
     @classmethod
     async def from_template_and_variables(cls, template: str, template_format: str = "f-string", **variables):
-        # This method has to be async for backwards compatibility with versions
-        # >1.0.15, <1.1
+        # 注意：为兼容旧版本保持异步
         return cls.from_template(template, template_format=template_format, **variables)
 
-    # Define a sync version for backwards compatibility with versions >1.0.15, <1.1
+    # 注意：保留同步版本以兼容旧版本
     @classmethod
     def from_template(cls, template: str, template_format: str = "f-string", **variables):
         from langchain_core.prompts.chat import ChatPromptTemplate
@@ -334,7 +308,7 @@ class Message(Data):
 
     @classmethod
     async def create(cls, **kwargs):
-        """If files are present, create the message in a separate thread as is_image_file is blocking."""
+        """若包含文件则在独立线程创建消息以避免阻塞。"""
         if kwargs.get("files"):
             return await asyncio.to_thread(cls, **kwargs)
         return cls(**kwargs)
@@ -343,48 +317,21 @@ class Message(Data):
         return Data(data=self.data)
 
     def to_dataframe(self) -> DataFrame:
-        from lfx.schema.dataframe import DataFrame  # Local import to avoid circular import
+        from lfx.schema.dataframe import DataFrame  # 本地导入避免循环
 
         return DataFrame(data=[self])
 
     def get_id(self) -> str | UUID | None:
-        """Safely get the message ID.
-
-        Returns:
-            The message ID if it exists, None otherwise.
-
-        Note:
-            A message only has an ID if it has been stored in the database.
-            Messages that are skipped (via _should_skip_message) will not have an ID.
-        """
+        """安全获取消息 ID。"""
         return getattr(self, "id", None)
 
     def has_id(self) -> bool:
-        """Check if the message has an ID.
-
-        Returns:
-            True if the message has an ID, False otherwise.
-
-        Note:
-            A message only has an ID if it has been stored in the database.
-            Messages that are skipped (via _should_skip_message) will not have an ID.
-        """
+        """判断消息是否已有 ID。"""
         message_id = getattr(self, "id", None)
         return message_id is not None
 
     def require_id(self) -> str | UUID:
-        """Get the message ID, raising an error if it doesn't exist.
-
-        Returns:
-            The message ID.
-
-        Raises:
-            ValueError: If the message does not have an ID.
-
-        Note:
-            Use this method when an ID is required for the operation.
-            For optional ID access, use get_id() instead.
-        """
+        """获取消息 ID，不存在则抛错。"""
         message_id = getattr(self, "id", None)
         if message_id is None:
             msg = "Message does not have an ID. Messages only have IDs after being stored in the database."
@@ -393,6 +340,7 @@ class Message(Data):
 
 
 class DefaultModel(BaseModel):
+    """默认序列化基类。"""
     model_config = ConfigDict(
         from_attributes=True,
         populate_by_name=True,
@@ -403,7 +351,7 @@ class DefaultModel(BaseModel):
     )
 
     def json(self, **kwargs):
-        # Usa a função de serialização personalizada
+        # 使用自定义序列化函数
         return super().model_dump_json(**kwargs, encoder=self.custom_encoder)
 
     @staticmethod
@@ -415,6 +363,7 @@ class DefaultModel(BaseModel):
 
 
 class MessageResponse(DefaultModel):
+    """消息响应结构。"""
     id: str | UUID | None = Field(default=None)
     flow_id: UUID | None = Field(default=None)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -470,7 +419,7 @@ class MessageResponse(DefaultModel):
 
     @classmethod
     def from_message(cls, message: Message, flow_id: str | None = None):
-        # first check if the record has all the required fields
+        # 先检查是否包含必需字段
         if message.text is None or not message.sender or not message.sender_name:
             msg = "The message does not have the required fields (text, sender, sender_name)."
             raise ValueError(msg)
@@ -487,11 +436,11 @@ class MessageResponse(DefaultModel):
 
 
 class ErrorMessage(Message):
-    """A message class specifically for error messages with predefined error-specific attributes."""
+    """错误消息模型。"""
 
     @staticmethod
     def _format_markdown_reason(exception: BaseException) -> str:
-        """Format the error reason with markdown formatting."""
+        """将异常信息格式化为 Markdown。"""
         reason = f"**{exception.__class__.__name__}**\n"
         if hasattr(exception, "body") and isinstance(exception.body, dict) and "message" in exception.body:
             reason += f" - **{exception.body.get('message')}**\n"
@@ -507,7 +456,7 @@ class ErrorMessage(Message):
 
     @staticmethod
     def _format_plain_reason(exception: BaseException) -> str:
-        """Format the error reason without markdown."""
+        """将异常信息格式化为纯文本。"""
         if hasattr(exception, "body") and isinstance(exception.body, dict) and "message" in exception.body:
             reason = f"{exception.body.get('message')}\n"
         elif hasattr(exception, "_message"):
@@ -535,13 +484,13 @@ class ErrorMessage(Message):
         trace_name: str | None = None,
         flow_id: UUID | str | None = None,
     ) -> None:
-        # This is done to avoid circular imports
+        # 注意：避免循环导入
         if exception.__class__.__name__ == "ExceptionWithMessageError" and exception.__cause__ is not None:
             exception = exception.__cause__
 
         plain_reason = self._format_plain_reason(exception)
         markdown_reason = self._format_markdown_reason(exception)
-        # Get the sender ID
+        # 获取发送者 ID
         if trace_name:
             match = re.search(r"\((.*?)\)", trace_name)
             if match:

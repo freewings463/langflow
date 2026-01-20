@@ -1,3 +1,17 @@
+"""
+模块名称：IBM watsonx.ai 模型组件
+
+本模块提供 IBM watsonx.ai 聊天模型组件，主要用于在 Langflow 中配置并调用 Watsonx 基础模型。主要功能包括：
+- 动态拉取可用模型列表并更新 UI 选项
+- 构建 `ChatWatsonx` 模型实例并配置推理参数
+
+关键组件：
+- `WatsonxAIComponent`：聊天模型组件
+
+设计背景：watsonx 模型列表随区域/权限变化，需要运行时动态获取。
+注意事项：依赖 `langchain-ibm` 与网络访问；模型拉取失败时回退到默认列表。
+"""
+
 import json
 from typing import Any
 
@@ -14,6 +28,12 @@ from lfx.schema.dotdict import dotdict
 
 
 class WatsonxAIComponent(LCModelComponent):
+    """IBM watsonx.ai 聊天模型组件。
+
+    契约：需提供 `base_url`/`project_id`/`api_key` 与 `model_name`。
+    失败语义：模型拉取失败时回退默认模型；SDK 调用失败时抛异常。
+    副作用：可能触发网络请求与日志输出。
+    """
     display_name = "IBM watsonx.ai"
     description = "Generate text using IBM watsonx.ai foundation models."
     icon = "WatsonxAI"
@@ -142,7 +162,12 @@ class WatsonxAIComponent(LCModelComponent):
 
     @staticmethod
     def fetch_models(base_url: str) -> list[str]:
-        """Fetch available models from the watsonx.ai API."""
+        """从 watsonx.ai API 获取可用模型列表。
+
+        契约：请求成功返回排序后的模型 ID 列表。
+        失败语义：请求/解析失败时回退到默认模型列表。
+        副作用：发起网络请求。
+        """
         try:
             endpoint = f"{base_url}/ml/v1/foundation_model_specs"
             params = {"version": "2024-09-16", "filters": "function_text_chat,!lifecycle_withdrawn"}
@@ -156,7 +181,12 @@ class WatsonxAIComponent(LCModelComponent):
             return WatsonxAIComponent._default_models
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
-        """Update model options when URL or API key changes."""
+        """根据输入变化动态更新模型选项。
+
+        契约：当 `base_url` 变化时刷新 `model_name` 选项。
+        失败语义：更新失败时记录日志，不抛出。
+        副作用：修改 `build_config`。
+        """
         if field_name == "base_url" and field_value:
             try:
                 models = self.fetch_models(base_url=field_value)
@@ -173,7 +203,18 @@ class WatsonxAIComponent(LCModelComponent):
         return build_config
 
     def build_model(self) -> LanguageModel:
-        # Parse logit_bias from JSON string if provided
+        """构建 `ChatWatsonx` 模型实例。
+
+        契约：使用输入参数与 `chat_params` 构建模型并返回。
+        失败语义：`logit_bias` JSON 解析失败时使用默认抑制配置。
+        副作用：无。
+
+        关键路径（三步）：
+        1) 解析 `logit_bias`（如有）
+        2) 组装 `chat_params` 与鉴权信息
+        3) 创建并返回 `ChatWatsonx`
+        """
+        # 注意：logit_bias 为 JSON 字符串时需先解析
         logit_bias = None
         if hasattr(self, "logit_bias") and self.logit_bias:
             try:
@@ -197,8 +238,7 @@ class WatsonxAIComponent(LCModelComponent):
             "logit_bias": logit_bias,
         }
 
-        # Pass API key as plain string to avoid SecretStr serialization issues
-        # when model is configured with with_config() or used in batch operations
+        # 注意：以明文传递 API key，避免 SecretStr 序列化影响批量/配置调用
         api_key_value = self.api_key
         if isinstance(api_key_value, SecretStr):
             api_key_value = api_key_value.get_secret_value()

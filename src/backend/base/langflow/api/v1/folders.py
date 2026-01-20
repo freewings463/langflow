@@ -1,3 +1,12 @@
+"""
+模块名称：文件夹接口兼容层
+
+本模块仅保留历史 `/folders` 路由并全部重定向至 `/projects`。
+主要功能：对旧接口进行临时重定向，保持兼容性。
+设计背景：项目与文件夹概念合并后，保留旧入口避免客户端破坏性变更。
+注意事项：所有接口返回 307 临时重定向。
+"""
+
 from typing import Annotated
 from uuid import UUID
 
@@ -15,19 +24,18 @@ from langflow.services.database.models.folder.pagination_model import FolderWith
 
 router = APIRouter(prefix="/folders", tags=["Folders"])
 
-# This file now serves as a redirection to the projects endpoint
-# All routes will redirect to the corresponding projects endpoint
+# 迁移上下文：`/folders` 已合并到 `/projects`，此处仅保留重定向。
 
 
 @router.post("/", response_model=FolderRead, status_code=201)
 async def create_folder_redirect():
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects`。"""
     return RedirectResponse(url="/api/v1/projects/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @router.get("/", response_model=list[FolderRead], status_code=200)
 async def read_folders_redirect():
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects`。"""
     return RedirectResponse(url="/api/v1/projects/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -40,7 +48,7 @@ async def read_folder_redirect(
     is_flow: bool = False,
     search: str = "",
 ):
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects/{folder_id}`。"""
     redirect_url = f"/api/v1/projects/{folder_id}"
     params_list = []
     if is_component:
@@ -65,7 +73,7 @@ async def update_folder_redirect(
     *,
     folder_id: UUID,
 ):
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects/{folder_id}`。"""
     return RedirectResponse(url=f"/api/v1/projects/{folder_id}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -74,7 +82,7 @@ async def delete_folder_redirect(
     *,
     folder_id: UUID,
 ):
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects/{folder_id}`。"""
     return RedirectResponse(url=f"/api/v1/projects/{folder_id}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -83,7 +91,7 @@ async def download_file_redirect(
     *,
     folder_id: UUID,
 ):
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects/download/{folder_id}`。"""
     return RedirectResponse(
         url=f"/api/v1/projects/download/{folder_id}", status_code=status.HTTP_307_TEMPORARY_REDIRECT
     )
@@ -91,5 +99,5 @@ async def download_file_redirect(
 
 @router.post("/upload/", response_model=list[FlowRead], status_code=201)
 async def upload_file_redirect():
-    """Redirect to the projects endpoint."""
+    """重定向到 `/projects/upload/`。"""
     return RedirectResponse(url="/api/v1/projects/upload/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)

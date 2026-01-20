@@ -1,8 +1,26 @@
+"""
+模块名称：`LLM` 生成 `lambda` 的智能过滤/变换
+
+本模块使用模型把自然语言指令转为 `lambda`，以统一处理 `Data`、`DataFrame` 与 `Message`。
+主要功能包括：
+- 根据输入类型构建不同提示词
+- 解析并校验模型返回的 `lambda` 片段
+- 将执行结果映射回结构化输出类型
+
+关键组件：
+- `_execute_lambda`：生成并执行 `lambda`
+- `_parse_lambda_from_response`：响应解析与校验
+- `_convert_result_to_*`：结果类型转换
+
+设计背景：低代码场景需要用自然语言快速定义过滤/变换规则。
+注意事项：`lambda` 由模型生成并通过 `eval` 执行，仅适用于受控环境。
+"""
+
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable  # noqa: TC003 - required at runtime for dynamic exec()
+from collections.abc import Callable  # noqa: TC003 - 运行期动态执行需要
 from typing import Any
 
 from lfx.base.models.unified_models import (
@@ -40,6 +58,15 @@ DATA_TRANSFORM_PROMPT = (
 
 
 class LambdaFilterComponent(Component):
+    """通过模型生成 `lambda` 的智能过滤组件。
+
+    契约：输入结构化数据或消息，输出与输入类型对应的结果。
+    决策：使用模型生成 `lambda`，而非提供固定函数集合。
+    问题：规则组合多样，固定操作集难以覆盖用户自然语言需求。
+    方案：构造提示词让模型返回 `lambda` 并直接执行。
+    代价：存在执行风险与不可预测行为，需要在受控环境使用。
+    重评：当需支持多租户或不可信输入时改为安全沙箱执行。
+    """
     display_name = "Smart Transform"
     description = "Uses an LLM to generate a function for filtering or transforming structured data and messages."
     documentation: str = "https://docs.langflow.org/smart-transform"
@@ -115,7 +142,10 @@ class LambdaFilterComponent(Component):
     ]
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
-        """Dynamically update build config with user-filtered model options."""
+        """根据用户输入刷新模型选项。
+
+        契约：返回更新后的构建配置，供前端刷新可选模型。
+        """
         return update_model_options_in_build_config(
             component=self,
             build_config=build_config,
@@ -126,24 +156,27 @@ class LambdaFilterComponent(Component):
         )
 
     def get_data_structure(self, data):
-        """Extract the structure of data, replacing values with their types."""
+        """抽取数据结构并用类型名替换值。
+
+        契约：返回与输入结构同形的类型描述。
+        """
         if isinstance(data, list):
-            # For lists, get structure of first item if available
+            # 注意：列表仅取首元素推断结构。
             if data:
                 return [self.get_data_structure(data[0])]
             return []
         if isinstance(data, dict):
             return {k: self.get_data_structure(v) for k, v in data.items()}
-        # For primitive types, return the type name
+        # 实现：基础类型直接返回类型名。
         return type(data).__name__
 
     def _validate_lambda(self, lambda_text: str) -> bool:
-        """Validate the provided lambda function text."""
-        # Return False if the lambda function does not start with 'lambda' or does not contain a colon
+        """校验 `lambda` 基本语法形态。"""
+        # 注意：必须以 `lambda` 开头且包含冒号。
         return lambda_text.strip().startswith("lambda") and ":" in lambda_text
 
     def _get_input_type_name(self) -> str:
-        """Detect and return the input type name for error messages."""
+        """识别输入类型名称，供错误提示使用。"""
         if isinstance(self.data, Message):
             return "Message"
         if isinstance(self.data, DataFrame):
@@ -161,7 +194,7 @@ class LambdaFilterComponent(Component):
         return "unknown"
 
     def _extract_message_text(self) -> str:
-        """Extract text content from Message input(s)."""
+        """提取 `Message` 文本并合并为单一字符串。"""
         if isinstance(self.data, Message):
             return self.data.text or ""
 
@@ -169,7 +202,7 @@ class LambdaFilterComponent(Component):
         return "\n\n".join(texts) if len(texts) > 1 else (texts[0] if texts else "")
 
     def _extract_structured_data(self) -> dict | list:
-        """Extract structured data from Data or DataFrame input(s)."""
+        """提取结构化数据，统一为 `dict` 或 `list`。"""
         if isinstance(self.data, DataFrame):
             return self.data.to_dict(orient="records")
 
@@ -196,13 +229,13 @@ class LambdaFilterComponent(Component):
         return combined_data
 
     def _is_message_input(self) -> bool:
-        """Check if input is Message type."""
+        """判断输入是否为 `Message` 类型。"""
         if isinstance(self.data, Message):
             return True
         return isinstance(self.data, list) and len(self.data) > 0 and isinstance(self.data[0], Message)
 
     def _build_text_prompt(self, text: str) -> str:
-        """Build prompt for text/Message transformation."""
+        """构建文本类输入的提示词。"""
         text_length = len(text)
         if text_length > self.max_size:
             text_preview = (
@@ -216,7 +249,7 @@ class LambdaFilterComponent(Component):
         return TEXT_TRANSFORM_PROMPT.format(text_preview=text_preview, instruction=self.filter_instruction)
 
     def _build_data_prompt(self, data: dict | list) -> str:
-        """Build prompt for structured data transformation."""
+        """构建结构化数据的提示词。"""
         dump = json.dumps(data)
         dump_structure = json.dumps(self.get_data_structure(data))
 
@@ -233,7 +266,7 @@ class LambdaFilterComponent(Component):
         )
 
     def _parse_lambda_from_response(self, response_text: str) -> Callable[[Any], Any]:
-        """Extract and validate lambda function from LLM response."""
+        """从模型响应中提取并校验 `lambda`。"""
         lambda_match = re.search(r"lambda\s+\w+\s*:.*?(?=\n|$)", response_text)
         if not lambda_match:
             msg = f"Could not find lambda in response: {response_text}"
@@ -246,10 +279,18 @@ class LambdaFilterComponent(Component):
             msg = f"Invalid lambda format: {lambda_text}"
             raise ValueError(msg)
 
-        return eval(lambda_text)  # noqa: S307
+        # 安全：执行模型生成的 `lambda`，仅在受控环境使用。 # noqa: S307
+        return eval(lambda_text)
 
     async def _execute_lambda(self) -> Any:
-        """Generate and execute a lambda function based on input type."""
+        """生成并执行 `lambda`，返回原始结果。
+
+        关键路径（三步）：
+        1) 判断输入类型并构造提示词
+        2) 调用模型并解析 `lambda`
+        3) 执行并返回结果
+        异常流：模型响应不含 `lambda` 或执行异常将向上抛出。
+        """
         if self._is_message_input():
             data: Any = self._extract_message_text()
             prompt = self._build_text_prompt(data)
@@ -265,7 +306,7 @@ class LambdaFilterComponent(Component):
         return fn(data)
 
     def _handle_process_error(self, error: Exception, output_type: str) -> None:
-        """Handle errors from process methods with context-aware messages."""
+        """统一处理输出类型不匹配导致的异常。"""
         input_type = self._get_input_type_name()
         error_msg = (
             f"Failed to convert result to {output_type} output. "
@@ -276,7 +317,7 @@ class LambdaFilterComponent(Component):
         raise ValueError(error_msg) from error
 
     def _convert_result_to_data(self, result: Any) -> Data:
-        """Convert lambda result to Data object."""
+        """将执行结果包装为 `Data`。"""
         if isinstance(result, dict):
             return Data(data=result)
         if isinstance(result, list):
@@ -284,7 +325,7 @@ class LambdaFilterComponent(Component):
         return Data(data={"text": str(result)})
 
     def _convert_result_to_dataframe(self, result: Any) -> DataFrame:
-        """Convert lambda result to DataFrame object."""
+        """将执行结果包装为 `DataFrame`。"""
         if isinstance(result, list):
             if all(isinstance(item, dict) for item in result):
                 return DataFrame(result)
@@ -294,7 +335,7 @@ class LambdaFilterComponent(Component):
         return DataFrame([{"value": str(result)}])
 
     def _convert_result_to_message(self, result: Any) -> Message:
-        """Convert lambda result to Message object."""
+        """将执行结果包装为 `Message`。"""
         if isinstance(result, str):
             return Message(text=result, sender=MESSAGE_SENDER_AI)
         if isinstance(result, list):
@@ -306,25 +347,28 @@ class LambdaFilterComponent(Component):
         return Message(text=str(result), sender=MESSAGE_SENDER_AI)
 
     async def process_as_data(self) -> Data:
-        """Process the data and return as a Data object."""
+        """按 `Data` 输出执行结果。
+
+        失败语义：执行或转换异常将包装为 `ValueError`。
+        """
         try:
             result = await self._execute_lambda()
             return self._convert_result_to_data(result)
-        except Exception as e:  # noqa: BLE001 - dynamic lambda can raise any exception
+        except Exception as e:  # noqa: BLE001 - 动态 `lambda` 可能抛出任意异常
             self._handle_process_error(e, "Data")
 
     async def process_as_dataframe(self) -> DataFrame:
-        """Process the data and return as a DataFrame."""
+        """按 `DataFrame` 输出执行结果。"""
         try:
             result = await self._execute_lambda()
             return self._convert_result_to_dataframe(result)
-        except Exception as e:  # noqa: BLE001 - dynamic lambda can raise any exception
+        except Exception as e:  # noqa: BLE001 - 动态 `lambda` 可能抛出任意异常
             self._handle_process_error(e, "DataFrame")
 
     async def process_as_message(self) -> Message:
-        """Process the data and return as a Message."""
+        """按 `Message` 输出执行结果。"""
         try:
             result = await self._execute_lambda()
             return self._convert_result_to_message(result)
-        except Exception as e:  # noqa: BLE001 - dynamic lambda can raise any exception
+        except Exception as e:  # noqa: BLE001 - 动态 `lambda` 可能抛出任意异常
             self._handle_process_error(e, "Message")

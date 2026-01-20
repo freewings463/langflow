@@ -1,3 +1,20 @@
+"""
+模块名称：Opik Tracer 适配
+
+本模块实现 Opik tracing 适配，并支持分布式 trace 头传递。
+主要功能包括：
+- 初始化 Opik 客户端并创建 trace
+- 记录组件级 span 的输入/输出/日志
+- 提供 LangChain 回调与分布式 header
+
+关键组件：
+- `OpikTracer`
+- `get_distributed_trace_headers`
+
+设计背景：在 Opik 上统一追踪 Langflow 运行链路。
+注意事项：未配置 `OPIK_API_KEY`/`OPIK_URL_OVERRIDE` 时会禁用。
+"""
+
 from __future__ import annotations
 
 import os
@@ -24,7 +41,11 @@ if TYPE_CHECKING:
 
 
 def get_distributed_trace_headers(trace_id, span_id):
-    """Returns headers dictionary to be passed into tracked function on remote node."""
+    """生成分布式追踪的 Header 字典。
+
+    契约：返回包含 `opik_parent_span_id` 与 `opik_trace_id` 的字典。
+    失败语义：不抛异常。
+    """
     return {"opik_parent_span_id": span_id, "opik_trace_id": trace_id}
 
 
@@ -40,6 +61,12 @@ class OpikTracer(BaseTracer):
         user_id: str | None = None,
         session_id: str | None = None,
     ):
+        """初始化 Opik tracer。
+
+        契约：初始化失败时 `ready=False`。
+        副作用：可能触发 Opik 鉴权检查。
+        失败语义：SDK 导入失败或鉴权失败时禁用。
+        """
         self._project_name = project_name
         self.trace_name = trace_name
         self.trace_type = trace_type
@@ -55,9 +82,11 @@ class OpikTracer(BaseTracer):
 
     @property
     def ready(self):
+        """指示 tracer 是否可用。"""
         return self._ready
 
     def _setup_opik(self, config: dict, trace_id: UUID) -> bool:
+        """初始化 Opik 客户端并创建 trace 元数据。"""
         try:
             from opik import Opik
             from opik.api_objects.trace import TraceData
@@ -96,6 +125,7 @@ class OpikTracer(BaseTracer):
         return True
 
     def _check_opik_auth(self, opik_client) -> bool:
+        """执行 Opik 鉴权检查。"""
         try:
             opik_client.auth_check()
         except Exception as e:  # noqa: BLE001
@@ -114,6 +144,7 @@ class OpikTracer(BaseTracer):
         metadata: dict[str, Any] | None = None,
         vertex: Vertex | None = None,
     ) -> None:
+        """创建组件级 span 并缓存分布式头。"""
         if not self._ready:
             return
 
@@ -143,6 +174,7 @@ class OpikTracer(BaseTracer):
         error: Exception | None = None,
         logs: Sequence[Log | dict] = (),
     ) -> None:
+        """结束组件级 span 并上报输出/错误。"""
         if not self._ready:
             return
 
@@ -170,6 +202,7 @@ class OpikTracer(BaseTracer):
         error: Exception | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """结束根 trace 并 flush。"""
         if not self._ready:
             return
 
@@ -184,6 +217,7 @@ class OpikTracer(BaseTracer):
         self._client.flush()
 
     def get_langchain_callback(self) -> BaseCallbackHandler | None:
+        """返回 LangChain Opik 回调处理器。"""
         if not self._ready:
             return None
 
@@ -195,11 +229,11 @@ class OpikTracer(BaseTracer):
         return LangchainOpikTracer(distributed_headers=self._distributed_headers)
 
     def _convert_to_opik_types(self, io_dict: dict[str | Any, Any]) -> dict[str, Any]:
-        """Converts data types to Opik compatible formats."""
+        """将输入字典转换为 Opik 兼容格式。"""
         return {str(key): self._convert_to_opik_type(value) for key, value in io_dict.items() if key is not None}
 
     def _convert_to_opik_type(self, value):
-        """Recursively converts a value to a Opik compatible type."""
+        """递归转换为 Opik 兼容类型。"""
         if isinstance(value, dict):
             value = {key: self._convert_to_opik_type(val) for key, val in value.items()}
 
@@ -225,6 +259,7 @@ class OpikTracer(BaseTracer):
 
     @staticmethod
     def _get_config() -> dict:
+        """从环境变量读取 Opik 配置。"""
         host = os.getenv("OPIK_URL_OVERRIDE", None)
         api_key = os.getenv("OPIK_API_KEY", None)
         workspace = os.getenv("OPIK_WORKSPACE", None)

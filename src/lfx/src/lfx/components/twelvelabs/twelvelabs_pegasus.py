@@ -1,3 +1,21 @@
+"""
+模块名称：TwelveLabs Pegasus 视频问答
+
+本模块提供 TwelveLabs Pegasus 的视频索引与问答能力，支持已有视频 ID 的直接问答。
+主要功能包括：
+- 获取或创建索引并上传视频
+- 轮询任务状态并生成问答结果
+- 校验视频文件并暴露视频 ID
+
+关键组件：
+- `TwelveLabsPegasus`
+- `_get_or_create_index`
+- `process_video`
+
+设计背景：将视频索引与问答能力封装为 Langflow 组件。
+注意事项：FFprobe 校验与任务轮询可能产生较长等待时间。
+"""
+
 import json
 import subprocess
 import time
@@ -15,26 +33,35 @@ from lfx.schema.message import Message
 
 
 class TaskError(Exception):
-    """Error raised when a task fails."""
+    """任务执行失败。"""
 
 
 class TaskTimeoutError(Exception):
-    """Error raised when a task times out."""
+    """任务等待超时。"""
 
 
 class IndexCreationError(Exception):
-    """Error raised when there's an issue with an index."""
+    """索引创建或解析失败。"""
 
 
 class ApiRequestError(Exception):
-    """Error raised when an API request fails."""
+    """API 请求失败。"""
 
 
 class VideoValidationError(Exception):
-    """Error raised when video validation fails."""
+    """视频校验失败。"""
 
 
 class TwelveLabsPegasus(Component):
+    """TwelveLabs Pegasus 视频问答组件。
+
+    契约：
+    - 输入：API Key、视频路径/视频 ID、索引信息与提问文本
+    - 输出：`Message`（回答文本或错误提示）
+    - 副作用：上传视频、轮询任务、调用生成接口
+    - 失败语义：索引/任务/API 异常返回错误消息并清空缓存 ID
+    """
+
     display_name = "TwelveLabs Pegasus"
     description = "Chat with videos using TwelveLabs Pegasus API."
     icon = "TwelveLabs"
@@ -114,11 +141,8 @@ class TwelveLabsPegasus(Component):
         self._message: str | None = None
 
     def _get_or_create_index(self, client: TwelveLabs) -> tuple[str, str]:
-        """Get existing index or create new one.
-
-        Returns (index_id, index_name).
-        """
-        # First check if index_id is provided and valid
+        """获取或创建索引，返回 (index_id, index_name)。"""
+        # 注意：优先使用传入的 index_id
         if hasattr(self, "_index_id") and self._index_id:
             try:
                 index = client.index.retrieve(id=self._index_id)
@@ -128,17 +152,17 @@ class TwelveLabsPegasus(Component):
             else:
                 return self._index_id, index.name
 
-        # If index_name is provided, try to find it
+        # 注意：按名称查找，未命中则创建
         if hasattr(self, "_index_name") and self._index_name:
             try:
-                # List all indexes and find by name
+                # 拉取索引列表并按名称匹配
                 indexes = client.index.list()
                 for idx in indexes:
                     if idx.name == self._index_name:
                         self.log(f"Found existing index: {self._index_name} (ID: {idx.id})")
                         return idx.id, idx.name
 
-                # If we get here, index wasn't found - create it
+                # 未命中则创建索引
                 self.log(f"Creating new index: {self._index_name}")
                 index = client.index.create(
                     name=self._index_name,
@@ -156,7 +180,7 @@ class TwelveLabsPegasus(Component):
             else:
                 return index.id, index.name
 
-        # If neither is provided, create a new index with timestamp
+        # 注意：两者都未提供时创建临时索引
         try:
             index_name = f"index_{int(time.time())}"
             self.log(f"Creating new index: {index_name}")
@@ -178,10 +202,7 @@ class TwelveLabsPegasus(Component):
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
     async def _make_api_request(self, method: Any, *args: Any, **kwargs: Any) -> Any:
-        """Make API request with retry logic.
-
-        Retries failed requests with exponential backoff.
-        """
+        """执行 API 请求并带指数退避重试。"""
         try:
             return await method(*args, **kwargs)
         except (ValueError, KeyError) as e:
@@ -192,9 +213,12 @@ class TwelveLabsPegasus(Component):
     def wait_for_task_completion(
         self, client: TwelveLabs, task_id: str, max_retries: int = 120, sleep_time: int = 5
     ) -> Any:
-        """Wait for task completion with timeout and improved error handling.
+        """等待任务完成并包含超时与错误阈值控制。
 
-        Polls the task status until completion or timeout.
+        关键路径（三步）：
+        1) 轮询任务状态并刷新日志/状态
+        2) 根据 `ready/failed/error` 做分支
+        3) 达到超时或连续错误阈值时抛异常
         """
         retries = 0
         consecutive_errors = 0
@@ -204,7 +228,7 @@ class TwelveLabsPegasus(Component):
             try:
                 self.log(f"Checking task status (attempt {retries + 1})")
                 result = client.task.retrieve(id=task_id)
-                consecutive_errors = 0  # Reset error counter on success
+                consecutive_errors = 0  # 注意：成功后清零连续错误计数
 
                 if result.status == "ready":
                     self.log("Task completed successfully!")
@@ -241,11 +265,8 @@ class TwelveLabsPegasus(Component):
         raise TaskTimeoutError(timeout_msg)
 
     def validate_video_file(self, filepath: str) -> tuple[bool, str]:
-        """Validate video file using ffprobe.
-
-        Returns (is_valid, error_message).
-        """
-        # Ensure filepath is a string and doesn't contain shell metacharacters
+        """使用 ffprobe 校验视频文件，返回 (is_valid, error_message)。"""
+        # 注意：校验路径字符以规避注入风险
         if not isinstance(filepath, str) or any(c in filepath for c in ";&|`$(){}[]<>*?!#~"):
             return False, "Invalid filepath"
 
@@ -264,15 +285,13 @@ class TwelveLabsPegasus(Component):
                 filepath,
             ]
 
-            # Use subprocess with a list of arguments to avoid shell injection
-            # We need to skip the S603 warning here as we're taking proper precautions
-            # with input validation and using shell=False
+            # 注意：使用参数列表并禁用 shell
             result = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,
                 check=False,
-                shell=False,  # Explicitly set shell=False for security
+                shell=False,  # 注意：明确禁用 shell
             )
 
             if result.returncode != 0:
@@ -296,19 +315,27 @@ class TwelveLabsPegasus(Component):
             return True, ""
 
     def on_task_update(self, task: Any) -> None:
-        """Callback for task status updates.
-
-        Updates the component status with the current task status.
-        """
+        """任务状态更新回调，刷新组件状态文本。"""
         self.status = f"Processing video... Status: {task.status}"
         self.log(self.status)
 
     def process_video(self) -> Message:
-        """Process video using Pegasus and generate response if message is provided.
+        """执行视频索引与问答流程。
 
-        Handles video indexing and question answering using the TwelveLabs API.
+        契约：
+        - 输入：API Key、视频路径或 video_id、提问文本
+        - 输出：`Message`（回答或错误提示）
+        - 副作用：上传视频、轮询任务、调用生成接口
+        - 失败语义：索引/任务/API 异常返回错误消息
+
+        关键路径（三步）：
+        1) 解析输入，优先使用已有 `video_id`
+        2) 需要时上传视频并等待任务完成
+        3) 生成回答或返回视频 ID 提示
+
+        异常流：索引/任务/API 异常会返回错误消息并清空缓存 ID。
         """
-        # Check and initialize inputs
+        # 解析输入并同步到内部缓存
         if hasattr(self, "index_id") and self.index_id:
             self._index_id = self.index_id.text if hasattr(self.index_id, "text") else self.index_id
 
@@ -322,7 +349,7 @@ class TwelveLabsPegasus(Component):
             self._message = self.message.text if hasattr(self.message, "text") else self.message
 
         try:
-            # If we have a message and already processed video, use existing video_id
+            # 已有 video_id 且包含提问时，直接生成回答
             if self._message and self._video_id and self._video_id != "":
                 self.status = f"Have video id: {self._video_id}"
 
@@ -338,7 +365,7 @@ class TwelveLabsPegasus(Component):
                 )
                 return Message(text=response.data)
 
-            # Otherwise process new video
+            # 否则走新视频索引流程
             if not self.videodata or not isinstance(self.videodata, list) or len(self.videodata) != 1:
                 return Message(text="Please provide exactly one video")
 
@@ -351,7 +378,7 @@ class TwelveLabsPegasus(Component):
 
             client = TwelveLabs(api_key=self.api_key)
 
-            # Get or create index
+            # 获取或创建索引
             try:
                 index_id, index_name = self._get_or_create_index(client)
                 self.status = f"Using index: {index_name} (ID: {index_id})"
@@ -365,16 +392,16 @@ class TwelveLabsPegasus(Component):
                 task = client.task.create(index_id=self._index_id, file=video_file)
             self._task_id = task.id
 
-            # Wait for processing to complete
+            # 等待索引任务完成
             task.wait_for_done(sleep_interval=5, callback=self.on_task_update)
 
             if task.status != "ready":
                 return Message(text=f"Processing failed with status {task.status}")
 
-            # Store video_id for future use
+            # 缓存 video_id 供后续问答使用
             self._video_id = task.video_id
 
-            # Generate response if message provided
+            # 若包含提问则生成回答
             if self._message:
                 self.status = f"Processing query: {self._message}"
                 self.log(self.status)
@@ -393,16 +420,13 @@ class TwelveLabsPegasus(Component):
 
         except (ValueError, KeyError, IndexCreationError, TaskError, TaskTimeoutError) as e:
             self.log(f"Error: {e!s}", "ERROR")
-            # Clear stored IDs on error
+            # 注意：失败时清空缓存 ID，避免后续误用
             self._video_id = None
             self._index_id = None
             self._task_id = None
             return Message(text=f"Error: {e!s}")
 
     def get_video_id(self) -> Message:
-        """Return the video ID of the processed video as a Message.
-
-        Returns an empty string if no video has been processed.
-        """
+        """返回当前缓存的 `video_id`（无则为空字符串）。"""
         video_id = self._video_id or ""
         return Message(text=video_id)

@@ -1,3 +1,13 @@
+"""DataFrame 操作组件。
+
+本模块提供常见 DataFrame 操作（筛选、排序、改名、去重等）。
+主要功能包括：
+- 根据用户选择动态展示所需参数
+- 对 DataFrame 执行单一操作并返回结果
+
+注意事项：所有操作基于副本执行，避免就地修改输入。
+"""
+
 import pandas as pd
 
 from lfx.custom.custom_component.component import Component
@@ -8,6 +18,12 @@ from lfx.schema.dataframe import DataFrame
 
 
 class DataFrameOperationsComponent(Component):
+    """DataFrame 操作组件封装。
+
+    契约：输入为 DataFrame 与操作配置；输出为新的 DataFrame。
+    副作用：无（基于副本处理）。
+    失败语义：不支持的操作抛 `ValueError`。
+    """
     display_name = "DataFrame Operations"
     description = "Perform various operations on a DataFrame."
     documentation: str = "https://docs.langflow.org/dataframe-operations"
@@ -150,6 +166,13 @@ class DataFrameOperationsComponent(Component):
     ]
 
     def update_build_config(self, build_config, field_value, field_name=None):
+        """根据操作类型动态显示/隐藏输入字段。
+
+        关键路径（三步）：
+        1) 重置动态字段显示状态；
+        2) 解析操作名称；
+        3) 按操作开启对应字段。
+        """
         dynamic_fields = [
             "column_name",
             "filter_value",
@@ -166,13 +189,12 @@ class DataFrameOperationsComponent(Component):
             build_config[field]["show"] = False
 
         if field_name == "operation":
-            # Handle SortableListInput format
+            # 实现：兼容 SortableListInput 数据结构
             if isinstance(field_value, list):
                 operation_name = field_value[0].get("name", "") if field_value else ""
             else:
                 operation_name = field_value or ""
 
-            # If no operation selected, all dynamic fields stay hidden (already set to False above)
             if not operation_name:
                 return build_config
 
@@ -205,16 +227,22 @@ class DataFrameOperationsComponent(Component):
         return build_config
 
     def perform_operation(self) -> DataFrame:
+        """根据选择的操作执行 DataFrame 变换。
+
+        关键路径（三步）：
+        1) 解析操作名称并复制输入；
+        2) 选择对应处理函数执行；
+        3) 返回结果或抛出不支持操作错误。
+        """
         df_copy = self.df.copy()
 
-        # Handle SortableListInput format for operation
+        # 实现：兼容 SortableListInput 数据结构
         operation_input = getattr(self, "operation", [])
         if isinstance(operation_input, list) and len(operation_input) > 0:
             op = operation_input[0].get("name", "")
         else:
             op = ""
 
-        # If no operation selected, return original DataFrame
         if not op:
             return df_copy
 
@@ -243,11 +271,12 @@ class DataFrameOperationsComponent(Component):
         raise ValueError(msg)
 
     def filter_rows_by_value(self, df: DataFrame) -> DataFrame:
+        """按条件筛选行。"""
         column = df[self.column_name]
         filter_value = self.filter_value
 
-        # Handle regular DropdownInput format (just a string value)
-        operator = getattr(self, "filter_operator", "equals")  # Default to equals for backward compatibility
+        # 实现：向后兼容 operator 默认值
+        operator = getattr(self, "filter_operator", "equals")  # 默认等于，兼容旧配置
 
         if operator == "equals":
             mask = column == filter_value
@@ -263,51 +292,58 @@ class DataFrameOperationsComponent(Component):
             mask = column.astype(str).str.endswith(str(filter_value), na=False)
         elif operator == "greater than":
             try:
-                # Try to convert filter_value to numeric for comparison
+                # 实现：尽量按数值比较
                 numeric_value = pd.to_numeric(filter_value)
                 mask = column > numeric_value
             except (ValueError, TypeError):
-                # If conversion fails, compare as strings
                 mask = column.astype(str) > str(filter_value)
         elif operator == "less than":
             try:
-                # Try to convert filter_value to numeric for comparison
+                # 实现：尽量按数值比较
                 numeric_value = pd.to_numeric(filter_value)
                 mask = column < numeric_value
             except (ValueError, TypeError):
-                # If conversion fails, compare as strings
                 mask = column.astype(str) < str(filter_value)
         else:
-            mask = column == filter_value  # Fallback to equals
+            mask = column == filter_value  # 回退为等于
 
         return DataFrame(df[mask])
 
     def sort_by_column(self, df: DataFrame) -> DataFrame:
+        """按列排序。"""
         return DataFrame(df.sort_values(by=self.column_name, ascending=self.ascending))
 
     def drop_column(self, df: DataFrame) -> DataFrame:
+        """删除列。"""
         return DataFrame(df.drop(columns=[self.column_name]))
 
     def rename_column(self, df: DataFrame) -> DataFrame:
+        """重命名列。"""
         return DataFrame(df.rename(columns={self.column_name: self.new_column_name}))
 
     def add_column(self, df: DataFrame) -> DataFrame:
+        """添加列并填充固定值。"""
         df[self.new_column_name] = [self.new_column_value] * len(df)
         return DataFrame(df)
 
     def select_columns(self, df: DataFrame) -> DataFrame:
+        """选择列子集。"""
         columns = [col.strip() for col in self.columns_to_select]
         return DataFrame(df[columns])
 
     def head(self, df: DataFrame) -> DataFrame:
+        """取前 N 行。"""
         return DataFrame(df.head(self.num_rows))
 
     def tail(self, df: DataFrame) -> DataFrame:
+        """取后 N 行。"""
         return DataFrame(df.tail(self.num_rows))
 
     def replace_values(self, df: DataFrame) -> DataFrame:
+        """替换列内值。"""
         df[self.column_name] = df[self.column_name].replace(self.replace_value, self.replacement_value)
         return DataFrame(df)
 
     def drop_duplicates(self, df: DataFrame) -> DataFrame:
+        """按列去重。"""
         return DataFrame(df.drop_duplicates(subset=self.column_name))

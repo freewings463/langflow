@@ -1,3 +1,17 @@
+"""
+模块名称：Groq 模型组件
+
+本模块提供 Groq 聊天模型组件，主要用于在 Langflow 中配置并调用 Groq API。主要功能包括：
+- 动态拉取可用模型列表（含工具调用支持筛选）
+- 构建 LangChain `ChatGroq` 模型实例
+
+关键组件：
+- `GroqModel`：Groq 模型组件
+
+设计背景：Groq 模型列表随 API 变化，需要动态发现并缓存。
+注意事项：依赖 `langchain-groq`，未安装会抛 `ImportError`；无 API key 时回退到静态模型列表。
+"""
+
 from pydantic.v1 import SecretStr
 
 from lfx.base.models.groq_constants import GROQ_MODELS
@@ -10,6 +24,12 @@ from lfx.log.logger import logger
 
 
 class GroqModel(LCModelComponent):
+    """Groq 模型组件。
+
+    契约：`api_key` 可选；未提供时仅使用静态模型列表。
+    失败语义：动态获取模型失败时回退到 `GROQ_MODELS`。
+    副作用：可能触发网络请求与日志输出。
+    """
     display_name: str = "Groq"
     description: str = "Generate text using Groq."
     icon = "Groq"
@@ -71,31 +91,25 @@ class GroqModel(LCModelComponent):
     ]
 
     def get_models(self, *, tool_model_enabled: bool | None = None) -> list[str]:
-        """Get available Groq models using the dynamic discovery system.
+        """获取可用 Groq 模型列表。
 
-        This method uses the groq_model_discovery module which:
-        - Fetches models directly from Groq API
-        - Automatically tests tool calling support
-        - Caches results for 24 hours
-        - Falls back to hardcoded list if API fails
+        契约：优先调用动态发现接口，失败时回退到静态列表。
+        失败语义：动态发现异常时返回 `GROQ_MODELS`。
+        副作用：可能发起 API 请求并写入日志。
 
-        Args:
-            tool_model_enabled: If True, only return models that support tool calling
-
-        Returns:
-            List of available model IDs
+        关键路径（三步）：
+        1) 调用动态发现接口获取模型元数据
+        2) 过滤非 LLM 或不支持工具调用的模型
+        3) 返回模型 ID 列表或回退静态列表
         """
         try:
-            # Get models with metadata from dynamic discovery system
             api_key = self.api_key if hasattr(self, "api_key") and self.api_key else None
             models_metadata = get_groq_models(api_key=api_key)
 
-            # Filter out non-LLM models (audio, TTS, guards)
             model_ids = [
                 model_id for model_id, metadata in models_metadata.items() if not metadata.get("not_supported", False)
             ]
 
-            # Filter by tool calling support if requested
             if tool_model_enabled:
                 model_ids = [model_id for model_id in model_ids if models_metadata[model_id].get("tool_calling", False)]
                 logger.info(f"Loaded {len(model_ids)} Groq models with tool calling support")
@@ -103,12 +117,17 @@ class GroqModel(LCModelComponent):
                 logger.info(f"Loaded {len(model_ids)} Groq models")
         except (ValueError, KeyError, TypeError, ImportError) as e:
             logger.exception(f"Error getting model names: {e}")
-            # Fallback to hardcoded list from groq_constants.py
             return GROQ_MODELS
         else:
             return model_ids
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
+        """根据输入变化动态更新模型下拉选项。
+
+        契约：当关键字段变化且有 API key 时刷新模型列表。
+        失败语义：拉取失败抛 `ValueError`。
+        副作用：修改 `build_config`。
+        """
         if field_name in {"base_url", "model_name", "tool_model_enabled", "api_key"} and field_value:
             try:
                 if len(self.api_key) != 0:
@@ -126,6 +145,17 @@ class GroqModel(LCModelComponent):
         return build_config
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 `ChatGroq` 模型实例。
+
+        契约：使用当前输入参数创建 `ChatGroq` 并返回。
+        失败语义：未安装 `langchain-groq` 时抛 `ImportError`。
+        副作用：无。
+
+        关键路径（三步）：
+        1) 导入 `ChatGroq`
+        2) 组装参数并创建实例
+        3) 返回模型实例
+        """
         try:
             from langchain_groq import ChatGroq
         except ImportError as e:

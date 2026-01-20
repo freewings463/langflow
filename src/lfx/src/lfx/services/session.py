@@ -1,11 +1,21 @@
-"""Lightweight session implementations for lfx package."""
+"""
+模块名称：轻量会话实现
+
+本模块提供不依赖数据库的 Noop 会话实现，用于无数据库或测试场景。
+主要功能包括：
+- 提供与数据库会话兼容的接口
+- 所有操作为 no-op，避免副作用
+
+设计背景：在无数据库环境下保持接口可用。
+注意事项：NoopSession 不持久化任何数据。
+"""
 
 
 class NoopSession:
-    """No-operation session that implements the database session interface.
+    """空实现会话（no-op）。
 
-    This provides a complete database session API but all operations are no-ops.
-    Perfect for testing or when no real database is available.
+    契约：提供完整会话接口但不执行任何操作。
+    失败语义：不抛异常，仅返回空结果。
     """
 
     class NoopBind:
@@ -72,12 +82,12 @@ class NoopSession:
 
     @property
     def no_autoflush(self):
-        """Context manager that disables autoflush (no-op implementation)."""
+        """禁用 autoflush 的上下文（空实现）。"""
         return self
 
     @property
     def is_active(self):
-        """Check if session is active (always True for NoopSession)."""
+        """返回会话是否活跃（始终 True）。"""
         return True
 
     def __enter__(self):

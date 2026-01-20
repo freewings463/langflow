@@ -1,10 +1,16 @@
-"""Cross-module BaseModel for handling re-exported classes.
+"""模块名称：跨模块模型兼容层
 
-This module provides a metaclass and base model that enable isinstance checks
-to work across module boundaries for Pydantic models. This is particularly useful
-when the same class is re-exported from different modules (e.g., lfx.Message vs
-langflow.schema.Message) but Python's isinstance() checks fail due to different
-module paths.
+本模块提供跨模块 `isinstance` 兼容的元类与基模型，解决同名模型在不同导出路径下互认失败的问题。主要功能包括：
+- 结构化实例检查：基于类名与字段集合，而非模块路径
+- 兼容重导出：支持 `lfx` 与 `langflow` 等不同入口的同名模型
+- 最小侵入：不改变 Pydantic 的校验与序列化行为
+
+关键组件：
+- CrossModuleMeta：覆盖 `__instancecheck__` 的元类
+- CrossModuleModel：统一基类，供可重导出模型继承
+
+设计背景：模块重导出导致 `isinstance` 因模块路径不同而失败，需要结构化判断以保持兼容。
+注意事项：仅比较类名与字段集合，同名异构模型可能误判。
 """
 
 from __future__ import annotations
@@ -15,66 +21,54 @@ from pydantic import BaseModel
 
 
 class CrossModuleMeta(type(BaseModel)):  # type: ignore[misc]
-    """Metaclass that enables cross-module isinstance checks for Pydantic models.
+    """为 Pydantic 模型提供跨模块 `isinstance` 兼容判断。
 
-    This metaclass overrides __instancecheck__ to perform structural type checking
-    based on the model's fields rather than strict class identity. This allows
-    instances of the same model from different module paths to be recognized as
-    compatible.
+    契约：输入任意实例，输出 bool；副作用无。
+    失败语义：不抛异常，无法判定时返回 False。
+    决策：结构化判断而非模块路径。
+    问题：重导出导致类路径不同，`isinstance` 误判。
+    方案：比对类名与字段集合（含 `model_fields`）。
+    代价：同名异构模型可能被误判为兼容。
+    重评：当出现同名但字段差异显著的模型族时。
     """
 
     def __instancecheck__(cls, instance: Any) -> bool:
-        """Check if instance is compatible with this class across module boundaries.
+        """执行跨模块实例兼容性检查。
 
-        First performs a standard isinstance check. If that fails, falls back to
-        checking if the instance has all required Pydantic model attributes and
-        a compatible set of model fields.
-
-        Args:
-            instance: The object to check.
-
-        Returns:
-            bool: True if instance is compatible with this class.
+        契约：输入实例 -> bool；副作用无。
+        关键路径（三步）：
+        1) 标准 `isinstance` 检查
+        2) 判断 `model_fields` 与类名
+        3) 校验字段集合兼容性
+        失败语义：字段缺失或类名不匹配时返回 False。
+        性能瓶颈：字段集合构建与比较（O(n)）。
+        排障入口：无日志；调用方可记录失败路径。
         """
-        # First try standard isinstance check
         if type.__instancecheck__(cls, instance):
             return True
 
-        # If that fails, check for cross-module compatibility
-        # An object is cross-module compatible if it:
-        # 1. Has model_fields attribute (is a Pydantic model)
-        # 2. Has the same __class__.__name__
-        # 3. Has compatible model fields
+        # 注意：跨模块兼容仅依赖类名 + 字段集合，同名异构模型可能误判。
         if not hasattr(instance, "model_fields"):
             return False
 
-        # Check if class names match
         if instance.__class__.__name__ != cls.__name__:
             return False
 
-        # Check if the instance has all required fields from cls
         cls_fields = set(cls.model_fields.keys()) if hasattr(cls, "model_fields") else set()
         instance_fields = set(instance.model_fields.keys())
 
-        # The instance must have at least the same fields as the class
-        # (it can have more, but not fewer required fields)
+        # 实现：实例字段必须覆盖类字段，允许额外字段。
         return cls_fields.issubset(instance_fields)
 
 
 class CrossModuleModel(BaseModel, metaclass=CrossModuleMeta):
-    """Base Pydantic model with cross-module isinstance support.
+    """可跨模块互认的 Pydantic 基类。
 
-    This class should be used as the base for models that may be re-exported
-    from different modules. It enables isinstance() checks to work across
-    module boundaries by using structural type checking.
-
-    Example:
-        >>> class Message(CrossModuleModel):
-        ...     text: str
-        ...
-        >>> # Even if Message is imported from different paths:
-        >>> from lfx.schema.message import Message as LfxMessage
-        >>> from langflow.schema import Message as LangflowMessage
-        >>> msg = LfxMessage(text="hello")
-        >>> isinstance(msg, LangflowMessage)  # True (with cross-module support)
+    契约：继承该类不会改变模型字段或序列化行为；副作用无。
+    关键路径：通过 CrossModuleMeta 的 `__instancecheck__` 实现兼容判断。
+    决策：集中在基类以避免每个模型重复实现。
+    问题：多个导出路径导致 `isinstance` 不可靠。
+    方案：统一基类 + 元类结构化判断。
+    代价：继承树需统一基类，第三方模型需手动适配。
+    重评：当 Pydantic 提供官方跨模块兼容支持时。
     """

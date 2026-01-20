@@ -1,7 +1,16 @@
-"""Utilities to create flows from starter templates.
+"""
+模块名称：模板创建流程
 
-This module provides a helper to create a new Flow from a starter template
-JSON (looked up by template id) and returns a link to open it in the UI.
+本模块根据 `starter template` 创建新的 `Flow`，并返回 `UI` 可访问链接，适用于一键生成示例或起步流程。主要功能包括：
+- 通过模板 `ID` 读取模板 `JSON`
+- 解析目标文件夹并创建 `Flow` 记录
+- 复用 `API` 逻辑写入存储并返回链接
+
+关键组件：
+- `create_flow_from_template_and_get_link`：模板创建与链接返回
+
+设计背景：复用 `API` 创建路径以保持校验与存储行为一致。
+注意事项：模板不存在或文件夹无效时抛 `HTTPException`。
 """
 
 from __future__ import annotations
@@ -30,24 +39,25 @@ async def create_flow_from_template_and_get_link(
     template_id: str,
     target_folder_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Create a new flow from a starter template and return its id and UI link.
+    """从模板创建 `Flow` 并返回 `{id, link}`。
 
-    Args:
-        session: Active async DB session.
-        user_id: The owner user id for the new flow.
-        template_id: The string id field inside the starter template JSON.
-        target_folder_id: Optional folder id to place the flow. If not provided,
-            the user's default folder will be used.
-
-    Returns:
-        Dict with keys: {"id": str, "link": str}
+    契约：`template_id` 必须命中模板；`user_id` 为新 `Flow` 归属；返回含 `id` 与 `link`。
+    副作用：写入数据库并通过 `_save_flow_to_fs` 保存到存储。
+    失败语义：模板不存在 -> 抛 `HTTPException(404)`；目标文件夹无效 -> 抛 `HTTPException(400)`。
+    关键路径（三步）：1) 读取模板 2) 解析目标文件夹 3) 复用 `API` 创建并持久化
+    异常流：DB/存储异常将向上抛出，需由上层处理事务与日志。
+    性能瓶颈：保存流程数据与文件写入取决于模板体积。
+    排障入口：异常 `detail` 为 `Template not found`/`Invalid target folder`。
+    决策：复用 `API` 创建路径而非手工插表
+    问题：手工写入容易绕过统一校验与存储逻辑
+    方案：调用 `_new_flow` 与 `_save_flow_to_fs`
+    代价：依赖 `API` 内部约定与参数结构
+    重评：当 `API` 创建流程变化或拆分为独立服务时
     """
-    # 1) Load template JSON from starter_projects
     template = get_template_by_id(template_id=template_id, fields=None)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # 2) Resolve target folder
     if target_folder_id:
         folder = await session.get(Folder, target_folder_id)
         if not folder or folder.user_id != user_id:
@@ -57,7 +67,6 @@ async def create_flow_from_template_and_get_link(
         default_folder = await get_or_create_default_folder(session, user_id)
         folder_id = default_folder.id
 
-    # 3) Build FlowCreate from template fields (ignore unknowns)
     new_flow = FlowCreate(
         name=template.get("name"),
         description=template.get("description"),
@@ -73,13 +82,11 @@ async def create_flow_from_template_and_get_link(
         user_id=user_id,
     )
 
-    # 4) Use the same creation path as API
     storage_service = get_storage_service()
     db_flow = await _new_flow(session=session, flow=new_flow, user_id=user_id, storage_service=storage_service)
     await session.commit()
     await session.refresh(db_flow)
     await _save_flow_to_fs(db_flow, user_id, storage_service)
 
-    # 5) Build relative UI link
     link = f"/flow/{db_flow.id}/folder/{folder_id}"
     return {"id": str(db_flow.id), "link": link}

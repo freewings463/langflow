@@ -1,10 +1,72 @@
+"""
+模块名称：聊天缓存协议
+
+本模块定义聊天缓存的异步读写协议，用于在服务间抽象缓存实现。主要功能包括：
+- `GetCache`：异步读取缓存的调用协议
+- `SetCache`：异步写入缓存的调用协议
+
+关键组件：
+- `GetCache` / `SetCache`
+
+设计背景：以 `Protocol` 描述可调用接口，降低对具体缓存实现的依赖。
+注意事项：失败语义由具体实现决定，调用方需与实现约定。
+"""
+
 import asyncio
 from typing import Any, Protocol
 
 
 class GetCache(Protocol):
-    async def __call__(self, key: str, lock: asyncio.Lock | None = None) -> Any: ...
+    """异步读取缓存的协议签名。
+
+    契约：`__call__(key, lock)` 返回缓存对象；`lock` 为可选 `asyncio.Lock`。
+    副作用：由实现决定；失败语义：异常向上传播。
+    关键路径（三步）：1) 定位 `key` 2) 可选使用 `lock` 3) 返回数据
+    决策：使用 `Protocol` 约束可调用接口
+    问题：缓存实现多样且不应强耦合具体类
+    方案：定义可调用协议并交由实现适配
+    代价：运行期无法强制校验行为一致性
+    重评：当需要更强约束或统一基类时
+    """
+
+    async def __call__(self, key: str, lock: asyncio.Lock | None = None) -> Any:
+        """执行异步读取。
+
+        契约：`key` 为缓存键；`lock` 可为空。
+        副作用：由实现决定；失败语义：实现异常向上传播。
+        关键路径（三步）：1) 读取请求 2) 可选加锁 3) 返回结果
+        决策：读路径保留可选 `lock`
+        问题：读写交错可能导致不一致
+        方案：允许调用方在需要时传入锁
+        代价：调用方需自行管理锁生命周期
+        重评：当实现内部可保证读写一致性时
+        """
+        ...
 
 
 class SetCache(Protocol):
-    async def __call__(self, key: str, data: Any, lock: asyncio.Lock | None = None) -> bool: ...
+    """异步写入缓存的协议签名。
+
+    契约：`__call__(key, data, lock)` 返回写入结果 `bool`。
+    副作用：由实现决定；失败语义：异常向上传播或返回 `False`。
+    关键路径（三步）：1) 定位 `key` 2) 可选使用 `lock` 3) 写入并返回状态
+    决策：以 `bool` 表示写入结果
+    问题：调用方需要快速判断写入是否成功
+    方案：返回 `True/False` 并由实现定义失败语义
+    代价：无法表达详细失败原因
+    重评：当需要错误码或异常细分时
+    """
+
+    async def __call__(self, key: str, data: Any, lock: asyncio.Lock | None = None) -> bool:
+        """执行异步写入。
+
+        契约：`key` 为缓存键，`data` 为写入对象。
+        副作用：由实现决定；失败语义：实现异常向上传播或返回 `False`。
+        关键路径（三步）：1) 接收写入数据 2) 可选加锁 3) 写入并返回状态
+        决策：写路径保留可选 `lock`
+        问题：写入并发会导致竞态覆盖
+        方案：允许调用方传入锁进行串行化
+        代价：调用方需自行管理锁生命周期
+        重评：当实现内部已保证写入原子性时
+        """
+        ...

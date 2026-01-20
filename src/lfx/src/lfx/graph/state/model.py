@@ -1,3 +1,22 @@
+"""
+模块名称：图状态模型构建器
+
+本模块提供基于组件方法的动态状态模型构建能力，主要用于在图执行中暴露组件输出。主要功能包括：
+- 校验方法是否可用于输出绑定
+- 为组件方法生成 getter/setter 以读写输出
+- 动态生成 Pydantic 状态模型并支持 computed fields
+
+关键组件：
+- `__validate_method`：校验方法与组件约束
+- `build_output_getter`：构建输出读取器
+- `build_output_setter`：构建输出写入器
+- `create_state_model`：动态创建状态模型
+
+设计背景：图执行需要统一的状态对象来访问组件输出，且字段在运行时由组件集合决定。
+使用场景：图运行时根据组件方法生成 `State` 模型并注入执行上下文。
+注意事项：方法必须有返回类型注解；computed field 通过基类注入以满足 Pydantic 约束。
+"""
+
 from collections.abc import Callable
 from typing import Any, get_type_hints
 
@@ -6,27 +25,10 @@ from pydantic.fields import FieldInfo
 
 
 def __validate_method(method: Callable) -> None:
-    """Validates a method by checking if it has the required attributes.
+    """校验方法是否可用于输出绑定。
 
-    This function ensures that the given method belongs to a class with the necessary
-    structure for output handling. It checks for the presence of a __self__ attribute
-    on the method and a get_output_by_method attribute on the method's class.
-
-    Args:
-        method (Callable): The method to be validated.
-
-    Raises:
-        ValueError: If the method does not have a __self__ attribute or if the method's
-                    class does not have a get_output_by_method attribute.
-
-    Example:
-        >>> class ValidClass:
-        ...     def get_output_by_method(self):
-        ...         pass
-        ...     def valid_method(self):
-        ...         pass
-        >>> __validate_method(ValidClass().valid_method)  # This will pass
-        >>> __validate_method(lambda x: x)  # This will raise a ValueError
+    契约：方法需为绑定实例的方法（存在 `__self__`），且所属类具备 `get_output_by_method`。
+    失败语义：不满足约束时抛 `ValueError`。
     """
     if not hasattr(method, "__self__"):
         msg = f"Method {method} does not have a __self__ attribute."
@@ -37,39 +39,11 @@ def __validate_method(method: Callable) -> None:
 
 
 def build_output_getter(method: Callable, *, validate: bool = True) -> Callable:
-    """Builds an output getter function for a given method in a graph component.
+    """为组件方法构建输出读取器。
 
-    This function creates a new callable that, when invoked, retrieves the output
-    of the specified method using the get_output_by_method of the method's class.
-    It's used in creating dynamic state models for graph components.
-
-    Args:
-        method (Callable): The method for which to build the output getter.
-        validate (bool, optional): Whether to validate the method before building
-                                   the getter. Defaults to True.
-
-    Returns:
-        Callable: The output getter function. When called, this function returns
-                  the value of the output associated with the original method.
-
-    Raises:
-        ValueError: If the method has no return type annotation or if validation fails.
-
-    Notes:
-        - The getter function returns UNDEFINED if the output has not been set.
-        - When validate is True, the method must belong to a class with a
-          'get_output_by_method' attribute.
-        - This function is typically used internally by create_state_model.
-
-    Example:
-        >>> class ChatComponent:
-        ...     def get_output_by_method(self, method):
-        ...         return type('Output', (), {'value': "Hello, World!"})()
-        ...     def get_message(self) -> str:
-        ...         pass
-        >>> component = ChatComponent()
-        >>> getter = build_output_getter(component.get_message)
-        >>> print(getter(None))  # This will print "Hello, World!"
+    契约：方法必须包含返回类型注解；当 `validate=True` 时会校验方法归属。
+    副作用：无。
+    失败语义：缺少返回类型注解或校验失败抛 `ValueError`。
     """
 
     def output_getter(_):
@@ -89,41 +63,11 @@ def build_output_getter(method: Callable, *, validate: bool = True) -> Callable:
 
 
 def build_output_setter(method: Callable, *, validate: bool = True) -> Callable:
-    """Build an output setter function for a given method in a graph component.
+    """为组件方法构建输出写入器。
 
-    This function creates a new callable that, when invoked, sets the output
-    of the specified method using the get_output_by_method of the method's class.
-    It's used in creating dynamic state models for graph components, allowing
-    for the modification of component states.
-
-    Args:
-        method (Callable): The method for which the output setter is being built.
-        validate (bool, optional): Flag indicating whether to validate the method
-                                   before building the setter. Defaults to True.
-
-    Returns:
-        Callable: The output setter function. When called with a value, this function
-                  sets the output associated with the original method to that value.
-
-    Raises:
-        ValueError: If validation fails when validate is True.
-
-    Notes:
-        - When validate is True, the method must belong to a class with a
-          'get_output_by_method' attribute.
-        - This function is typically used internally by create_state_model.
-        - The setter allows for dynamic updating of component states in a graph.
-
-    Example:
-        >>> class ChatComponent:
-        ...     def get_output_by_method(self, method):
-        ...         return type('Output', (), {'value': None})()
-        ...     def set_message(self):
-        ...         pass
-        >>> component = ChatComponent()
-        >>> setter = build_output_setter(component.set_message)
-        >>> setter(component, "New message")
-        >>> print(component.get_output_by_method(component.set_message).value)  # Prints "New message"
+    契约：当 `validate=True` 时方法必须满足 `__validate_method` 约束。
+    副作用：写入对应输出对象的 `value`。
+    失败语义：校验失败抛 `ValueError`。
     """
 
     def output_setter(self, value) -> None:  # noqa: ARG001
@@ -137,95 +81,40 @@ def build_output_setter(method: Callable, *, validate: bool = True) -> Callable:
 
 
 def create_state_model(model_name: str = "State", *, validate: bool = True, **kwargs) -> type:
-    """Create a dynamic Pydantic state model based on the provided keyword arguments.
+    """创建动态 Pydantic 状态模型。
 
-    This function generates a Pydantic model class with fields corresponding to the
-    provided keyword arguments. It can handle various types of field definitions,
-    including callable methods (which are converted to properties), FieldInfo objects,
-    and type-default value tuples.
-
-    Args:
-        model_name (str, optional): The name of the model. Defaults to "State".
-        validate (bool, optional): Whether to validate the methods when converting
-                                   them to properties. Defaults to True.
-        **kwargs: Keyword arguments representing the fields of the model. Each argument
-                  can be a callable method, a FieldInfo object, or a tuple of (type, default).
-
-    Returns:
-        type: The dynamically created Pydantic state model class.
-
-    Raises:
-        ValueError: If the provided field value is invalid or cannot be processed.
-
-    Examples:
-        >>> from lfx.components.io import ChatInput
-        >>> from lfx.components.io.ChatOutput import ChatOutput
-        >>> from pydantic import Field
-        >>>
-        >>> chat_input = ChatInput()
-        >>> chat_output = ChatOutput()
-        >>>
-        >>> # Create a model with a method from a component
-        >>> StateModel = create_state_model(method_one=chat_input.message_response)
-        >>> state = StateModel()
-        >>> assert state.method_one is UNDEFINED
-        >>> chat_input.set_output_value("message", "test")
-        >>> assert state.method_one == "test"
-        >>>
-        >>> # Create a model with multiple components and a Pydantic Field
-        >>> NewStateModel = create_state_model(
-        ...     model_name="NewStateModel",
-        ...     first_method=chat_input.message_response,
-        ...     second_method=chat_output.message_response,
-        ...     my_attribute=Field(None)
-        ... )
-        >>> new_state = NewStateModel()
-        >>> new_state.first_method = "test"
-        >>> new_state.my_attribute = 123
-        >>> assert new_state.first_method == "test"
-        >>> assert new_state.my_attribute == 123
-        >>>
-        >>> # Create a model with tuple-based field definitions
-        >>> TupleStateModel = create_state_model(field_one=(str, "default"), field_two=(int, 123))
-        >>> tuple_state = TupleStateModel()
-        >>> assert tuple_state.field_one == "default"
-        >>> assert tuple_state.field_two == 123
-
-    Notes:
-        - The function handles empty keyword arguments gracefully.
-        - For tuple-based field definitions, the first element must be a valid Python type.
-        - Unsupported value types in keyword arguments will raise a ValueError.
-        - Callable methods must have proper return type annotations and belong to a class
-          with a 'get_output_by_method' attribute when validate is True.
+    契约：`kwargs` 可包含组件方法、`FieldInfo` 或 `(type, default)`；返回可实例化的模型类。
+    副作用：无（仅构造类）。
+    关键路径（三步）：1) 解析字段定义 2) 生成 computed fields 基类 3) 创建最终模型。
+    失败语义：字段定义非法抛 `ValueError`/`TypeError`；方法缺少返回注解抛 `ValueError`。
+    决策：通过 computed field + 基类组合构建可读写的状态字段。
+    问题：需要把组件输出映射为可写属性且兼容 Pydantic 模型。
+    方案：将方法包装为 getter/setter，并用 `computed_field` 注入基类。
+    代价：动态类结构更复杂，调试成本增加。
+    重评：当 Pydantic 提供更直接的可写 computed field 支持时重构。
     """
     fields = {}
     computed_fields_dict = {}
 
     for name, value in kwargs.items():
-        # Extract the return type from the method's type annotations
         if callable(value):
-            # Define the field with the return type
             try:
                 __validate_method(value)
                 getter = build_output_getter(value, validate=validate)
                 setter = build_output_setter(value, validate=validate)
                 property_method = property(getter, setter)
             except ValueError as e:
-                # If the method is not valid,assume it is already a getter
+                # 注意：未通过组件方法校验时，允许将其视为已提供的 getter。
                 if ("get_output_by_method" not in str(e) and "__self__" not in str(e)) or validate:
                     raise
                 property_method = value
-            # Store computed fields separately to add them to the base class
+            # 实现：computed field 先挂到基类，避免 Pydantic 配置冲突。
             computed_fields_dict[name] = computed_field(property_method)
         elif isinstance(value, FieldInfo):
             field_tuple = (value.annotation or Any, value)
             fields[name] = field_tuple
         elif isinstance(value, tuple) and len(value) == 2:  # noqa: PLR2004
-            # Fields are defined by one of the following tuple forms:
-
-            # (<type>, <default value>)
-            # (<type>, Field(...))
-            # typing.Annotated[<type>, Field(...)]
+            # 注意：tuple 字段仅支持 (<type>, <default>) 或 `typing.Annotated` 形态。
             if not isinstance(value[0], type):
                 msg = f"Invalid type for field {name}: {type(value[0])}"
                 raise TypeError(msg)
@@ -234,17 +123,13 @@ def create_state_model(model_name: str = "State", *, validate: bool = True, **kw
             msg = f"Invalid value type {type(value)} for field {name}"
             raise ValueError(msg)
 
-    # Create the model dynamically
     config_dict = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
-    # If we have computed fields, create a base class with them first
     if computed_fields_dict:
-        # Create a base class with computed fields
+        # 实现：computed field 需先落到基类，再由最终模型继承。
         base_class_attrs = computed_fields_dict.copy()
         base_class_attrs["model_config"] = config_dict
         base_state_model = type(f"{model_name}Base", (BaseModel,), base_class_attrs)
 
-        # Then create the final model with the base class
         return create_model(model_name, __base__=base_state_model, __config__=config_dict, **fields)
-    # No computed fields, just create the model directly
     return create_model(model_name, __config__=config_dict, **fields)

@@ -1,3 +1,5 @@
+"""表格 schema 与校验枚举。"""
+
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +19,7 @@ VALID_TYPES = [
 
 
 class FormatterType(str, Enum):
+    """字段格式化类型。"""
     date = "date"
     text = "text"
     number = "number"
@@ -25,12 +28,14 @@ class FormatterType(str, Enum):
 
 
 class EditMode(str, Enum):
+    """字段编辑模式。"""
     MODAL = "modal"
     POPOVER = "popover"
     INLINE = "inline"
 
 
 class Column(BaseModel):
+    """表格列定义。"""
     model_config = ConfigDict(populate_by_name=True)
     name: str
     display_name: str = Field(default="")
@@ -94,28 +99,29 @@ class Column(BaseModel):
 
 
 class TableSchema(BaseModel):
+    """表格列集合。"""
     columns: list[Column]
 
 
 class FieldValidatorType(str, Enum):
-    """Enum for field validation types."""
+    """字段校验类型枚举。"""
 
-    NO_SPACES = "no_spaces"  # Prevents spaces in input
-    LOWERCASE = "lowercase"  # Forces lowercase
-    UPPERCASE = "uppercase"  # Forces uppercase
-    EMAIL = "email"  # Validates email format
-    URL = "url"  # Validates URL format
-    ALPHANUMERIC = "alphanumeric"  # Only letters and numbers
-    NUMERIC = "numeric"  # Only numbers
-    ALPHA = "alpha"  # Only letters
-    PHONE = "phone"  # Phone number format
-    SLUG = "slug"  # URL slug format (lowercase, hyphens)
-    USERNAME = "username"  # Alphanumeric with underscores
-    PASSWORD = "password"  # Minimum security requirements
+    NO_SPACES = "no_spaces"  # 禁止空格
+    LOWERCASE = "lowercase"  # 强制小写
+    UPPERCASE = "uppercase"  # 强制大写
+    EMAIL = "email"  # 邮箱格式
+    URL = "url"  # URL 格式
+    ALPHANUMERIC = "alphanumeric"  # 仅字母与数字
+    NUMERIC = "numeric"  # 仅数字
+    ALPHA = "alpha"  # 仅字母
+    PHONE = "phone"  # 电话格式
+    SLUG = "slug"  # URL slug（小写+连字符）
+    USERNAME = "username"  # 字母数字+下划线
+    PASSWORD = "password"  # 最低安全要求
 
 
 class FieldParserType(str, Enum):
-    """Enum for field parser types."""
+    """字段解析类型枚举。"""
 
     SNAKE_CASE = "snake_case"
     CAMEL_CASE = "camel_case"
@@ -129,6 +135,7 @@ class FieldParserType(str, Enum):
 
 
 class TableOptions(BaseModel):
+    """表格行为与校验选项。"""
     block_add: bool = Field(default=False)
     block_delete: bool = Field(default=False)
     block_edit: bool = Field(default=False)

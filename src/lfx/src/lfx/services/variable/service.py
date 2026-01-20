@@ -1,4 +1,14 @@
-"""Minimal variable service for lfx package with in-memory storage and environment fallback."""
+"""
+模块名称：Variable 服务（轻量实现）
+
+本模块提供变量服务的最小实现，支持内存存储与环境变量回退。
+主要功能：
+- 设置/获取/删除变量（内存）；
+- 读取时回退到环境变量。
+
+设计背景：LFX 独立运行场景无需数据库，仅需轻量变量支持。
+注意事项：变量不会持久化，进程重启即丢失。
+"""
 
 import os
 
@@ -16,68 +26,46 @@ class VariableService(Service):
     name = "variable_service"
 
     def __init__(self) -> None:
-        """Initialize the variable service."""
+        """初始化变量服务
+
+        契约：创建内存字典并标记服务就绪。
+        """
         super().__init__()
         self._variables: dict[str, str] = {}
         self.set_ready()
         logger.debug("Variable service initialized (env vars only)")
 
     def get_variable(self, name: str, **kwargs) -> str | None:  # noqa: ARG002
-        """Get a variable value.
+        """获取变量值
 
-        First checks in-memory cache, then environment variables.
-
-        Args:
-            name: Variable name
-            **kwargs: Additional arguments (ignored in minimal implementation)
-
-        Returns:
-            Variable value or None if not found
+        契约：优先返回内存值，未命中回退环境变量。
         """
-        # Check in-memory first
+        # 注意：优先读内存缓存。
         if name in self._variables:
             return self._variables[name]
 
-        # Fall back to environment variable
+        # 注意：未命中时回退环境变量。
         value = os.getenv(name)
         if value:
             logger.debug(f"Variable '{name}' loaded from environment")
         return value
 
     def set_variable(self, name: str, value: str, **kwargs) -> None:  # noqa: ARG002
-        """Set a variable value (in-memory only).
-
-        Args:
-            name: Variable name
-            value: Variable value
-            **kwargs: Additional arguments (ignored in minimal implementation)
-        """
+        """设置变量值（仅内存）。"""
         self._variables[name] = value
         logger.debug(f"Variable '{name}' set (in-memory only)")
 
     def delete_variable(self, name: str, **kwargs) -> None:  # noqa: ARG002
-        """Delete a variable (from in-memory cache only).
-
-        Args:
-            name: Variable name
-            **kwargs: Additional arguments (ignored in minimal implementation)
-        """
+        """删除变量（仅内存）。"""
         if name in self._variables:
             del self._variables[name]
             logger.debug(f"Variable '{name}' deleted (from in-memory cache)")
 
     def list_variables(self, **kwargs) -> list[str]:  # noqa: ARG002
-        """List all variables (in-memory only).
-
-        Args:
-            **kwargs: Additional arguments (ignored in minimal implementation)
-
-        Returns:
-            List of variable names
-        """
+        """列出全部变量名（仅内存）。"""
         return list(self._variables.keys())
 
     async def teardown(self) -> None:
-        """Teardown the variable service."""
+        """释放变量服务资源。"""
         self._variables.clear()
         logger.debug("Variable service teardown")

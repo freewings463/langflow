@@ -1,3 +1,19 @@
+"""
+模块名称：批量 `LLM` 运行组件
+
+本模块提供对 `DataFrame` 按行调用模型的批处理能力，适用于批量标注、清洗与抽取。主要功能包括：
+- 按列名或整行 `TOML` 格式生成输入
+- 异步批量调用模型并保持输入顺序
+- 可选写入元数据与失败行占位输出
+
+关键组件：
+- `BatchRunComponent.run_batch`：核心批处理与容错
+- `_format_row_as_toml`/`_add_metadata`：输入与输出整形
+
+设计背景：单条推理成本高且缺少批量可观测性，需要统一批处理入口。
+注意事项：`api_key` 为空时除 `Ollama` 外将直接抛错。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
@@ -19,6 +35,15 @@ if TYPE_CHECKING:
 
 
 class BatchRunComponent(Component):
+    """批量执行 `LLM` 的组件入口。
+
+    契约：输入 `df` 与 `model`，输出包含 `output_column_name` 的新 `DataFrame`。
+    决策：使用 `abatch` 批量调用并按索引排序恢复顺序。
+    问题：逐条调用吞吐低且难以保证批量顺序一致。
+    方案：构造对话列表后统一 `abatch`，再按索引排序。
+    代价：对话列表一次性常驻内存，行数过大时占用升高。
+    重评：当单批行数 > 5000 或内存告警频发时拆分批次。
+    """
     display_name = "Batch Run"
     description = "Runs an LLM on each row of a DataFrame column. If no column is specified, all columns are used."
     documentation: str = "https://docs.langflow.org/batch-run"
@@ -89,7 +114,11 @@ class BatchRunComponent(Component):
     ]
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
-        """Dynamically update build config with user-filtered model options."""
+        """根据用户筛选刷新模型选项缓存。
+
+        契约：输入当前配置与字段变化，返回更新后的构建配置。
+        失败语义：由上游配置处理函数抛出异常。
+        """
         return update_model_options_in_build_config(
             component=self,
             build_config=build_config,
@@ -100,14 +129,21 @@ class BatchRunComponent(Component):
         )
 
     def _format_row_as_toml(self, row: dict[str, Any]) -> str:
-        """Convert a dictionary (row) into a TOML-formatted string."""
+        """将行数据转为 `TOML` 文本。
+
+        契约：所有值会被强制转为字符串并包在 `value` 字段下。
+        注意：该格式用于稳定提示上下文，不保留原始类型。
+        """
         formatted_dict = {str(col): {"value": str(val)} for col, val in row.items()}
         return toml.dumps(formatted_dict)
 
     def _create_base_row(
         self, original_row: dict[str, Any], model_response: str = "", batch_index: int = -1
     ) -> dict[str, Any]:
-        """Create a base row with original columns and additional metadata."""
+        """构建包含模型结果与索引的输出行。
+
+        契约：保留原列，追加 `output_column_name` 与 `batch_index`。
+        """
         row = original_row.copy()
         row[self.output_column_name] = model_response
         row["batch_index"] = batch_index
@@ -116,7 +152,11 @@ class BatchRunComponent(Component):
     def _add_metadata(
         self, row: dict[str, Any], *, success: bool = True, system_msg: str = "", error: str | None = None
     ) -> None:
-        """Add metadata to a row if enabled."""
+        """按需为输出行追加元数据。
+
+        契约：仅当 `enable_metadata=True` 时写入 `metadata` 字段。
+        失败语义：失败分支仅记录 `error` 与 `processing_status`。
+        """
         if not self.enable_metadata:
             return
 
@@ -134,16 +174,26 @@ class BatchRunComponent(Component):
             }
 
     async def run_batch(self) -> DataFrame:
-        """Process each row in df[column_name] with the language model asynchronously."""
-        # Check if model is already an instance (for testing) or needs to be instantiated
+        """批量调用模型并返回结构化结果。
+
+        契约：输入 `df` 与可选 `column_name`，输出带 `batch_index` 的 `DataFrame`。
+        关键路径（三步）：
+        1) 校验输入与模型配置
+        2) 生成对话列表并执行 `abatch`
+        3) 组装结果与可选元数据
+        异常流：`TypeError`(非 `DataFrame`)、`ValueError`(列缺失或缺少 `api_key`)。
+        性能瓶颈：大批量 `abatch` 与 `TOML` 序列化。
+        排障入口：日志关键字 `Processing`/`Batch processing`/`Data processing error`。
+        """
+        # 注意：测试场景可直接传入模型实例，否则按配置构建。
         if isinstance(self.model, list):
-            # Extract model configuration
+            # 实现：从配置中解析模型名称/提供方/元数据。
             model_selection = self.model[0]
             model_name = model_selection.get("name")
             provider = model_selection.get("provider")
             metadata = model_selection.get("metadata", {})
 
-            # Get model class and parameters from metadata
+            # 注意：模型类来自元数据映射，缺失时直接失败。
             model_class = get_model_classes().get(metadata.get("model_class"))
             if model_class is None:
                 msg = f"No model class defined for {model_name}"
@@ -152,7 +202,7 @@ class BatchRunComponent(Component):
             api_key_param = metadata.get("api_key_param", "api_key")
             model_name_param = metadata.get("model_name_param", "model")
 
-            # Get API key from global variables
+            # 注意：优先读取全局配置的 `api_key`。
             from lfx.base.models.unified_models import get_api_key_for_provider
 
             api_key = get_api_key_for_provider(self.user_id, provider, self.api_key)
@@ -161,21 +211,21 @@ class BatchRunComponent(Component):
                 msg = f"{provider} API key is required. Please configure it globally."
                 raise ValueError(msg)
 
-            # Instantiate the model
+            # 实现：按模型参数实例化。
             kwargs = {
                 model_name_param: model_name,
                 api_key_param: api_key,
             }
             model: Runnable = model_class(**kwargs)
         else:
-            # Model is already an instance (typically in tests)
+            # 注意：测试或上游已构造模型实例，直接复用。
             model = self.model
 
         system_msg = self.system_message or ""
         df: DataFrame = self.df
         col_name = self.column_name or ""
 
-        # Validate inputs first
+        # 注意：先校验输入类型与列名，避免隐式失败。
         if not isinstance(df, DataFrame):
             msg = f"Expected DataFrame input, got {type(df)}"
             raise TypeError(msg)
@@ -185,7 +235,7 @@ class BatchRunComponent(Component):
             raise ValueError(msg)
 
         try:
-            # Determine text input for each row
+            # 实现：根据列名或整行 `TOML` 生成文本输入。
             if col_name:
                 user_texts = df[col_name].astype(str).tolist()
             else:
@@ -196,7 +246,7 @@ class BatchRunComponent(Component):
             total_rows = len(user_texts)
             await logger.ainfo(f"Processing {total_rows} rows with batch run")
 
-            # Prepare the batch of conversations
+            # 实现：构造对话批次，必要时附加 `system` 指令。
             conversations = [
                 [{"role": "system", "content": system_msg}, {"role": "user", "content": text}]
                 if system_msg
@@ -204,9 +254,7 @@ class BatchRunComponent(Component):
                 for text in user_texts
             ]
 
-            # Configure the model with project info and callbacks
-            # Some models (e.g., ChatWatsonx) may have serialization issues with with_config()
-            # due to SecretStr or other non-serializable attributes
+            # 注意：部分模型在 `with_config` 中会因 `SecretStr` 等不可序列化字段失败。
             try:
                 model = model.with_config(
                     {
@@ -216,12 +264,12 @@ class BatchRunComponent(Component):
                     }
                 )
             except (TypeError, ValueError, AttributeError) as e:
-                # Log warning and continue without configuration
+                # 排障：记录降级信息，继续无配置执行。
                 await logger.awarning(
                     f"Could not configure model with callbacks and project info: {e!s}. "
                     "Proceeding with batch processing without configuration."
                 )
-            # Process batches and track progress
+            # 实现：批量执行并记录索引，后续按序恢复输出。
             responses_with_idx = list(
                 zip(
                     range(len(conversations)),
@@ -230,10 +278,10 @@ class BatchRunComponent(Component):
                 )
             )
 
-            # Sort by index to maintain order
+            # 注意：模型返回顺序不保证，需按索引稳定排序。
             responses_with_idx.sort(key=lambda x: x[0])
 
-            # Build the final data with enhanced metadata
+            # 实现：组装结果行并追加元数据。
             rows: list[dict[str, Any]] = []
             for idx, (original_row, response) in enumerate(
                 zip(df.to_dict(orient="records"), responses_with_idx, strict=False)
@@ -245,7 +293,7 @@ class BatchRunComponent(Component):
                 self._add_metadata(row, success=True, system_msg=system_msg)
                 rows.append(row)
 
-                # Log progress
+                # 排障：按 10% 进度打点，便于长批次观测。
                 if (idx + 1) % max(1, total_rows // 10) == 0:
                     await logger.ainfo(f"Processed {idx + 1}/{total_rows} rows")
 
@@ -253,7 +301,7 @@ class BatchRunComponent(Component):
             return DataFrame(rows)
 
         except (KeyError, AttributeError) as e:
-            # Handle data structure and attribute access errors
+            # 排障：结构异常时返回失败占位行。
             await logger.aerror(f"Data processing error: {e!s}")
             error_row = self._create_base_row(dict.fromkeys(df.columns, ""), model_response="", batch_index=-1)
             self._add_metadata(error_row, success=False, error=str(e))

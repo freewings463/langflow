@@ -1,3 +1,15 @@
+"""
+模块名称：组件商店接口
+
+本模块提供组件商店的鉴权、发布、检索与点赞等能力，服务于组件市场功能。
+主要功能：
+- 解密并校验用户 Store API Key
+- 组件上传、更新、下载与搜索
+- 标签与用户点赞列表
+设计背景：将组件生态与主应用解耦，统一鉴权入口。
+注意事项：未配置 API Key 时返回 400；异常统一转为 4xx/5xx。
+"""
+
 from typing import Annotated
 from uuid import UUID
 
@@ -21,6 +33,13 @@ router = APIRouter(prefix="/store", tags=["Components Store"])
 
 
 def get_user_store_api_key(user: CurrentActiveUser):
+    """获取并解密用户的 Store API Key。
+
+    契约：
+    - 输入：`user.store_api_key`
+    - 输出：明文 API Key
+    - 失败语义：缺失返回 400；解密失败返回 500
+    """
     if not user.store_api_key:
         raise HTTPException(status_code=400, detail="You must have a store API key set.")
     try:
@@ -30,6 +49,13 @@ def get_user_store_api_key(user: CurrentActiveUser):
 
 
 def get_optional_user_store_api_key(user: CurrentActiveUser):
+    """可选解密 Store API Key。
+
+    契约：
+    - 输入：`user.store_api_key`（可为空）
+    - 输出：明文 API Key 或 `None`
+    - 失败语义：解密失败返回原始值并记录日志
+    """
     if not user.store_api_key:
         return None
     try:
@@ -41,6 +67,7 @@ def get_optional_user_store_api_key(user: CurrentActiveUser):
 
 @router.get("/check/")
 async def check_if_store_is_enabled():
+    """检查组件商店是否启用。"""
     return {
         "enabled": get_settings_service().settings.store,
     }
@@ -50,6 +77,7 @@ async def check_if_store_is_enabled():
 async def check_if_store_has_api_key(
     api_key: Annotated[str | None, Depends(get_optional_user_store_api_key)],
 ):
+    """校验当前用户是否配置了 Store API Key。"""
     if api_key is None:
         return {"has_api_key": False, "is_valid": False}
 
@@ -66,6 +94,10 @@ async def share_component(
     component: StoreComponentCreate,
     store_api_key: Annotated[str, Depends(get_user_store_api_key)],
 ) -> CreateComponentResponse:
+    """发布组件到商店。
+
+    失败语义：版本校验或上传失败返回 400。
+    """
     try:
         await check_langflow_version(component)
         return await get_store_service().upload(store_api_key, component)
@@ -79,6 +111,7 @@ async def update_shared_component(
     component: StoreComponentCreate,
     store_api_key: Annotated[str, Depends(get_user_store_api_key)],
 ) -> CreateComponentResponse:
+    """更新已发布组件。"""
     try:
         await check_langflow_version(component)
         return await get_store_service().update(store_api_key, component_id, component)
@@ -102,6 +135,7 @@ async def get_components(
     limit: int = 10,
     store_api_key: Annotated[str | None, Depends(get_optional_user_store_api_key)],
 ) -> ListComponentResponseModel:
+    """查询组件列表与筛选条件。"""
     try:
         return await get_store_service().get_list_component_response_model(
             component_id=component_id,
@@ -128,6 +162,7 @@ async def download_component(
     component_id: UUID,
     store_api_key: Annotated[str, Depends(get_user_store_api_key)],
 ) -> DownloadComponentResponse:
+    """下载组件详情与内容。"""
     try:
         component = await get_store_service().download(store_api_key, component_id)
     except CustomError as exc:
@@ -143,6 +178,7 @@ async def download_component(
 
 @router.get("/tags", response_model=list[TagResponse])
 async def get_tags():
+    """获取商店标签列表。"""
     try:
         return await get_store_service().get_tags()
     except CustomError as exc:
@@ -155,6 +191,7 @@ async def get_tags():
 async def get_list_of_components_liked_by_user(
     store_api_key: Annotated[str, Depends(get_user_store_api_key)],
 ):
+    """获取当前用户点赞的组件列表。"""
     try:
         return await get_store_service().get_user_likes(store_api_key)
     except CustomError as exc:
@@ -168,6 +205,7 @@ async def like_component(
     component_id: UUID,
     store_api_key: Annotated[str, Depends(get_user_store_api_key)],
 ) -> UsersLikesResponse:
+    """点赞或取消点赞组件并返回统计。"""
     try:
         store_service = get_store_service()
         result = await store_service.like_component(store_api_key, str(component_id))

@@ -1,3 +1,16 @@
+"""
+模块名称：自定义组件代码校验与动态构造
+
+本模块负责校验自定义组件代码、动态执行函数与类构造，并处理必要的导入与上下文准备。
+主要功能：
+- 语法解析与导入校验；
+- 动态执行函数/类并构建可调用对象；
+- 兼容 Langflow/lfx 命名空间差异。
+
+设计背景：自定义组件需在运行时加载，必须在安全边界内完成解析与构造。
+注意事项：动态 exec 存在风险，需确保代码来源可信并经过上层校验。
+"""
+
 import ast
 import contextlib
 import importlib
@@ -20,6 +33,10 @@ with contextlib.suppress(ImportError):
 
 
 def add_type_ignores() -> None:
+    """为低版本 Python 补充 TypeIgnore AST 节点。
+
+    契约：若 ast.TypeIgnore 不存在则注入占位类型。
+    """
     if not hasattr(ast, "TypeIgnore"):
 
         class TypeIgnore(ast.AST):
@@ -29,10 +46,16 @@ def add_type_ignores() -> None:
 
 
 def validate_code(code):
-    # Initialize the errors dictionary
+    """校验代码的导入与函数可执行性
+
+    契约：返回包含 import 与 function 错误列表的字典。
+    关键路径：1) AST 解析 2) 校验 import 可用性 3) 在 Langflow 上下文中执行函数体。
+    异常流：解析失败返回错误信息，不抛异常。
+    """
+    # 注意：errors 结构用于前端展示。
     errors = {"imports": {"errors": []}, "function": {"errors": []}}
 
-    # Parse the code string into an abstract syntax tree (AST)
+    # 实现：解析 AST 以校验语法与导入。
     try:
         tree = ast.parse(code)
     except Exception as e:  # noqa: BLE001
@@ -43,11 +66,11 @@ def validate_code(code):
         errors["function"]["errors"].append(str(e))
         return errors
 
-    # Add a dummy type_ignores field to the AST
+    # 注意：补齐 type_ignores 以兼容不同版本 AST。
     add_type_ignores()
     tree.type_ignores = []
 
-    # Evaluate the import statements
+    # 实现：校验 import 模块是否可导入。
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -56,33 +79,41 @@ def validate_code(code):
                 except ModuleNotFoundError as e:
                     errors["imports"]["errors"].append(str(e))
 
-    # Evaluate the function definition with langflow context
+    # 实现：在 Langflow 常用上下文中执行函数以发现运行期错误。
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
             code_obj = compile(ast.Module(body=[node], type_ignores=[]), "<string>", "exec")
             try:
-                # Create execution context with common langflow imports
+                # 实现：创建包含常用类型的执行上下文。
                 exec_globals = _create_langflow_execution_context()
                 exec(code_obj, exec_globals)
             except Exception as e:  # noqa: BLE001
                 logger.debug("Error executing function code", exc_info=True)
                 errors["function"]["errors"].append(str(e))
 
-    # Return the errors dictionary
+    # 注意：返回错误字典供上层处理。
     return errors
 
 
 def _create_langflow_execution_context():
-    """Create execution context with common langflow imports."""
+    """构建带常用类型的执行上下文
+
+    契约：返回包含 Data/Message/DataFrame/Component 等类型的字典。
+    决策：缺失类型时创建空壳类型
+    问题：组件代码可能引用类型但运行环境未安装
+    方案：以空壳类型占位避免 NameError
+    代价：类型行为不可用，仅用于校验
+    重评：当运行时强依赖完整环境时
+    """
     context = {}
 
-    # Import common langflow types that are used in templates
+    # 注意：为模板常用类型提供兜底。
     try:
         from lfx.schema.dataframe import DataFrame
 
         context["DataFrame"] = DataFrame
     except ImportError:
-        # Create a mock DataFrame if import fails
+        # 注意：缺失时使用空壳类型占位。
         context["DataFrame"] = type("DataFrame", (), {})
 
     try:
@@ -117,7 +148,7 @@ def _create_langflow_execution_context():
         context["Output"] = type("Output", (), {})
         context["TabInput"] = type("TabInput", (), {})
 
-    # Add common Python typing imports
+    # 注意：补齐常用 typing 名称。
     try:
         from typing import Any, Optional, Union
 
@@ -133,10 +164,15 @@ def _create_langflow_execution_context():
 
 
 def eval_function(function_string: str):
-    # Create an empty dictionary to serve as a separate namespace
+    """从字符串构造函数对象
+
+    契约：返回函数对象；若未找到函数抛 `ValueError`。
+    关键路径：1) exec 代码 2) 在命名空间中查找函数。
+    """
+    # 注意：使用独立命名空间避免污染全局。
     namespace: dict = {}
 
-    # Execute the code string in the new namespace
+    # 实现：执行代码并从命名空间中提取函数。
     exec(function_string, namespace)
     function_object = next(
         (
@@ -153,6 +189,12 @@ def eval_function(function_string: str):
 
 
 def execute_function(code, function_name, *args, **kwargs):
+    """执行指定函数并返回结果
+
+    契约：解析代码并执行指定函数；找不到模块时报错。
+    关键路径：1) 注入 import 2) 提取函数 AST 3) 编译执行。
+    异常流：缺少模块抛 `ModuleNotFoundError`，执行失败抛 `ValueError`。
+    """
     add_type_ignores()
 
     module = ast.parse(code)
@@ -184,13 +226,18 @@ def execute_function(code, function_name, *args, **kwargs):
         msg = "Function string does not contain a function"
         raise ValueError(msg) from exc
 
-    # Add the function to the exec_globals dictionary
+    # 注意：将函数绑定到 exec_globals 以便调用。
     exec_globals[function_name] = exec_locals[function_name]
 
     return exec_globals[function_name](*args, **kwargs)
 
 
 def create_function(code, function_name):
+    """创建可调用的函数包装器
+
+    契约：返回包装函数；内部负责导入依赖并执行目标函数。
+    关键路径：1) 解析 AST 2) 导入依赖 3) 编译函数 4) 返回包装器。
+    """
     if not hasattr(ast, "TypeIgnore"):
 
         class TypeIgnore(ast.AST):
@@ -227,7 +274,7 @@ def create_function(code, function_name):
         exec(code_obj, exec_globals, exec_locals)
     exec_globals[function_name] = exec_locals[function_name]
 
-    # Return a function that imports necessary modules and calls the target function
+    # 注意：执行时注入必要模块，确保函数依赖可用。
     def wrapped_function(*args, **kwargs):
         for module_name, module in exec_globals.items():
             if isinstance(module, type(importlib)):
@@ -239,21 +286,16 @@ def create_function(code, function_name):
 
 
 def create_class(code, class_name):
-    """Dynamically create a class from a string of code and a specified class name.
+    """动态创建类并返回类对象
 
-    Args:
-        code: String containing the Python code defining the class
-        class_name: Name of the class to be created
-
-    Returns:
-         A function that, when called, returns an instance of the created class
-
-    Raises:
-        ValueError: If the code contains syntax errors or the class definition is invalid
+    契约：返回目标类对象；语法或校验失败抛 `ValueError`。
+    关键路径：1) 解析代码 2) 准备作用域 3) 编译并构造类。
     """
+    # 注意：补齐 TypeIgnore 以兼容低版本 AST。
     if not hasattr(ast, "TypeIgnore"):
         ast.TypeIgnore = create_type_ignore_class()
 
+    # 注意：兼容历史导入路径，统一指向 langflow.custom。
     code = code.replace("from langflow import CustomComponent", "from langflow.custom import CustomComponent")
     code = code.replace(
         "from langflow.interface.custom.custom_component import CustomComponent",
@@ -286,11 +328,7 @@ def create_class(code, class_name):
 
 
 def create_type_ignore_class():
-    """Create a TypeIgnore class for AST module if it doesn't exist.
-
-    Returns:
-        TypeIgnore class
-    """
+    """创建 TypeIgnore AST 节点占位类。"""
 
     class TypeIgnore(ast.AST):
         _fields = ()
@@ -299,7 +337,7 @@ def create_type_ignore_class():
 
 
 def _import_module_with_warnings(module_name):
-    """Import module with appropriate warning suppression."""
+    """导入模块并按需抑制弃用警告。"""
     if "langchain" in module_name:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", LangChainDeprecationWarning)
@@ -309,34 +347,29 @@ def _import_module_with_warnings(module_name):
 
 
 def _handle_module_attributes(imported_module, node, module_name, exec_globals):
-    """Handle importing specific attributes from a module."""
+    """处理 `from x import y` 的属性导入。"""
     for alias in node.names:
         try:
-            # First try getting it as an attribute
+            # 注意：先尝试作为属性获取。
             exec_globals[alias.name] = getattr(imported_module, alias.name)
         except AttributeError:
-            # If that fails, try importing the full module path
+            # 注意：失败则尝试导入完整模块路径。
             full_module_path = f"{module_name}.{alias.name}"
             exec_globals[alias.name] = importlib.import_module(full_module_path)
 
 
 def prepare_global_scope(module):
-    """Prepares the global scope with necessary imports from the provided code module.
+    """准备执行全局作用域
 
-    Args:
-        module: AST parsed module
-
-    Returns:
-        Dictionary representing the global scope with imported modules
-
-    Raises:
-        ModuleNotFoundError: If a module is not found in the code
+    契约：返回包含已导入模块的全局作用域字典。
+    异常流：缺失模块时抛 `ModuleNotFoundError`。
     """
     exec_globals = globals().copy()
     imports = []
     import_froms = []
     definitions = []
 
+    # 实现：收集 import、from import 与定义节点。
     for node in module.body:
         if isinstance(node, ast.Import):
             imports.append(node)
@@ -348,23 +381,23 @@ def prepare_global_scope(module):
     for node in imports:
         for alias in node.names:
             module_name = alias.name
-            # Import the full module path to ensure submodules are loaded
+            # 注意：完整导入路径以确保子模块可用。
             module_obj = importlib.import_module(module_name)
 
-            # Determine the variable name
+            # 注意：确定绑定到的变量名。
             if alias.asname:
-                # For aliased imports like "import yfinance as yf", use the imported module directly
+                # 注意：别名导入直接绑定到别名变量。
                 variable_name = alias.asname
                 exec_globals[variable_name] = module_obj
             else:
-                # For dotted imports like "urllib.request", set the variable to the top-level package
+                # 注意：点号导入绑定到顶层包名。
                 variable_name = module_name.split(".")[0]
                 exec_globals[variable_name] = importlib.import_module(variable_name)
 
     for node in import_froms:
         module_names_to_try = [node.module]
 
-        # If original module starts with langflow, also try lfx equivalent
+        # 注意：兼容 langflow -> lfx 的模块迁移路径。
         if node.module and node.module.startswith("langflow."):
             lfx_module_name = node.module.replace("langflow.", "lfx.", 1)
             module_names_to_try.append(lfx_module_name)
@@ -385,7 +418,7 @@ def prepare_global_scope(module):
                 continue
 
         if not success:
-            # Re-raise the last error to preserve the actual missing module information
+            # 注意：保留真实缺失模块信息以便排障。
             if last_error:
                 raise last_error
             msg = f"Module {node.module} not found. Please install it and try again"
@@ -400,14 +433,9 @@ def prepare_global_scope(module):
 
 
 def extract_class_code(module, class_name):
-    """Extracts the AST node for the specified class from the module.
+    """从 AST 中提取指定类定义
 
-    Args:
-        module: AST parsed module
-        class_name: Name of the class to extract
-
-    Returns:
-        AST node of the specified class
+    契约：返回目标类的 AST 节点。
     """
     class_code = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == class_name)
 
@@ -416,33 +444,20 @@ def extract_class_code(module, class_name):
 
 
 def compile_class_code(class_code):
-    """Compiles the AST node of a class into a code object.
-
-    Args:
-        class_code: AST node of the class
-
-    Returns:
-        Compiled code object of the class
-    """
+    """编译类 AST 为可执行代码对象。"""
     return compile(ast.Module(body=[class_code], type_ignores=[]), "<string>", "exec")
 
 
 def build_class_constructor(compiled_class, exec_globals, class_name):
-    """Builds a constructor function for the dynamically created class.
+    """构建动态类的构造器
 
-    Args:
-        compiled_class: Compiled code object of the class
-        exec_globals: Global scope with necessary imports
-        class_name: Name of the class
-
-    Returns:
-         Constructor function for the class
+    契约：返回可创建目标类的构造函数。
     """
     exec_locals = dict(locals())
     exec(compiled_class, exec_globals, exec_locals)
     exec_globals[class_name] = exec_locals[class_name]
 
-    # Return a function that imports necessary modules and creates an instance of the target class
+    # 注意：执行时将导入模块注入全局，保证类依赖可用。
     def build_custom_class():
         for module_name, module in exec_globals.items():
             if isinstance(module, type(importlib)):
@@ -453,9 +468,9 @@ def build_class_constructor(compiled_class, exec_globals, class_name):
     return build_custom_class()
 
 
-# TODO: Remove this function
+# TODO: 移除此函数
 def get_default_imports(code_string):
-    """Returns a dictionary of default imports for the dynamic class constructor."""
+    """返回动态类构造所需的默认导入。"""
     default_imports = {
         "Optional": Optional,
         "List": list,
@@ -471,19 +486,15 @@ def get_default_imports(code_string):
 
 
 def find_names_in_code(code, names):
-    """Finds if any of the specified names are present in the given code string.
+    """在代码中查找指定名称集合
 
-    Args:
-        code: The source code as a string.
-        names: A list of names to check for in the code.
-
-    Returns:
-        A set of names that are found in the code.
+    契约：返回在代码中出现的名称集合。
     """
     return {name for name in names if name in code}
 
 
 def extract_function_name(code):
+    """提取代码中第一个函数名。"""
     module = ast.parse(code)
     for node in module.body:
         if isinstance(node, ast.FunctionDef):
@@ -493,16 +504,9 @@ def extract_function_name(code):
 
 
 def extract_class_name(code: str) -> str:
-    """Extract the name of the first Component subclass found in the code.
+    """提取代码中第一个 Component 子类名
 
-    Args:
-        code (str): The source code to parse
-
-    Returns:
-        str: Name of the first Component subclass found
-
-    Raises:
-        TypeError: If no Component subclass is found in the code
+    契约：返回类名；找不到时抛 `TypeError`。
     """
     try:
         module = ast.parse(code)
@@ -510,8 +514,7 @@ def extract_class_name(code: str) -> str:
             if not isinstance(node, ast.ClassDef):
                 continue
 
-            # Check bases for Component inheritance
-            # TODO: Build a more robust check for Component inheritance
+            # 注意：仅检查基类名包含 Component/LC，后续可增强判定。
             for base in node.bases:
                 if isinstance(base, ast.Name) and any(pattern in base.id for pattern in ["Component", "LC"]):
                     return node.name

@@ -1,9 +1,32 @@
+"""
+模块名称：JigsawStack VOCR 组件
+
+本模块封装 JigsawStack `vision.vocr`，用于从图像或文档中提取结构化信息。
+主要功能包括：
+- 支持提示词列表与逗号分隔字符串
+- 支持 URL 或 `file_store_key` 输入源
+- 支持文档页码范围选择
+
+关键组件：
+- JigsawStackVOCRComponent：VOCR 组件入口
+
+设计背景：为 Langflow 提供统一的视觉文档理解能力。
+注意事项：`page_range` 仅在同时提供起止页时生效。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import IntInput, MessageTextInput, Output, SecretStrInput, StrInput
 from lfx.schema.data import Data
 
 
 class JigsawStackVOCRComponent(Component):
+    """JigsawStack VOCR 组件封装。
+
+    契约：输入为 `url`/`file_store_key` 与可选 `prompts`/`page_range`；输出 `Data`。
+    副作用：触发外部 VOCR 请求并更新 `self.status`。
+    失败语义：SDK 异常返回失败 `Data`；输入不符合类型约束抛 `ValueError`。
+    """
+
     display_name = "VOCR"
     description = "Extract data from any document type in a consistent structure with fine-tuned \
         vLLMs for the highest accuracy"
@@ -59,6 +82,17 @@ class JigsawStackVOCRComponent(Component):
     ]
 
     def vocr(self) -> Data:
+        """执行 VOCR 并返回结果。
+
+        契约：输入为 `url`/`file_store_key` 与可选 `prompts`/`page_range`，输出 `Data`。
+        副作用：触发外部 VOCR 请求并更新 `self.status`。
+        失败语义：提示词类型非法抛 `ValueError`；SDK 异常返回失败 `Data`。
+
+        关键路径（三步）：
+        1) 规范化 `prompts` 与输入源；
+        2) 组装请求参数（包含可选 `page_range`）；
+        3) 调用 `client.vision.vocr` 并校验 `success`。
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -70,14 +104,14 @@ class JigsawStackVOCRComponent(Component):
         try:
             client = JigsawStack(api_key=self.api_key)
 
-            # build request object
+            # 实现：规范化 `prompts`，支持字符串/列表两种形态
             params = {}
             if self.prompts:
                 if isinstance(self.prompts, list):
                     params["prompt"] = self.prompts
                 elif isinstance(self.prompts, str):
                     if "," in self.prompts:
-                        # Split by comma and strip whitespace
+                        # 实现：逗号分隔的提示词拆分并去除空白
                         params["prompt"] = [p.strip() for p in self.prompts.split(",")]
                     else:
                         params["prompt"] = [self.prompts.strip()]
@@ -92,7 +126,7 @@ class JigsawStackVOCRComponent(Component):
             if self.page_range_start and self.page_range_end:
                 params["page_range"] = [self.page_range_start, self.page_range_end]
 
-            # Call VOCR
+            # 实现：调用 JigsawStack VOCR 接口
             response = client.vision.vocr(params)
 
             if not response.get("success", False):

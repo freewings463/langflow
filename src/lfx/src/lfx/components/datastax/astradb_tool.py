@@ -1,3 +1,18 @@
+"""
+模块名称：AstraDB 集合查询工具组件
+
+本模块提供基于 Astra DB Collection 的查询工具封装，支持向量/语义/元数据过滤。主要功能包括：
+- 生成结构化工具参数与过滤条件
+- 根据配置执行向量搜索或元数据搜索
+
+关键组件：
+- `AstraDBToolComponent`
+
+设计背景：需要以工具形式让 LLM 访问 Astra DB 集合数据。
+使用场景：LLM 调用混合检索或元数据检索。
+注意事项：依赖 `astrapy` 与外部网络，错误会抛 `ValueError`。
+"""
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +29,18 @@ from lfx.schema.table import EditMode
 
 
 class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
+    """AstraDB 集合查询工具组件
+
+    契约：输入工具定义、过滤参数与检索配置；输出 `Tool` 或 `Data` 列表；
+    副作用：调用 Astra DB API 并更新 `self.status`；
+    失败语义：依赖缺失或查询失败抛 `ValueError`。
+    关键路径：1) 构建工具参数模型 2) 生成过滤/向量查询 3) 执行查询并转换结果。
+    决策：保留 v1/v2 参数结构以兼容旧配置。
+    问题：历史配置已被使用，直接迁移成本高。
+    方案：同时支持 `tool_params` 与 `tools_params_v2`。
+    代价：维护两套逻辑增加复杂度。
+    重评：当旧配置弃用且无存量用户时。
+    """
     display_name: str = "Astra DB Tool"
     description: str = "Tool to run hybrid vector and metadata search on DataStax Astra DB Collection"
     documentation: str = "https://docs.langflow.org/bundles-datastax"
@@ -167,17 +194,23 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
     _cached_collection: Collection | None = None
 
     def create_args_schema(self) -> dict[str, BaseModel]:
-        """DEPRECATED: This method is deprecated. Please use create_args_schema_v2 instead.
+        """构建旧版工具入参 Schema（兼容用）
 
-        It is keep only for backward compatibility.
+        契约：返回 `ToolInput` 模型；副作用：记录警告日志；
+        失败语义：参数异常透传。
+        决策：保留旧版以兼容历史配置。
+        问题：已有流程依赖旧版参数定义。
+        方案：保持旧接口但提示迁移。
+        代价：逻辑重复。
+        重评：当旧配置完全淘汰后移除。
         """
         logger.warning("This is the old way to define the tool parameters. Please use the new way.")
         args: dict[str, tuple[Any, Field] | list[str]] = {}
 
         for key in self.tool_params:
-            if key.startswith("!"):  # Mandatory
+            if key.startswith("!"):
                 args[key[1:]] = (str, Field(description=self.tool_params[key]))
-            else:  # Optional
+            else:
                 args[key] = (str | None, Field(description=self.tool_params[key], default=None))
 
         if self.use_search_query:
@@ -190,7 +223,17 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         return {"ToolInput": model}
 
     def create_args_schema_v2(self) -> dict[str, BaseModel]:
-        """Create the tool input schema using the new tool parameters configuration."""
+        """构建新版工具入参 Schema
+
+        契约：基于 `tools_params_v2` 构建 `ToolInput`；副作用：无；
+        失败语义：参数缺失导致的 KeyError 由调用方处理。
+        关键路径：遍历参数 -> 生成字段 -> 构建模型。
+        决策：将 `search_query` 作为可选语义检索输入。
+        问题：语义检索需要单独的查询输入。
+        方案：在 schema 中追加 `search_query`。
+        代价：调用方需知晓该字段。
+        重评：当语义检索配置改为固定输入时。
+        """
         args: dict[str, tuple[Any, Field] | list[str]] = {}
 
         for tool_param in self.tools_params_v2:
@@ -209,10 +252,16 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         return {"ToolInput": model}
 
     def build_tool(self) -> Tool:
-        """Builds an Astra DB Collection tool.
+        """构建 Astra DB 查询工具
 
-        Returns:
-            Tool: The built Astra DB tool.
+        契约：返回 `StructuredTool`；副作用：设置 `self.status`；
+        失败语义：schema 构建异常透传。
+        关键路径：1) 选择参数版本 2) 绑定 `run_model`。
+        决策：当旧参数存在时优先旧版。
+        问题：需要兼容旧参数定义。
+        方案：根据 `tool_params` 是否为空切换。
+        代价：行为不一致导致维护成本上升。
+        重评：当旧参数弃用后统一为 v2。
         """
         schema_dict = self.create_args_schema() if len(self.tool_params.keys()) > 0 else self.create_args_schema_v2()
 
@@ -228,17 +277,25 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         return tool
 
     def projection_args(self, input_str: str) -> dict | None:
-        """Build the projection arguments for the Astra DB query."""
+        """构建投影字段参数
+
+        契约：输入字段字符串，输出投影字典或 `None`；
+        副作用：无；失败语义：无。
+        关键路径：拆分字段并生成 include/exclude 映射。
+        决策：强制排除 `$vector` 字段。
+        问题：向量字段对工具结果无用且体积大。
+        方案：在投影中显式排除 `$vector`。
+        代价：无法在结果中直接返回向量。
+        重评：当需要向量输出或做进一步处理时。
+        """
         elements = input_str.split(",")
         result = {}
 
         if elements == ["*"]:
             return None
 
-        # Force the projection to exclude the $vector field as it is not required by the tool
         result["$vector"] = False
 
-        # Fields with ! as prefix should be removed from the projection
         for element in elements:
             if element.startswith("!"):
                 result[element[1:]] = False
@@ -248,37 +305,33 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         return result
 
     def parse_timestamp(self, timestamp_str: str) -> datetime:
-        """Parse a timestamp string into Astra DB REST API format.
+        """解析时间字符串为 UTC `datetime`
 
-        Args:
-            timestamp_str (str): Input timestamp string
-
-        Returns:
-            datetime: Datetime object
-
-        Raises:
-            ValueError: If the timestamp cannot be parsed
+        契约：输入时间字符串，输出 UTC `datetime`；副作用：无；
+        失败语义：无法解析时抛 `ValueError`。
+        关键路径：遍历格式 -> 解析 -> 转为 UTC。
+        决策：支持多种常见格式而非只支持 ISO8601。
+        问题：上游输入格式不固定。
+        方案：按格式列表尝试解析。
+        代价：格式未覆盖时仍会失败。
+        重评：当引入更强日期解析库时。
         """
-        # Common datetime formats to try
         formats = [
-            "%Y-%m-%d",  # 2024-03-21
-            "%Y-%m-%dT%H:%M:%S",  # 2024-03-21T15:30:00
-            "%Y-%m-%dT%H:%M:%S%z",  # 2024-03-21T15:30:00+0000
-            "%Y-%m-%d %H:%M:%S",  # 2024-03-21 15:30:00
-            "%d/%m/%Y",  # 21/03/2024
-            "%Y/%m/%d",  # 2024/03/21
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
         ]
 
         for fmt in formats:
             try:
-                # Parse the date string
                 date_obj = datetime.strptime(timestamp_str, fmt).astimezone()
 
-                # If the parsed date has no timezone info, assume UTC
                 if date_obj.tzinfo is None:
                     date_obj = date_obj.replace(tzinfo=timezone.utc)
 
-                # Convert to UTC and format
                 return date_obj.astimezone(timezone.utc)
 
             except ValueError:
@@ -289,18 +342,20 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         raise ValueError(msg)
 
     def build_filter(self, args: dict, filter_settings: list) -> dict:
-        """Build filter dictionary for Astra DB query.
+        """根据参数构建过滤条件
 
-        Args:
-            args: Dictionary of arguments from the tool
-            filter_settings: List of filter settings from tools_params_v2
-        Returns:
-            Dictionary containing the filter conditions
+        契约：输入参数字典与过滤配置，输出过滤条件字典；
+        副作用：无；失败语义：时间字段解析失败抛 `ValueError`。
+        关键路径：1) 合并静态过滤 2) 处理动态参数 3) 生成操作符条件。
+        决策：`search_query` 不进入过滤条件。
+        问题：`search_query` 仅用于向量检索而非元数据过滤。
+        方案：在构建过滤时跳过该字段。
+        代价：无法使用 `search_query` 作为元数据过滤。
+        重评：当需要混合过滤策略时。
         """
         filters = {**self.static_filters}
 
         for key, value in args.items():
-            # Skip search_query as it's handled separately
             if key == "search_query":
                 continue
 
@@ -330,13 +385,21 @@ class AstraDBToolComponent(AstraDBBaseComponent, LCToolComponent):
         return filters
 
     def run_model(self, **args) -> Data | list[Data]:
-        """Run the query to get the data from the Astra DB collection."""
+        """执行查询并返回 `Data` 列表
+
+        契约：输入工具参数，输出 `list[Data]`；副作用：更新 `self.status`；
+        失败语义：查询失败抛 `ValueError`。
+        关键路径（三步）：1) 构建过滤与向量检索条件 2) 调用 `find` 3) 转换结果为 `Data`。
+        决策：当启用 `use_vectorize` 时使用 `$vectorize`。
+        问题：向量生成方式可能由服务端或本地模型提供。
+        方案：根据配置选择 `$vectorize` 或本地 embedding。
+        代价：本地 embedding 需要额外模型依赖。
+        重评：当统一改为服务端向量化时。
+        """
         sort = {}
 
-        # Build filters using the new method
         filters = self.build_filter(args, self.tools_params_v2)
 
-        # Build the vector search on
         if self.use_search_query and args["search_query"] is not None and args["search_query"] != "":
             if self.use_vectorize:
                 sort["$vectorize"] = args["search_query"]

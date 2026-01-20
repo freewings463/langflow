@@ -1,3 +1,18 @@
+"""
+模块名称：顺序任务组件
+
+本模块提供顺序任务的组件封装，用于创建 `SequentialTask` 并与已有任务链拼接。
+主要功能包括：
+- 构建顺序任务并绑定 Agent
+- 追加或合并已有任务链
+
+关键组件：
+- `SequentialTaskComponent`：顺序任务组件入口
+
+设计背景：在顺序执行模式中复用统一的任务构建逻辑。
+注意事项：默认使用 Agent 自身的工具集。
+"""
+
 from lfx.base.agents.crewai.tasks import SequentialTask
 from lfx.custom.custom_component.component import Component
 from lfx.io import BoolInput, HandleInput, MultilineInput, Output
@@ -56,6 +71,16 @@ class SequentialTaskComponent(Component):
     ]
 
     def build_task(self) -> list[SequentialTask]:
+        """构建顺序任务并返回任务链。
+
+        契约：输出 `SequentialTask` 列表，包含新建任务与可选已有任务。
+        关键路径（三步）：
+        1) 构建当前任务并绑定 Agent。
+        2) 合并传入任务链（如有）。
+        3) 返回最终任务列表。
+
+        失败语义：无显式异常，输入约束由上游处理。
+        """
         tasks: list[SequentialTask] = []
         task = SequentialTask(
             description=self.task_description,

@@ -1,3 +1,8 @@
+"""JigsawStack 组件导出入口。
+
+本模块集中导出 JigsawStack 相关的 Langflow 组件，便于统一注册与引用。
+"""
+
 from .ai_scrape import JigsawStackAIScraperComponent
 from .ai_web_search import JigsawStackAIWebSearchComponent
 from .file_read import JigsawStackFileReadComponent

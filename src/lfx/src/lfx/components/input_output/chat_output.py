@@ -1,3 +1,20 @@
+"""
+模块名称：Chat 输出组件
+
+本模块提供在 Playground 展示聊天消息的组件，主要用于将输入数据转换为
+标准 `Message` 并写入历史（可选）。
+主要功能包括：
+- 将 Data/DataFrame/Message/字符串转换为可展示文本
+- 组装 `Message` 并设置来源信息
+- 按需持久化消息历史
+
+关键组件：
+- `ChatOutput`：聊天输出组件
+
+设计背景：统一输出消息格式与来源信息展示。
+注意事项：输入类型不合法会抛 `TypeError` 或 `ValueError`。
+"""
+
 from collections.abc import Generator
 from typing import Any
 
@@ -20,6 +37,12 @@ from lfx.utils.constants import (
 
 
 class ChatOutput(ChatComponent):
+    """Chat 输出组件。
+
+    契约：`message_response()` 返回 `Message`；可选写入消息历史。
+    副作用：可能写入历史并更新 `self.status`。
+    失败语义：输入非法时抛 `ValueError`/`TypeError`。
+    """
     display_name = "Chat Output"
     description = "Display a chat message in the Playground."
     documentation: str = "https://docs.langflow.org/chat-input-and-output"
@@ -94,13 +117,14 @@ class ChatOutput(ChatComponent):
     ]
 
     def _build_source(self, id_: str | None, display_name: str | None, source: str | None) -> Source:
+        """构建消息来源信息结构。"""
         source_dict = {}
         if id_:
             source_dict["id"] = id_
         if display_name:
             source_dict["display_name"] = display_name
         if source:
-            # Handle case where source is a ChatOpenAI object
+            # 注意：处理 ChatOpenAI 等模型对象的来源名称
             if hasattr(source, "model_name"):
                 source_dict["source"] = source.model_name
             elif hasattr(source, "model"):
@@ -110,27 +134,35 @@ class ChatOutput(ChatComponent):
         return Source(**source_dict)
 
     async def message_response(self) -> Message:
-        # First convert the input to string if needed
+        """构建并输出消息对象。
+
+        关键路径（三步）：
+        1) 将输入转换为文本或流式数据
+        2) 组装 `Message` 并设置来源信息
+        3) 按需写入历史并返回
+        异常流：输入非法时由 `_validate_input` 抛出异常。
+        """
+        # 实现：先转换输入为文本
         text = self.convert_to_string()
 
-        # Get source properties
+        # 实现：获取来源信息
         source, _, display_name, source_id = self.get_properties_from_source_component()
 
-        # Create or use existing Message object
+        # 实现：复用或创建 Message
         if isinstance(self.input_value, Message) and not self.is_connected_to_chat_input():
             message = self.input_value
-            # Update message properties
+            # 实现：更新消息内容
             message.text = text
-            # Preserve existing session_id from the incoming message if it exists
+            # 注意：保留传入消息的 session_id
             existing_session_id = message.session_id
         else:
             message = Message(text=text)
             existing_session_id = None
 
-        # Set message properties
+        # 实现：设置消息属性
         message.sender = self.sender
         message.sender_name = self.sender_name
-        # Preserve session_id from incoming message, or use component/graph session_id
+        # 注意：优先保留传入 session_id，否则使用组件/图的 session_id
         message.session_id = (
             self.session_id or existing_session_id or (self.graph.session_id if hasattr(self, "graph") else None) or ""
         )
@@ -138,7 +170,7 @@ class ChatOutput(ChatComponent):
         message.flow_id = self.graph.flow_id if hasattr(self, "graph") else None
         message.properties.source = self._build_source(source_id, display_name, source)
 
-        # Store message if needed
+        # 实现：按需写入历史
         if message.session_id and self.should_store_message:
             stored_message = await self.send_message(message)
             self.message.value = stored_message
@@ -148,16 +180,16 @@ class ChatOutput(ChatComponent):
         return message
 
     def _serialize_data(self, data: Data) -> str:
-        """Serialize Data object to JSON string."""
-        # Convert data.data to JSON-serializable format
+        """将 Data 序列化为 JSON 字符串。"""
+        # 实现：转换为可序列化结构
         serializable_data = jsonable_encoder(data.data)
-        # Serialize with orjson, enabling pretty printing with indentation
+        # 实现：使用 orjson 序列化并缩进
         json_bytes = orjson.dumps(serializable_data, option=orjson.OPT_INDENT_2)
-        # Convert bytes to string and wrap in Markdown code blocks
+        # 实现：包装为 Markdown code block
         return "```json\n" + json_bytes.decode("utf-8") + "\n```"
 
     def _validate_input(self) -> None:
-        """Validate the input data and raise ValueError if invalid."""
+        """校验输入类型并在非法时抛异常。"""
         if self.input_value is None:
             msg = "Input data cannot be None"
             raise ValueError(msg)
@@ -180,7 +212,7 @@ class ChatOutput(ChatComponent):
             raise TypeError(msg)
 
     def convert_to_string(self) -> str | Generator[Any, None, None]:
-        """Convert input data to string with proper error handling."""
+        """将输入转换为字符串或生成器。"""
         self._validate_input()
         if isinstance(self.input_value, list):
             clean_data: bool = getattr(self, "clean_data", False)

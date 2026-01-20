@@ -1,3 +1,16 @@
+"""
+模块名称：image
+
+本模块提供图像处理功能，主要用于将图像文件转换为base64编码或数据URL。
+主要功能包括：
+- 将图像文件转换为base64编码字符串
+- 创建图像的数据URL
+- 为图像内容创建多模态输入字典
+
+设计背景：在Web应用中，经常需要将图像文件转换为可以在前端直接使用的格式
+注意事项：使用lru_cache装饰器缓存函数结果以提高性能
+"""
+
 import base64
 import mimetypes
 from functools import lru_cache
@@ -5,18 +18,19 @@ from pathlib import Path
 
 
 def convert_image_to_base64(image_path: str | Path) -> str:
-    """Convert an image file to a base64 encoded string.
-
-    Args:
-        image_path (str | Path): Path to the image file.
-
-    Returns:
-        str: Base64 encoded string representation of the image.
-
-    Raises:
-        FileNotFoundError: If the image file does not exist.
-        IOError: If there's an error reading the image file.
-        ValueError: If the image path is empty or invalid.
+    """将图像文件转换为base64编码字符串。
+    
+    关键路径（三步）：
+    1) 验证图像路径是否有效（非空、存在、是文件）
+    2) 以二进制模式打开图像文件
+    3) 读取文件内容并进行base64编码
+    
+    异常流：
+    - ValueError：如果图像路径为空或不是文件
+    - FileNotFoundError：如果图像文件不存在
+    - OSError：如果读取文件时出错
+    性能瓶颈：大图像文件的读取和编码
+    排障入口：检查返回的base64字符串是否有效，文件路径是否正确
     """
     if not image_path:
         msg = "Image path cannot be empty"
@@ -41,20 +55,19 @@ def convert_image_to_base64(image_path: str | Path) -> str:
 
 
 def create_data_url(image_path: str | Path, mime_type: str | None = None) -> str:
-    """Create a data URL from an image file.
-
-    Args:
-        image_path (str | Path): Path to the image file.
-        mime_type (Optional[str], optional): MIME type of the image.
-            If None, it will be guessed from the file extension.
-
-    Returns:
-        str: Data URL containing the base64 encoded image.
-
-    Raises:
-        FileNotFoundError: If the image file does not exist.
-        IOError: If there's an error reading the image file.
-        ValueError: If the image path is empty or invalid.
+    """从图像文件创建数据URL。
+    
+    关键路径（三步）：
+    1) 如果未指定MIME类型，则从文件扩展名推断
+    2) 将图像转换为base64编码
+    3) 组合MIME类型和base64数据创建数据URL
+    
+    异常流：
+    - ValueError：如果无法确定MIME类型
+    - FileNotFoundError：如果图像文件不存在
+    - OSError：如果读取文件时出错
+    性能瓶颈：图像文件的读取和编码
+    排障入口：检查返回的数据URL格式是否正确
     """
     if not mime_type:
         mime_type = mimetypes.guess_type(str(image_path))[0]
@@ -72,20 +85,19 @@ def create_data_url(image_path: str | Path, mime_type: str | None = None) -> str
 
 @lru_cache(maxsize=50)
 def create_image_content_dict(image_path: str | Path, mime_type: str | None = None) -> dict:
-    """Create a content dictionary for multimodal inputs from an image file.
-
-    Args:
-        image_path (str | Path): Path to the image file.
-        mime_type (Optional[str], optional): MIME type of the image.
-            If None, it will be guessed from the file extension.
-
-    Returns:
-        dict: Content dictionary with type, source_type, data, and mime_type fields.
-
-    Raises:
-        FileNotFoundError: If the image file does not exist.
-        IOError: If there's an error reading the image file.
-        ValueError: If the image path is empty or invalid.
+    """从图像文件创建多模态输入的内容字典。
+    
+    关键路径（三步）：
+    1) 如果未指定MIME类型，则从文件扩展名推断
+    2) 将图像转换为base64编码
+    3) 创建符合多模态输入格式的字典结构
+    
+    异常流：
+    - ValueError：如果无法确定MIME类型
+    - FileNotFoundError：如果图像文件不存在
+    - OSError：如果读取文件时出错
+    性能瓶颈：图像文件的读取和编码，lru_cache提供缓存优化
+    排障入口：检查返回的字典格式是否符合多模态输入要求
     """
     if not mime_type:
         mime_type = mimetypes.guess_type(str(image_path))[0]

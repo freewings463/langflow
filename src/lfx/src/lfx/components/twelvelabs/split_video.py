@@ -1,3 +1,21 @@
+"""
+模块名称：视频切片组件
+
+本模块使用 FFmpeg 将单个视频切分为固定时长片段，并输出带元数据的 `Data` 列表。
+主要功能包括：
+- 校验视频路径与时长
+- 生成切片文件并回填时间戳元数据
+- 可选保留原视频作为额外输出
+
+关键组件：
+- `SplitVideoComponent`
+- `get_video_duration`
+- `process_video`
+
+设计背景：为 TwelveLabs 视频索引与问答提供可控粒度的视频片段。
+注意事项：Astra 云环境不允许本地文件访问；路径会做安全字符校验。
+"""
+
 import hashlib
 import math
 import subprocess
@@ -19,7 +37,14 @@ disable_component_in_astra_cloud_msg = (
 
 
 class SplitVideoComponent(Component):
-    """A component that splits a video into multiple clips of specified duration using FFmpeg."""
+    """视频切片组件。
+
+    契约：
+    - 输入：单个视频路径与切片时长
+    - 输出：`list[Data]`，每项包含片段文件路径与元数据
+    - 副作用：在本地文件系统生成切片文件与目录
+    - 失败语义：ffprobe/ffmpeg 错误或路径非法时抛异常
+    """
 
     display_name = "Split Video"
     description = "Split a video into multiple clips of specified duration."
@@ -74,9 +99,9 @@ class SplitVideoComponent(Component):
     ]
 
     def get_video_duration(self, video_path: str) -> float:
-        """Get video duration using FFmpeg."""
+        """使用 ffprobe 获取视频时长（秒）。"""
         try:
-            # Validate video path to prevent shell injection
+            # 注意：校验路径字符，规避注入风险
             if not isinstance(video_path, str) or any(c in video_path for c in ";&|`$(){}[]<>*?!#~"):
                 error_msg = "Invalid video path"
                 raise ValueError(error_msg)
@@ -96,7 +121,7 @@ class SplitVideoComponent(Component):
                 capture_output=True,
                 text=True,
                 check=False,
-                shell=False,  # Explicitly set shell=False for security
+                shell=False,  # 注意：明确禁用 shell
             )
             if result.returncode != 0:
                 error_msg = f"FFprobe error: {result.stderr}"
@@ -107,62 +132,76 @@ class SplitVideoComponent(Component):
             raise
 
     def get_output_dir(self, video_path: str) -> str:
-        """Create a unique output directory for clips based on video name and timestamp."""
-        # Get the video filename without extension
+        """生成唯一输出目录（基于文件名+时间戳+哈希）。"""
+        # 注意：以原文件名作为目录前缀，便于排障定位
         path_obj = Path(video_path)
         base_name = path_obj.stem
 
-        # Create a timestamp
+        # 注意：使用 UTC 时间戳，避免本地时区差异
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
-        # Create a unique hash from the video path
+        # 注意：用路径哈希避免同名文件冲突
         path_hash = hashlib.sha256(video_path.encode()).hexdigest()[:8]
 
-        # Create the output directory path
+        # 生成输出目录路径
         output_dir = Path(path_obj.parent) / f"clips_{base_name}_{timestamp}_{path_hash}"
 
-        # Create the directory if it doesn't exist
+        # 若目录不存在则创建
         output_dir.mkdir(parents=True, exist_ok=True)
 
         return str(output_dir)
 
     def process_video(self, video_path: str, clip_duration: int, *, include_original: bool) -> list[Data]:
-        """Process video and split it into clips using FFmpeg."""
+        """执行视频切片并返回 `Data` 列表。
+
+        契约：
+        - 输入：`video_path` 与 `clip_duration`
+        - 输出：切片 `Data` 列表（可包含原视频）
+        - 副作用：生成切片文件与目录
+        - 失败语义：ffprobe/ffmpeg 失败会抛异常
+
+        关键路径（三步）：
+        1) 读取视频时长并计算切片数
+        2) 逐段调用 ffmpeg 输出切片文件
+        3) 组装元数据并返回 `Data`
+
+        异常流：ffprobe/ffmpeg 失败会抛 `RuntimeError` 并写日志。
+        """
         try:
-            # Get video duration
+            # 获取视频时长
             total_duration = self.get_video_duration(video_path)
 
-            # Calculate number of clips (ceiling to include partial clip)
+            # 计算切片数量（向上取整，覆盖末尾短片段）
             num_clips = math.ceil(total_duration / clip_duration)
             self.log(
                 f"Total duration: {total_duration}s, Clip duration: {clip_duration}s, Number of clips: {num_clips}"
             )
 
-            # Create output directory for clips
+            # 创建输出目录
             output_dir = self.get_output_dir(video_path)
 
-            # Get original video info
+            # 读取原视频信息
             path_obj = Path(video_path)
             original_filename = path_obj.name
             original_name = path_obj.stem
 
-            # List to store all video paths (including original if requested)
+            # 结果列表（可包含原视频）
             video_paths: list[Data] = []
 
-            # Add original video if requested
+            # 可选：保留原视频
             if include_original:
                 original_data: dict[str, Any] = {
                     "text": video_path,
                     "metadata": {
                         "source": video_path,
                         "type": "video",
-                        "clip_index": -1,  # -1 indicates original video
-                        "duration": int(total_duration),  # Convert to int
+                        "clip_index": -1,  # 注意：-1 表示原视频
+                        "duration": int(total_duration),
                         "original_video": {
                             "name": original_name,
                             "filename": original_filename,
                             "path": video_path,
-                            "duration": int(total_duration),  # Convert to int
+                            "duration": int(total_duration),
                             "total_clips": int(num_clips),
                             "clip_duration": int(clip_duration),
                         },
@@ -170,33 +209,33 @@ class SplitVideoComponent(Component):
                 }
                 video_paths.append(Data(data=original_data))
 
-            # Split video into clips
-            for i in range(int(num_clips)):  # Convert num_clips to int for range
-                start_time = float(i * clip_duration)  # Convert to float for time calculations
+            # 切分视频
+            for i in range(int(num_clips)):
+                start_time = float(i * clip_duration)
                 end_time = min(float((i + 1) * clip_duration), total_duration)
                 duration = end_time - start_time
 
-                # Handle last clip if it's shorter
-                if i == int(num_clips) - 1 and duration < clip_duration:  # Convert num_clips to int for comparison
+                # 最后一个片段不足时长时的策略分支
+                if i == int(num_clips) - 1 and duration < clip_duration:
                     if self.last_clip_handling == "Truncate":
-                        # Skip if the last clip would be too short
+                        # 丢弃过短片段
                         continue
                     if self.last_clip_handling == "Overlap Previous" and i > 0:
-                        # Start from earlier to make full duration
+                        # 向前回退以补齐时长
                         start_time = total_duration - clip_duration
                         duration = clip_duration
-                    # For "Keep Short", we use the original start_time and duration
+                    # 保持短片策略：保持原始时长
 
-                # Skip if duration is too small (less than 1 second)
+                # 跳过不足 1 秒的片段
                 if duration < 1:
                     continue
 
-                # Generate output path
+                # 生成输出路径
                 output_path = Path(output_dir) / f"clip_{i:03d}.mp4"
                 output_path_str = str(output_path)
 
                 try:
-                    # Use FFmpeg to split the video
+                    # 调用 ffmpeg 生成片段
                     cmd = [
                         "ffmpeg",
                         "-i",
@@ -209,7 +248,7 @@ class SplitVideoComponent(Component):
                         "libx264",
                         "-c:a",
                         "aac",
-                        "-y",  # Overwrite output file if it exists
+                        "-y",  # 覆盖已有文件
                         output_path_str,
                     ]
 
@@ -218,20 +257,20 @@ class SplitVideoComponent(Component):
                         capture_output=True,
                         text=True,
                         check=False,
-                        shell=False,  # Explicitly set shell=False for security
+                        shell=False,  # 注意：明确禁用 shell
                     )
                     if result.returncode != 0:
                         error_msg = f"FFmpeg error: {result.stderr}"
                         raise RuntimeError(error_msg)
 
-                    # Create timestamp string for metadata
+                    # 生成时间戳字符串
                     start_min = int(start_time // 60)
                     start_sec = int(start_time % 60)
                     end_min = int(end_time // 60)
                     end_sec = int(end_time % 60)
                     timestamp_str = f"{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}"
 
-                    # Create Data object for the clip
+                    # 组装片段元数据
                     clip_data: dict[str, Any] = {
                         "text": output_path_str,
                         "metadata": {
@@ -273,12 +312,19 @@ class SplitVideoComponent(Component):
             return video_paths
 
     def process(self) -> list[Data]:
-        """Process the input video and return a list of Data objects containing the clips."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """执行切片流程并返回 `Data` 列表。
+
+        契约：
+        - 输入：`videodata`（单个视频）
+        - 输出：切片 `Data` 列表
+        - 副作用：访问本地文件系统
+        - 失败语义：输入不合法或路径不可用时抛异常
+        """
+        # 注意：Astra 云环境禁止本地文件访问
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
 
         try:
-            # Get the input video path from the previous component
+            # 校验输入仅包含一个视频
             if not hasattr(self, "videodata") or not isinstance(self.videodata, list) or len(self.videodata) != 1:
                 error_msg = "Please provide exactly one video"
                 raise ValueError(error_msg)
@@ -288,12 +334,12 @@ class SplitVideoComponent(Component):
                 error_msg = "Invalid video path"
                 raise ValueError(error_msg)
 
-            # Validate video path to prevent shell injection
+            # 校验路径字符，规避注入风险
             if not isinstance(video_path, str) or any(c in video_path for c in ";&|`$(){}[]<>*?!#~"):
                 error_msg = "Invalid video path contains unsafe characters"
                 raise ValueError(error_msg)
 
-            # Process the video
+            # 执行切片
             return self.process_video(video_path, self.clip_duration, include_original=self.include_original)
 
         except Exception as e:

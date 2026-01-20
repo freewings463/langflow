@@ -1,3 +1,20 @@
+"""
+模块名称：`SearXNG` 搜索工具组件
+
+本模块通过 SearXNG 实例提供搜索能力，并支持动态拉取分类与语言配置。
+主要功能包括：
+- 读取 SearXNG 配置以刷新分类/语言选项
+- 构建搜索工具并执行查询
+- 控制返回结果数量
+
+关键组件：
+- `SearXNGToolComponent.update_build_config`：拉取配置并更新选项
+- `SearXNGToolComponent.build_tool`：构建搜索工具
+
+设计背景：支持自部署搜索引擎并与前端配置联动。
+注意事项：依赖 SearXNG 服务可用性，超时或格式变化会导致失败。
+"""
+
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -15,6 +32,15 @@ from lfx.schema.dotdict import dotdict
 
 
 class SearXNGToolComponent(LCToolComponent):
+    """SearXNG 搜索工具组件。
+
+    契约：输入查询与分类，返回限制数量的结果列表。
+    决策：启动时从 `/config` 拉取分类与语言配置。
+    问题：前端可选项需与服务端配置一致。
+    方案：动态请求配置并刷新选项。
+    代价：初始化依赖外部服务，失败时需降级。
+    重评：当配置稳定或可本地缓存时减少网络请求。
+    """
     search_headers: dict = {}
     display_name = "SearXNG Search"
     description = "A component that searches for tools using SearXNG."
@@ -53,6 +79,14 @@ class SearXNGToolComponent(LCToolComponent):
     ]
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None) -> dotdict:
+        """根据 SearXNG 配置刷新前端可选项。
+
+        关键路径（三步）：
+        1) 请求 `/config` 获取分类与语言
+        2) 清理无效已选项
+        3) 写回前端选项列表
+        异常流：请求失败时写入错误选项并记录状态。
+        """
         if field_name is None:
             return build_config
 
@@ -81,6 +115,13 @@ class SearXNGToolComponent(LCToolComponent):
         return build_config
 
     def build_tool(self) -> Tool:
+        """构建 SearXNG 搜索工具实例。
+
+        关键路径（三步）：
+        1) 定义搜索类并注入配置
+        2) 生成参数 schema
+        3) 构建结构化工具
+        """
         class SearxSearch:
             _url: str = ""
             _categories: list[str] = []
@@ -90,6 +131,7 @@ class SearXNGToolComponent(LCToolComponent):
 
             @staticmethod
             def search(query: str, categories: Sequence[str] = ()) -> list:
+                """执行搜索并返回结果列表。"""
                 if not SearxSearch._categories and not categories:
                     msg = "No categories provided."
                     raise ValueError(msg)

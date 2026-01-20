@@ -1,4 +1,12 @@
-"""Lightweight tracing service for LFX package."""
+"""模块名称：轻量追踪服务实现
+
+本模块提供 LFX 的轻量追踪服务实现，仅记录日志不接入外部平台。
+使用场景：在不依赖外部追踪系统时提供最小可用追踪能力。
+主要功能包括：
+- 运行级追踪开始/结束
+- 组件级追踪上下文
+- 追踪日志与输出写入（日志化）
+"""
 
 # ruff: noqa: ARG002
 from __future__ import annotations
@@ -18,27 +26,17 @@ if TYPE_CHECKING:
 
 
 class TracingService(BaseTracingService):
-    """Minimal tracing service implementation for LFX.
-
-    This is a lightweight implementation that logs trace events
-    but does not integrate with external tracing services. For full
-    tracing functionality (LangSmith, LangFuse, etc.), use the
-    Langflow TracingService.
-    """
+    """轻量追踪服务实现（仅日志）。"""
 
     def __init__(self):
-        """Initialize the tracing service."""
+        """初始化追踪服务。"""
         super().__init__()
         self.deactivated = False
         self.set_ready()
 
     @property
     def name(self) -> str:
-        """Service name identifier.
-
-        Returns:
-            str: The service name.
-        """
+        """返回服务名称标识。"""
         return "tracing_service"
 
     async def start_tracers(
@@ -49,24 +47,11 @@ class TracingService(BaseTracingService):
         session_id: str | None,
         project_name: str | None = None,
     ) -> None:
-        """Start tracers (minimal implementation - just logs).
-
-        Args:
-            run_id: Run identifier
-            run_name: Run name
-            user_id: User identifier
-            session_id: Session identifier
-            project_name: Project name
-        """
+        """启动追踪（轻量实现，仅记录日志）。"""
         logger.debug(f"Trace started: {run_name}")
 
     async def end_tracers(self, outputs: dict, error: Exception | None = None) -> None:
-        """End tracers (minimal implementation - just logs).
-
-        Args:
-            outputs: Output data
-            error: Exception if any
-        """
+        """结束追踪（轻量实现，仅记录日志）。"""
         logger.debug("Trace ended")
 
     @asynccontextmanager
@@ -77,24 +62,12 @@ class TracingService(BaseTracingService):
         inputs: dict[str, Any],
         metadata: dict[str, Any] | None = None,
     ):
-        """Trace a component (minimal implementation).
-
-        Args:
-            component: Component to trace
-            trace_name: Trace name
-            inputs: Input data
-            metadata: Metadata
-        """
+        """组件级追踪上下文（轻量实现）。"""
         logger.debug(f"Tracing component: {trace_name}")
         yield self
 
     def add_log(self, trace_name: str, log: Any) -> None:
-        """Add a log entry (minimal implementation - just logs).
-
-        Args:
-            trace_name: Trace name
-            log: Log data
-        """
+        """写入追踪日志（轻量实现）。"""
         logger.debug(f"Trace log: {trace_name}")
 
     def set_outputs(
@@ -103,32 +76,18 @@ class TracingService(BaseTracingService):
         outputs: dict[str, Any],
         output_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Set outputs (minimal implementation - noop).
-
-        Args:
-            trace_name: Trace name
-            outputs: Output data
-            output_metadata: Output metadata
-        """
+        """设置追踪输出（轻量实现）。"""
         logger.debug(f"Trace outputs set: {trace_name}")
 
     def get_langchain_callbacks(self) -> list[BaseCallbackHandler]:
-        """Get LangChain callbacks (minimal implementation - empty list).
-
-        Returns:
-            Empty list (no callbacks in minimal implementation)
-        """
+        """返回 LangChain 回调列表（轻量实现为空）。"""
         return []
 
     @property
     def project_name(self) -> str | None:
-        """Get project name (minimal implementation - returns None).
-
-        Returns:
-            None
-        """
+        """返回项目名称（轻量实现固定为 None）。"""
         return None
 
     async def teardown(self) -> None:
-        """Teardown the tracing service."""
+        """释放追踪服务资源。"""
         logger.debug("Tracing service teardown")

@@ -1,1 +1,6 @@
-"""Tracing service for lfx package - minimal implementation."""
+"""模块名称：追踪服务入口
+
+本模块提供 LFX 追踪服务的入口说明。
+使用场景：在服务注册或依赖注入时作为追踪服务包的标识。
+主要功能：标识追踪服务为轻量实现，便于与完整追踪实现区分。
+"""

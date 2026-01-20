@@ -1,6 +1,13 @@
-"""Common MCP handler functions shared between mcp.py and mcp_projects.py.
+"""
+模块名称：MCP 通用处理函数
 
-This module serves as the single source of truth for MCP functionality.
+本模块集中提供 MCP 相关的共享逻辑，供 `mcp.py` 与 `mcp_projects.py` 复用。
+主要功能：
+- 统一错误处理与数据库会话包装
+- 处理 MCP 资源与工具调用
+- 维护请求上下文变量
+设计背景：避免 MCP 功能分散与重复实现。
+注意事项：资源读取与工具调用均依赖当前请求上下文。
 """
 
 import asyncio
@@ -43,7 +50,7 @@ current_request_variables_ctx: ContextVar[dict[str, str] | None] = ContextVar(
 
 
 def handle_mcp_errors(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
-    """Decorator to handle MCP endpoint errors consistently."""
+    """统一 MCP 端点错误处理的装饰器。"""
 
     @wraps(func)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
@@ -58,12 +65,14 @@ def handle_mcp_errors(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[
 
 
 async def with_db_session(operation: Callable[[Any], Awaitable[T]]) -> T:
-    """Execute an operation within a database session context."""
+    """在数据库会话上下文中执行操作。"""
     async with session_scope() as session:
         return await operation(session)
 
 
 class MCPConfig:
+    """MCP 运行期配置单例容器。"""
+
     _instance = None
 
     def __new__(cls):
@@ -74,6 +83,7 @@ class MCPConfig:
 
 
 def get_mcp_config():
+    """获取 MCP 配置单例。"""
     return MCPConfig()
 
 

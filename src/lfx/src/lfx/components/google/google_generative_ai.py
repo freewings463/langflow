@@ -1,3 +1,17 @@
+"""
+模块名称：`Google Generative AI` 模型组件
+
+本模块提供 `GoogleGenerativeAIComponent`，用于构建并调用 `Google Generative AI` 模型。
+主要功能包括：
+- 构建 `ChatGoogleGenerativeAIFixed` 实例
+- 拉取可用模型并支持工具调用筛选
+- 更新组件配置与模型下拉选项
+
+关键组件：`GoogleGenerativeAIComponent`
+设计背景：统一 `Google Generative AI` 模型接入与工具能力筛选
+注意事项：依赖 `langchain_google_genai`；`API Key` 为空时回退默认模型列表
+"""
+
 from typing import Any
 
 import requests
@@ -14,6 +28,12 @@ from lfx.schema.dotdict import dotdict
 
 
 class GoogleGenerativeAIComponent(LCModelComponent):
+    """`Google Generative AI` 模型组件。
+    契约：输入为模型与采样参数；输出为 `LanguageModel` 实例。
+    关键路径：读取输入 → 构建模型实例 → 返回。
+    决策：使用修正的 `ChatGoogleGenerativeAIFixed`。问题：上游对多函数支持不足；方案：临时替代类；代价：维护成本；重评：当上游修复时。
+    """
+
     display_name = "Google Generative AI"
     description = "Generate text using Google Generative AI."
     icon = "GoogleGenerativeAI"
@@ -75,6 +95,11 @@ class GoogleGenerativeAIComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建模型实例。
+        契约：返回 `LanguageModel`；`API Key` 无效时抛异常。
+        关键路径：读取参数 → 规范化为空值 → 初始化模型。
+    决策：空参数用 `None` 或默认值。问题：`API` 不接受空字符串；方案：空值转换；代价：隐藏输入错误；重评：当需要强校验时。
+        """
         google_api_key = self.api_key
         model = self.model_name
         max_output_tokens = self.max_output_tokens
@@ -83,8 +108,8 @@ class GoogleGenerativeAIComponent(LCModelComponent):
         top_p = self.top_p
         n = self.n
 
-        # Use modified ChatGoogleGenerativeAIFixed class for multiple function support
-        # TODO: Potentially remove when fixed upstream
+        # 注意：使用修正类以支持多函数调用。
+        # TODO：上游修复后考虑移除
         return ChatGoogleGenerativeAIFixed(
             model=model,
             max_output_tokens=max_output_tokens or None,
@@ -96,6 +121,11 @@ class GoogleGenerativeAIComponent(LCModelComponent):
         )
 
     def get_models(self, *, tool_model_enabled: bool | None = None) -> list[str]:
+        """获取模型列表并按工具能力筛选。
+        契约：返回模型 `ID` 列表；失败时回退到默认列表。
+        关键路径：`SDK` 拉取 → 过滤支持 `generateContent` → 可选工具筛选。
+        决策：接口失败回退到静态列表。问题：可用性优先；方案：回退；代价：列表可能过期；重评：当 `API` 稳定时。
+        """
         try:
             import google.generativeai as genai
 
@@ -125,6 +155,11 @@ class GoogleGenerativeAIComponent(LCModelComponent):
         return model_ids
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据字段变更更新 build_config。
+        契约：返回更新后的 `build_config`；模型列表获取失败时抛 `ValueError`。
+        关键路径：判断触发字段 → 拉取/回退模型列表 → 更新下拉选项。
+        决策：`API Key` 为空时使用默认列表。问题：避免匿名请求失败；方案：静态回退；代价：列表可能不全；重评：当支持匿名查询时。
+        """
         if field_name in {"base_url", "model_name", "tool_model_enabled", "api_key"} and field_value:
             try:
                 if len(self.api_key) == 0:

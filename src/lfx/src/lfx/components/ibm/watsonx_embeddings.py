@@ -1,3 +1,17 @@
+"""
+模块名称：IBM watsonx.ai Embeddings 组件
+
+本模块提供 watsonx.ai 向量嵌入组件，主要用于生成文本向量。主要功能包括：
+- 动态拉取可用嵌入模型列表并更新 UI 选项
+- 构建 `WatsonxEmbeddings` 并返回 Embeddings 实例
+
+关键组件：
+- `WatsonxEmbeddingsComponent`：嵌入模型组件
+
+设计背景：不同区域模型列表不同，需要运行时获取。
+注意事项：依赖 `ibm_watsonx_ai` 与 `langchain-ibm`，拉取失败时回退默认模型列表。
+"""
+
 from typing import Any
 
 import requests
@@ -14,12 +28,18 @@ from lfx.schema.dotdict import dotdict
 
 
 class WatsonxEmbeddingsComponent(LCEmbeddingsModel):
+    """watsonx.ai 嵌入组件。
+
+    契约：需提供 `url`/`project_id`/`api_key` 与 `model_name`。
+    失败语义：模型拉取失败时回退默认列表；SDK 调用失败时抛异常。
+    副作用：可能触发网络请求与日志输出。
+    """
     display_name = "IBM watsonx.ai Embeddings"
     description = "Generate embeddings using IBM watsonx.ai models."
     icon = "WatsonxAI"
     name = "WatsonxEmbeddingsComponent"
 
-    # models present in all the regions
+    # 注意：以下模型在所有区域均可用
     _default_models = [
         "sentence-transformers/all-minilm-l12-v2",
         "ibm/slate-125m-english-rtrvr-v2",
@@ -79,7 +99,12 @@ class WatsonxEmbeddingsComponent(LCEmbeddingsModel):
 
     @staticmethod
     def fetch_models(base_url: str) -> list[str]:
-        """Fetch available models from the watsonx.ai API."""
+        """从 watsonx.ai API 获取可用嵌入模型列表。
+
+        契约：请求成功返回排序后的模型 ID 列表。
+        失败语义：请求/解析失败时回退到默认模型列表。
+        副作用：发起网络请求。
+        """
         try:
             endpoint = f"{base_url}/ml/v1/foundation_model_specs"
             params = {
@@ -96,7 +121,12 @@ class WatsonxEmbeddingsComponent(LCEmbeddingsModel):
             return WatsonxEmbeddingsComponent._default_models
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
-        """Update model options when URL or API key changes."""
+        """根据输入变化动态更新模型选项。
+
+        契约：当 `url` 变化时刷新 `model_name` 选项。
+        失败语义：更新失败时记录日志，不抛出。
+        副作用：修改 `build_config`。
+        """
         logger.debug(
             "Updating build config. Field name: %s, Field value: %s",
             field_name,
@@ -115,6 +145,17 @@ class WatsonxEmbeddingsComponent(LCEmbeddingsModel):
                 logger.exception("Error updating model options.")
 
     def build_embeddings(self) -> Embeddings:
+        """构建 `WatsonxEmbeddings` 实例。
+
+        契约：返回可用于嵌入的 `Embeddings` 对象。
+        失败语义：SDK 初始化失败时抛异常。
+        副作用：创建 API 客户端。
+
+        关键路径（三步）：
+        1) 构建凭证并初始化 APIClient
+        2) 组装嵌入参数
+        3) 创建并返回 `WatsonxEmbeddings`
+        """
         credentials = Credentials(
             api_key=SecretStr(self.api_key).get_secret_value(),
             url=self.url,

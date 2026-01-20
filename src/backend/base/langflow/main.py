@@ -53,10 +53,10 @@ if TYPE_CHECKING:
 
     from lfx.services.mcp_composer.service import MCPComposerService
 
-# Ignore Pydantic deprecation warnings from Langchain
+# 忽略来自Langchain的Pydantic弃用警告
 warnings.filterwarnings("ignore", category=PydanticDeprecatedSince20)
 
-# Suppress ResourceWarning from anyio streams (SSE connections)
+# 抑制来自anyio流的ResourceWarning（SSE连接）
 warnings.filterwarnings("ignore", category=ResourceWarning, message=".*MemoryObjectReceiveStream.*")
 warnings.filterwarnings("ignore", category=ResourceWarning, message=".*MemoryObjectSendStream.*")
 
@@ -66,7 +66,23 @@ MAX_PORT = 65535
 
 
 async def log_exception_to_telemetry(exc: Exception, context: str) -> None:
-    """Helper to safely log exceptions to telemetry without raising."""
+    """将异常安全地记录到遥测系统而不引发
+    
+    决策：使用try-catch包装遥测记录调用
+    问题：遥测服务本身可能抛出异常，导致原异常被掩盖
+    方案：捕获遥测服务的异常并仅记录警告，确保原始异常得到处理
+    代价：可能丢失一些遥测数据，但保证原始异常处理不受影响
+    重评：当遥测服务稳定性提升时可以重新评估异常处理策略
+    
+    关键路径（三步）：
+    1) 获取遥测服务实例
+    2) 尝试记录异常
+    3) 捕获并记录遥测调用本身的异常
+    
+    异常流：如果遥测服务抛出httpx.HTTPError或asyncio.QueueFull异常，则记录警告
+    性能瓶颈：无显著性能瓶颈
+    排障入口：遥测异常记录的警告信息
+    """
     try:
         telemetry_service = get_telemetry_service()
         await telemetry_service.log_exception(exc, context)
@@ -75,13 +91,27 @@ async def log_exception_to_telemetry(exc: Exception, context: str) -> None:
 
 
 class RequestCancelledMiddleware(BaseHTTPMiddleware):
+    """请求取消中间件，用于检测和处理客户端断开连接的情况"""
+    
     def __init__(self, app) -> None:
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """处理请求调度，检测客户端断开连接
+        
+        关键路径（三步）：
+        1) 启动取消处理器任务以监控请求断开
+        2) 启动请求处理任务
+        3) 等待两个任务并根据结果返回响应
+        
+        异常流：如果检测到请求断开则返回499状态码
+        性能瓶颈：无显著性能瓶颈
+        排障入口：无特定日志关键字
+        """
         sentinel = object()
 
         async def cancel_handler():
+            """监控请求断开的异步处理器"""
             while True:
                 if await request.is_disconnected():
                     return sentinel
@@ -101,7 +131,20 @@ class RequestCancelledMiddleware(BaseHTTPMiddleware):
 
 
 class JavaScriptMIMETypeMiddleware(BaseHTTPMiddleware):
+    """JavaScript MIME类型中间件，确保JS文件返回正确的Content-Type头"""
+    
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """处理请求调度，确保JS文件返回正确的MIME类型
+        
+        关键路径（三步）：
+        1) 调用下一个处理器获取响应
+        2) 检查是否为JS文件请求
+        3) 如果是JS文件且状态正常，则设置正确的Content-Type
+        
+        异常流：如果遇到Pydantic序列化错误则抛出HTTP异常
+        性能瓶颈：无显著性能瓶颈
+        排障入口：无特定日志关键字
+        """
         try:
             response = await call_next(request)
         except Exception as exc:
@@ -123,6 +166,17 @@ class JavaScriptMIMETypeMiddleware(BaseHTTPMiddleware):
 
 
 async def load_bundles_with_error_handling():
+    """带错误处理的捆绑包加载函数
+    
+    关键路径（三步）：
+    1) 尝试加载捆绑包
+    2) 捕获HTTP相关异常
+    3) 返回空列表作为降级
+    
+    异常流：捕获httpx.TimeoutException、HTTPError、RequestError并记录错误
+    性能瓶颈：无显著性能瓶颈
+    排障入口：错误日志记录
+    """
     try:
         return await load_bundles_from_urls()
     except (httpx.TimeoutException, httpx.HTTPError, httpx.RequestError) as exc:
@@ -131,8 +185,8 @@ async def load_bundles_with_error_handling():
 
 
 def warn_about_future_cors_changes(settings):
-    """Warn users about upcoming CORS security changes in version 1.7."""
-    # Check if using default (backward compatible) settings
+    """警告用户关于未来CORS安全更改，将在版本1.7中生效"""
+    # 检查是否使用默认（向后兼容）设置
     using_defaults = settings.cors_origins == "*" and settings.cors_allow_credentials is True
 
     if using_defaults:
@@ -143,6 +197,23 @@ def warn_about_future_cors_changes(settings):
 
 
 def get_lifespan(*, fix_migration=False, version=None):
+    """获取应用生命周期管理器
+    
+    决策：使用asynccontextmanager管理应用生命周期
+    问题：需要在启动时初始化多个服务，在关闭时正确清理资源
+    方案：使用FastAPI的lifespan机制统一管理启动和关闭逻辑
+    代价：增加了代码复杂性，但提供了更好的资源管理
+    重评：当服务依赖关系发生变化时需要重新评估
+    
+    关键路径（三步）：
+    1) 初始化设置和服务
+    2) 启动时执行各项初始化任务
+    3) 关闭时执行清理任务
+    
+    异常流：捕获并记录生命周期中的异常，通过遥测系统报告
+    性能瓶颈：启动时的初始化任务可能耗时较长
+    排障入口：启动时间日志、异常日志
+    """
     initialize_settings_service()
     telemetry_service = get_telemetry_service()
 
@@ -152,7 +223,7 @@ def get_lifespan(*, fix_migration=False, version=None):
 
         configure()
 
-        # Startup message
+        # 启动消息
         if version:
             await logger.adebug(f"Starting Langflow v{version}...")
         else:
@@ -202,10 +273,10 @@ def get_lifespan(*, fix_migration=False, version=None):
             all_types_dict = await get_and_cache_all_types_dict(get_settings_service(), telemetry_service)
             await logger.adebug(f"Types cached in {asyncio.get_event_loop().time() - current_time:.2f}s")
 
-            # Use file-based lock to prevent multiple workers from creating duplicate starter projects concurrently.
-            # Note that it's still possible that one worker may complete this task, release the lock,
-            # then another worker pick it up, but the operation is idempotent so worst case it duplicates
-            # the initialization work.
+            # 使用基于文件的锁以防止多个工作进程同时创建重复的入门项目
+            # 注意，仍有可能一个工作进程完成此任务，释放锁，
+            # 然后另一个工作进程接手它，但由于操作是幂等的，最坏情况是复制
+            # 初始化工作
             current_time = asyncio.get_event_loop().time()
             await logger.adebug("Creating/updating starter projects")
 
@@ -218,14 +289,14 @@ def get_lifespan(*, fix_migration=False, version=None):
                         f"Starter projects created/updated in {asyncio.get_event_loop().time() - current_time:.2f}s"
                     )
             except TimeoutError:
-                # Another process has the lock
+                # 另一个进程拥有锁
                 await logger.adebug("Another worker is creating starter projects, skipping")
             except Exception as e:  # noqa: BLE001
                 await logger.awarning(
                     f"Failed to acquire lock for starter projects: {e}. Starter projects may not be created or updated."
                 )
 
-            # Initialize agentic global variables early (before MCP server and flows)
+            # 早期初始化代理全局变量（在MCP服务器和流之前）
             if get_settings_service().settings.agentic_experience:
                 from langflow.api.utils.mcp.agentic_mcp import initialize_agentic_global_variables
 
@@ -253,7 +324,7 @@ def get_lifespan(*, fix_migration=False, version=None):
                 f"started MCP Composer service in {asyncio.get_event_loop().time() - current_time:.2f}s"
             )
 
-            # Auto-configure Agentic MCP server if enabled (after variables are initialized)
+            # 如果启用则自动配置代理MCP服务器（在变量初始化后）
             if get_settings_service().settings.agentic_experience:
                 from langflow.api.utils.mcp.agentic_mcp import auto_configure_agentic_mcp_server
 
@@ -273,7 +344,7 @@ def get_lifespan(*, fix_migration=False, version=None):
             await load_flows_from_directory()
             sync_flows_from_fs_task = asyncio.create_task(sync_flows_from_fs())
             queue_service = get_queue_service()
-            if not queue_service.is_started():  # Start if not already started
+            if not queue_service.is_started():  # 如果尚未启动则启动
                 queue_service.start()
             await logger.adebug(f"Flows loaded in {asyncio.get_event_loop().time() - current_time:.2f}s")
 
@@ -281,7 +352,8 @@ def get_lifespan(*, fix_migration=False, version=None):
             await logger.adebug(f"Total initialization time: {total_time:.2f}s")
 
             async def delayed_init_mcp_servers():
-                await asyncio.sleep(10.0)  # Increased delay to allow starter projects to be created
+                """延迟初始化MCP服务器，避免与入门项目创建发生竞争条件"""
+                await asyncio.sleep(10.0)  # 增加延迟以允许入门项目被创建
                 current_time = asyncio.get_event_loop().time()
                 await logger.adebug("Loading MCP servers for projects")
                 try:
@@ -289,7 +361,7 @@ def get_lifespan(*, fix_migration=False, version=None):
                     await logger.adebug(f"MCP servers loaded in {asyncio.get_event_loop().time() - current_time:.2f}s")
                 except Exception as e:  # noqa: BLE001
                     await logger.awarning(f"First MCP server initialization attempt failed: {e}")
-                    await asyncio.sleep(5.0)  # Increased retry delay
+                    await asyncio.sleep(5.0)  # 增加重试延迟
                     current_time = asyncio.get_event_loop().time()
                     await logger.adebug("Retrying MCP servers initialization")
                     try:
@@ -300,11 +372,11 @@ def get_lifespan(*, fix_migration=False, version=None):
                     except Exception as e2:  # noqa: BLE001
                         await logger.aexception(f"Failed to initialize MCP servers after retry: {e2}")
 
-            # Start the delayed initialization as a background task
-            # Allows the server to start first to avoid race conditions with MCP Server startup
+            # 将延迟初始化作为后台任务启动
+            # 允许服务器首先启动以避免与MCP服务器启动的竞争条件
             mcp_init_task = asyncio.create_task(delayed_init_mcp_servers())
 
-            # v1 and project MCP server context managers
+            # v1和项目MCP服务器上下文管理器
             from langflow.api.v1.mcp import start_streamable_http_manager
             from langflow.api.v1.mcp_projects import start_project_task_group
 
@@ -321,12 +393,12 @@ def get_lifespan(*, fix_migration=False, version=None):
                 await log_exception_to_telemetry(exc, "lifespan")
             raise
         finally:
-            # CRITICAL: Cleanup MCP sessions FIRST, before any other shutdown logic.
-            # This ensures MCP subprocesses are killed even if shutdown is interrupted.
+            # 关键：首先清理MCP会话，在任何其他关闭逻辑之前。
+            # 这确保即使关闭被中断，MCP子进程也会被终止。
             await cleanup_mcp_sessions()
 
-            # Clean shutdown with progress indicator
-            # Create shutdown progress (show verbose timing if log level is DEBUG)
+            # 清理关闭，带有进度指示器
+            # 创建关闭进度（如果日志级别为DEBUG则显示详细时间）
             from langflow.__main__ import get_number_of_workers
             from langflow.cli.progress import create_langflow_shutdown_progress
 
@@ -337,28 +409,28 @@ def get_lifespan(*, fix_migration=False, version=None):
             )
 
             try:
-                # Step 0: Stopping Server
+                # 步骤0：停止服务器
                 with shutdown_progress.step(0):
                     await logger.adebug("Stopping server gracefully...")
-                    # The actual server stopping is handled by the lifespan context
-                    await asyncio.sleep(0.1)  # Brief pause for visual effect
+                    # 实际的服务器停止由lifespan上下文处理
+                    await asyncio.sleep(0.1)  # 短暂暂停以产生视觉效果
 
-                # Step 1: Cancelling Background Tasks
+                # 步骤1：取消后台任务
                 with shutdown_progress.step(1):
                     from langflow.api.v1.mcp import stop_streamable_http_manager
                     from langflow.api.v1.mcp_projects import stop_project_task_group
 
-                    # Shutdown MCP project servers
+                    # 关闭MCP项目服务器
                     try:
                         await stop_project_task_group()
                     except Exception as e:  # noqa: BLE001
                         await logger.aerror(f"Failed to stop MCP Project servers: {e}")
-                    # Close MCP server streamable-http session manager .run() context manager
+                    # 关闭MCP服务器streamable-http会话管理器.run()上下文管理器
                     try:
                         await stop_streamable_http_manager()
                     except Exception as e:  # noqa: BLE001
                         await logger.aerror(f"Failed to stop MCP server streamable-http session manager: {e}")
-                    # Cancel background tasks
+                    # 取消后台任务
                     tasks_to_cancel = []
                     if sync_flows_from_fs_task:
                         sync_flows_from_fs_task.cancel()
@@ -367,21 +439,21 @@ def get_lifespan(*, fix_migration=False, version=None):
                         mcp_init_task.cancel()
                         tasks_to_cancel.append(mcp_init_task)
                     if tasks_to_cancel:
-                        # Wait for all tasks to complete, capturing exceptions
+                        # 等待所有任务完成，捕获异常
                         results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-                        # Log any non-cancellation exceptions
+                        # 记录任何非取消异常
                         for result in results:
                             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                                 await logger.aerror(f"Error during task cleanup: {result}", exc_info=result)
 
-                # Step 2: Cleaning Up Services
+                # 步骤2：清理服务
                 with shutdown_progress.step(2):
                     try:
                         await asyncio.wait_for(teardown_services(), timeout=30)
                     except asyncio.TimeoutError:
                         await logger.awarning("Teardown services timed out after 30s.")
 
-                # Step 3: Clearing Temporary Files
+                # 步骤3：清除临时文件
                 with shutdown_progress.step(3):
                     temp_dir_cleanups = [asyncio.to_thread(temp_dir.cleanup) for temp_dir in temp_dirs]
                     try:
@@ -389,18 +461,18 @@ def get_lifespan(*, fix_migration=False, version=None):
                     except asyncio.TimeoutError:
                         await logger.awarning("Temporary file cleanup timed out after 10s.")
 
-                # Step 4: Finalizing Shutdown
+                # 步骤4：完成关闭
                 with shutdown_progress.step(4):
                     await logger.adebug("Langflow shutdown complete")
 
-                # Show completion summary and farewell
+                # 显示完成摘要和告别
                 shutdown_progress.print_shutdown_summary()
 
             except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.DBAPIError) as e:
-                # Case where the database connection is closed during shutdown
+                # 数据库连接在关闭过程中关闭的情况
                 await logger.awarning(f"Database teardown failed due to closed connection: {e}")
             except asyncio.CancelledError:
-                # Swallow this - it's normal during shutdown
+                # 吞下这个 - 在关闭期间是正常的
                 await logger.adebug("Teardown cancelled during shutdown.")
             except Exception as e:  # noqa: BLE001
                 await logger.aexception(f"Unhandled error during cleanup: {e}")
@@ -410,7 +482,23 @@ def get_lifespan(*, fix_migration=False, version=None):
 
 
 def create_app():
-    """Create the FastAPI app and include the router."""
+    """创建FastAPI应用并包含路由器
+    
+    决策：使用FastAPI框架构建Web API
+    问题：需要配置多种中间件、路由、异常处理和遥测
+    方案：集中创建应用实例并配置所有必需组件
+    代价：函数变得相当庞大，但保持了配置逻辑的集中性
+    重评：当应用架构发生变化时需要重新评估
+    
+    关键路径（三步）：
+    1) 初始化FastAPI应用和生命周期管理
+    2) 配置各种中间件和CORS设置
+    3) 添加路由、异常处理器和遥测
+    
+    异常流：配置异常会被记录并通过HTTP响应返回
+    性能瓶颈：启动时的初始化可能耗时较长
+    排障入口：启动日志、异常日志
+    """
     from langflow.utils.version import get_version_info
 
     __version__ = get_version_info()["version"]
@@ -429,15 +517,15 @@ def create_app():
 
     settings = get_settings_service().settings
 
-    # Warn about future CORS changes
+    # 警告关于未来的CORS更改
     warn_about_future_cors_changes(settings)
 
-    # Configure CORS using settings (with backward compatible defaults)
+    # 使用设置配置CORS（向后兼容的默认值）
     origins = settings.cors_origins
     if isinstance(origins, str) and origins != "*":
         origins = [origins]
 
-    # Apply current CORS configuration (maintains backward compatibility)
+    # 应用当前CORS配置（保持向后兼容性）
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
@@ -449,6 +537,17 @@ def create_app():
 
     @app.middleware("http")
     async def check_boundary(request: Request, call_next):
+        """检查multipart/form-data边界参数的有效性
+        
+        关键路径（三步）：
+        1) 验证Content-Type头部包含有效的边界参数
+        2) 验证边界格式符合规范
+        3) 验证multipart格式正确性
+        
+        异常流：不符合要求时返回422状态码
+        性能瓶颈：无显著性能瓶颈
+        排障入口：无特定日志关键字
+        """
         if "/api/v1/files/upload" in request.url.path:
             content_type = request.headers.get("Content-Type")
 
@@ -469,8 +568,8 @@ def create_app():
             body = await request.body()
 
             boundary_start = f"--{boundary}".encode()
-            # The multipart/form-data spec doesn't require a newline after the boundary, however many clients do
-            # implement it that way
+            # multipart/form-data规范不要求边界后有换行，但许多客户端
+            # 以这种方式实现
             boundary_end = f"--{boundary}--\r\n".encode()
             boundary_end_no_newline = f"--{boundary}--".encode()
 
@@ -484,6 +583,17 @@ def create_app():
 
     @app.middleware("http")
     async def flatten_query_string_lists(request: Request, call_next):
+        """扁平化查询字符串列表，将逗号分隔的值拆分为单独的参数
+        
+        关键路径（三步）：
+        1) 遍历查询参数的多值项
+        2) 将逗号分隔的值拆分为独立条目
+        3) 重新编码查询字符串
+        
+        异常流：无特殊异常处理
+        性能瓶颈：无显著性能瓶颈
+        排障入口：无特定日志关键字
+        """
         flattened: list[tuple[str, str]] = []
         for key, value in request.query_params.multi_items():
             flattened.extend((key, entry) for entry in value.split(","))
@@ -493,7 +603,7 @@ def create_app():
         return await call_next(request)
 
     if prome_port_str := os.environ.get("LANGFLOW_PROMETHEUS_PORT"):
-        # set here for create_app() entry point
+        # 为create_app()入口点设置
         prome_port = int(prome_port_str)
         if prome_port > 0 or prome_port < MAX_PORT:
             logger.debug(f"Starting Prometheus server on port {prome_port}...")
@@ -519,6 +629,17 @@ def create_app():
 
     @app.exception_handler(Exception)
     async def exception_handler(_request: Request, exc: Exception):
+        """全局异常处理器
+        
+        关键路径（三步）：
+        1) 检查异常是否为HTTPException
+        2) 记录异常信息
+        3) 返回适当的JSON响应
+        
+        异常流：所有未处理的异常都会经过此处理器
+        性能瓶颈：无显著性能瓶颈
+        排障入口：异常日志记录
+        """
         if isinstance(exc, HTTPException):
             await logger.aerror(f"HTTPException: {exc}", exc_info=exc)
             return JSONResponse(
@@ -542,6 +663,17 @@ def create_app():
 
 
 def setup_sentry(app: FastAPI) -> None:
+    """配置Sentry错误跟踪
+    
+    关键路径（三步）：
+    1) 检查是否配置了Sentry DSN
+    2) 初始化Sentry SDK
+    3) 添加Sentry ASGI中间件
+    
+    异常流：无特殊异常处理
+    性能瓶颈：无显著性能瓶颈
+    排障入口：Sentry错误报告
+    """
     settings = get_settings_service().settings
     if settings.sentry_dsn:
         import sentry_sdk
@@ -556,11 +688,22 @@ def setup_sentry(app: FastAPI) -> None:
 
 
 def setup_static_files(app: FastAPI, static_files_dir: Path) -> None:
-    """Setup the static files directory.
-
-    Args:
-        app (FastAPI): FastAPI app.
-        static_files_dir (str): Path to the static files directory.
+    """设置静态文件目录
+    
+    决策：使用FastAPI的StaticFiles功能提供前端资源
+    问题：需要将静态文件（如index.html）正确挂载到根路径
+    方案：使用StaticFiles中间件并将404错误重定向到index.html
+    代价：可能导致某些错误的路由行为，但适用于SPA
+    重评：当需要更复杂的前端路由时需要重新评估
+    
+    关键路径（三步）：
+    1) 挂载静态文件目录到根路径
+    2) 配置404错误处理器返回index.html
+    3) 验证index.html文件存在
+    
+    异常流：如果index.html不存在则抛出运行时错误
+    性能瓶颈：无显著性能瓶颈
+    排障入口：文件存在性检查的错误消息
     """
     app.mount(
         "/",
@@ -579,14 +722,30 @@ def setup_static_files(app: FastAPI, static_files_dir: Path) -> None:
 
 
 def get_static_files_dir():
-    """Get the static files directory relative to Langflow's main.py file."""
+    """获取相对于Langflow main.py文件的静态文件目录"""
     frontend_path = Path(__file__).parent
     return frontend_path / "frontend"
 
 
 def setup_app(static_files_dir: Path | None = None, *, backend_only: bool = False) -> FastAPI:
-    """Setup the FastAPI app."""
-    # get the directory of the current file
+    """设置FastAPI应用
+    
+    决策：提供灵活的应用配置选项
+    问题：需要支持仅后端模式和前端+后端模式
+    方案：使用backend_only参数控制是否挂载静态文件
+    代价：增加了函数复杂性，但提供了更大的灵活性
+    重评：当部署需求变化时需要重新评估
+    
+    关键路径（三步）：
+    1) 确定静态文件目录位置
+    2) 创建基本应用实例
+    3) 根据模式决定是否添加静态文件支持
+    
+    异常流：如果backend_only为False且静态文件目录不存在则抛出RuntimeError
+    性能瓶颈：无显著性能瓶颈
+    排障入口：静态文件目录存在性检查
+    """
+    # 获取当前文件的目录
     if not static_files_dir:
         static_files_dir = get_static_files_dir()
 

@@ -1,3 +1,19 @@
+"""
+模块名称：模拟数据生成组件
+
+本模块提供用于测试与演示的模拟数据生成能力，支持输出 `Message`、`Data` 与 `DataFrame`。
+主要功能包括：
+- 生成随机文本消息
+- 生成结构化 `JSON` 数据
+- 生成业务风格的表格数据
+
+关键组件：
+- `MockDataGeneratorComponent`
+
+设计背景：在缺少真实数据源时提供可复用的测试输入。
+注意事项：`DataFrame` 输出依赖 `pandas`，缺失时会走降级路径。
+"""
+
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -8,16 +24,13 @@ from lfx.schema.message import Message
 
 
 class MockDataGeneratorComponent(Component):
-    """Mock Data Generator Component.
+    """模拟数据生成组件
 
-    Generates sample data for testing and development purposes. Supports three main
-    Langflow output types: Message (text), Data (JSON), and DataFrame (tabular data).
-
-    This component is useful for:
-    - Testing workflows without real data sources
-    - Prototyping data processing pipelines
-    - Creating sample data for demonstrations
-    - Development and debugging of Langflow components
+    契约：
+    - 输入：无
+    - 输出：`Message`/`Data`/`DataFrame`
+    - 副作用：记录日志并更新 `self.status`
+    - 失败语义：生成失败时返回包含错误信息的降级输出
     """
 
     display_name = "Mock Data"
@@ -34,14 +47,24 @@ class MockDataGeneratorComponent(Component):
     ]
 
     def build(self) -> DataFrame:
-        """Default build method - returns DataFrame when component is standalone."""
+        """默认构建入口，独立运行时返回 `DataFrame`
+
+        契约：
+        - 输入：无
+        - 输出：`DataFrame`
+        - 副作用：触发 `DataFrame` 生成流程
+        - 失败语义：生成失败时返回错误 `DataFrame`
+        """
         return self.generate_dataframe_output()
 
     def generate_message_output(self) -> Message:
-        """Generate Message output specifically.
+        """生成 `Message` 输出
 
-        Returns:
-            Message: A Message object containing Lorem Ipsum text
+        契约：
+        - 输入：无
+        - 输出：`Message`
+        - 副作用：更新 `self.status`
+        - 失败语义：异常时返回包含错误提示的 `Message`
         """
         try:
             self.log("Generating Message mock data")
@@ -56,13 +79,17 @@ class MockDataGeneratorComponent(Component):
             return message
 
     def generate_data_output(self) -> Data:
-        """Generate Data output specifically.
+        """生成 `Data` 输出
 
-        Returns:
-            Data: A Data object containing sample JSON data (1 record)
+        契约：
+        - 输入：无
+        - 输出：`Data`
+        - 副作用：更新 `self.status`
+        - 失败语义：异常时返回包含错误信息的 `Data`
         """
         try:
-            record_count = 1  # Fixed to 1 record for Data output
+            # 注意：`Data` 输出固定为单条记录
+            record_count = 1
             self.log(f"Generating Data mock data with {record_count} record")
             data = self._generate_data(record_count)
             self.status = f"Generated JSON data with {len(data.data.get('records', []))} record(s)"
@@ -75,13 +102,17 @@ class MockDataGeneratorComponent(Component):
             return data
 
     def generate_dataframe_output(self) -> DataFrame:
-        """Generate DataFrame output specifically.
+        """生成 `DataFrame` 输出
 
-        Returns:
-            DataFrame: A Langflow DataFrame with sample data (50 records)
+        契约：
+        - 输入：无
+        - 输出：`DataFrame`
+        - 副作用：记录日志
+        - 失败语义：异常时返回包含错误信息的降级 `DataFrame`
         """
         try:
-            record_count = 50  # Fixed to 50 records for DataFrame output
+            # 注意：`DataFrame` 输出固定为 50 条记录
+            record_count = 50
             self.log(f"Generating DataFrame mock data with {record_count} records")
             return self._generate_dataframe(record_count)
         except (ValueError, TypeError) as e:
@@ -94,14 +125,17 @@ class MockDataGeneratorComponent(Component):
                 error_df = pd.DataFrame({"error": [error_msg]})
                 return DataFrame(error_df)
             except ImportError:
-                # Even without pandas, return DataFrame wrapper
+                # 注意：无 `pandas` 时仍返回 `DataFrame` 包装
                 return DataFrame({"error": [error_msg]})
 
     def _generate_message(self) -> Message:
-        """Generate a sample Message with Lorem Ipsum text.
+        """生成 `Message` 文本内容
 
-        Returns:
-            Message: A Message object containing Lorem Ipsum text
+        契约：
+        - 输入：无
+        - 输出：`Message`
+        - 副作用：无
+        - 失败语义：无
         """
         lorem_ipsum_texts = [
             (
@@ -134,15 +168,15 @@ class MockDataGeneratorComponent(Component):
         return Message(text=selected_text)
 
     def _generate_data(self, record_count: int) -> Data:
-        """Generate sample Data with JSON structure.
+        """生成包含 `JSON` 结构的 `Data`
 
-        Args:
-            record_count: Number of records to generate
-
-        Returns:
-            Data: A Data object containing sample JSON data
+        契约：
+        - 输入：记录数量
+        - 输出：`Data`
+        - 副作用：无
+        - 失败语义：无
         """
-        # Sample data categories
+        # 注意：样例分类数据
         companies = [
             "TechCorp",
             "DataSystems",
@@ -157,7 +191,7 @@ class MockDataGeneratorComponent(Component):
         statuses = ["active", "pending", "completed", "cancelled", "in_progress"]
         categories = ["A", "B", "C", "D"]
 
-        # Generate sample records
+        # 生成样例记录
         records = []
         base_date = datetime.now(tz=timezone.utc) - timedelta(days=365)
 
@@ -190,7 +224,7 @@ class MockDataGeneratorComponent(Component):
             }
             records.append(record)
 
-        # Create the main data structure
+        # 构造主数据结构
         data_structure = {
             "records": records,
             "summary": {
@@ -206,13 +240,22 @@ class MockDataGeneratorComponent(Component):
         return Data(data=data_structure)
 
     def _generate_dataframe(self, record_count: int) -> DataFrame:
-        """Generate sample DataFrame with realistic business data.
+        """生成业务风格的 `DataFrame`
 
-        Args:
-            record_count: Number of rows to generate
+        关键路径（三步）：
+        1) 尝试导入 `pandas`
+        2) 生成行数据并构建 `DataFrame`
+        3) 追加计算列并返回结果
 
-        Returns:
-            DataFrame: A Langflow DataFrame with sample data
+        异常流：`pandas` 缺失或生成失败走降级路径。
+        性能瓶颈：大规模数据生成与 `pandas` 处理。
+        排障入口：日志信息与异常消息。
+        
+        契约：
+        - 输入：记录数量
+        - 输出：`DataFrame`
+        - 副作用：记录日志
+        - 失败语义：异常时返回降级 `DataFrame`
         """
         try:
             import pandas as pd
@@ -220,35 +263,35 @@ class MockDataGeneratorComponent(Component):
             self.log(f"pandas imported successfully, version: {pd.__version__}")
         except ImportError as e:
             self.log(f"pandas not available: {e!s}, creating simple DataFrame fallback")
-            # Create a simple DataFrame-like structure without pandas
+            # 注意：无 `pandas` 时构建简易结构
             data_result = self._generate_data(record_count)
-            # Convert Data to simple DataFrame format
+            # 将 `Data` 转为简易表格结构
             try:
-                # Create a basic DataFrame structure from the Data
+                # 注意：从 `Data` 构建基本表结构
                 records = data_result.data.get("records", [])
                 if records:
-                    # Use first record to get column names
+                    # 注意：使用首行字段作为列名
                     columns = list(records[0].keys()) if records else ["error"]
                     rows = [list(record.values()) for record in records]
                 else:
                     columns = ["error"]
                     rows = [["pandas not available"]]
 
-                # Create a simple dict-based DataFrame representation
+                # 生成字典式表格表示
                 simple_df_data = {
                     col: [row[i] if i < len(row) else None for row in rows] for i, col in enumerate(columns)
                 }
 
-                # Return as DataFrame wrapper (Langflow will handle the display)
+                # 注意：返回 `DataFrame` 包装（由 `LangFlow` 负责展示）
                 return DataFrame(simple_df_data)
             except (ValueError, TypeError):
-                # Ultimate fallback - return the Data as DataFrame
+                # 注意：终极降级为字符串化 `Data`
                 return DataFrame({"data": [str(data_result.data)]})
 
         try:
             self.log(f"Starting DataFrame generation with {record_count} records")
 
-            # Sample data for realistic business dataset
+            # 注意：业务风格样例数据
             first_names = [
                 "John",
                 "Jane",
@@ -297,7 +340,7 @@ class MockDataGeneratorComponent(Component):
                 "Service Z",
             ]
 
-            # Generate DataFrame data
+            # 生成 `DataFrame` 行数据
             data = []
             base_date = datetime.now(tz=timezone.utc) - timedelta(days=365)
 
@@ -321,24 +364,24 @@ class MockDataGeneratorComponent(Component):
                     "last_contact": (base_date + timedelta(days=secrets.randbelow(366))).strftime("%Y-%m-%d"),
                 }
                 data.append(row)
-            # Create DataFrame
+            # 创建 `DataFrame`
             self.log("Creating pandas DataFrame...")
             df = pd.DataFrame(data)
             self.log(f"DataFrame created with shape: {df.shape}")
 
-            # Add calculated columns
+            # 添加计算列
             self.log("Adding calculated columns...")
             df["full_name"] = df["first_name"] + " " + df["last_name"]
             df["discounted_value"] = df["order_value"] * (1 - df["discount"])
             df["total_value"] = df["discounted_value"] * df["quantity"]
 
-            # Age group boundaries as constants
+            # 年龄分组边界常量
             age_group_18_25 = 25
             age_group_26_35 = 35
             age_group_36_50 = 50
             age_group_51_65 = 65
 
-            # Create age groups with better error handling
+            # 注意：年龄分组构建，失败时走降级路径
             try:
                 df["age_group"] = pd.cut(
                     df["age"],
@@ -373,15 +416,15 @@ class MockDataGeneratorComponent(Component):
                 )
 
             self.log(f"Successfully generated DataFrame with shape: {df.shape}, columns: {list(df.columns)}")
-            # CRITICAL: Use DataFrame wrapper from Langflow
-            # DO NOT set self.status when returning DataFrames - it interferes with display
+            # 注意：必须使用 `LangFlow` `DataFrame` 包装
+            # 注意：返回 `DataFrame` 时不要设置 `self.status`，避免展示异常
             return DataFrame(df)
 
         except (ValueError, TypeError) as e:
             error_msg = f"Error generating DataFrame: {e!s}"
             self.log(error_msg)
-            # DO NOT set self.status when returning DataFrames - it interferes with display
-            # Return a fallback DataFrame with error info using Langflow wrapper
+            # 注意：返回 `DataFrame` 时不要设置 `self.status`，避免展示异常
+            # 返回包含错误信息的降级 `DataFrame`
             try:
                 error_df = pd.DataFrame(
                     {
@@ -392,7 +435,7 @@ class MockDataGeneratorComponent(Component):
                 )
                 return DataFrame(error_df)
             except (ValueError, TypeError) as fallback_error:
-                # Last resort: return simple error DataFrame
+                # 最终降级：返回最简错误表
                 self.log(f"Fallback also failed: {fallback_error!s}")
                 simple_error_df = pd.DataFrame({"error": [error_msg]})
                 return DataFrame(simple_error_df)

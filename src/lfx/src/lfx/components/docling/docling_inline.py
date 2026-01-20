@@ -1,3 +1,19 @@
+"""
+模块名称：docling_inline
+
+本模块提供 Docling 本地处理组件，使用本地依赖对文件进行解析。
+主要功能包括：
+- 调用 Docling 本地模型处理文件
+- 通过线程队列获取异步结果并回传
+
+关键组件：
+- `DoclingInlineComponent`：本地 Docling 处理组件
+
+设计背景：需要在本地环境中直接调用 Docling 解析文档
+使用场景：本地部署或具备 OCR 依赖的环境
+注意事项：云环境可能缺少 OCR 依赖，应改用远程组件
+"""
+
 import queue
 import threading
 import time
@@ -9,6 +25,17 @@ from lfx.schema import Data
 
 
 class DoclingInlineComponent(BaseFileComponent):
+    """Docling 本地处理组件。
+
+    契约：输入文件列表，输出携带 DoclingDocument 的 `Data`。
+    副作用：启动工作线程并调用 Docling 本地模型。
+    失败语义：缺少依赖抛 `ImportError`，处理失败抛 `RuntimeError`。
+    决策：优先使用本地 Docling 依赖进行处理。
+    问题：需要在离线/内网环境完成文档解析。
+    方案：本地执行 Docling 与 OCR，避免外部服务依赖。
+    代价：安装成本与资源占用较高。
+    重评：当本地依赖不可用或成本过高时。
+    """
     display_name = "Docling"
     description = "Uses Docling to process input documents running the Docling models locally."
     documentation = "https://docling-project.github.io/docling/"
@@ -16,7 +43,7 @@ class DoclingInlineComponent(BaseFileComponent):
     icon = "Docling"
     name = "DoclingInline"
 
-    # https://docling-project.github.io/docling/usage/supported_formats/
+    # 注意：支持格式列表参考 Docling 官方文档。
     VALID_EXTENSIONS = [
         "adoc",
         "asciidoc",
@@ -85,7 +112,7 @@ class DoclingInlineComponent(BaseFileComponent):
             info="The user prompt to use when invoking the model.",
             advanced=True,
         ),
-        # TODO: expose more Docling options
+        # 注意：后续可扩展更多 Docling 选项。
     ]
 
     outputs = [
@@ -95,45 +122,49 @@ class DoclingInlineComponent(BaseFileComponent):
     def _wait_for_result_with_thread_monitoring(
         self, result_queue: queue.Queue, thread: threading.Thread, timeout: int = 300
     ):
-        """Wait for result from queue while monitoring thread health.
+        """等待结果并监控线程健康状态。
 
-        Handles cases where thread crashes without sending result.
+        契约：在 `timeout` 内返回结果或抛出异常。
+        失败语义：线程提前退出且无结果抛 `RuntimeError`；超时抛 `TimeoutError`。
+        关键路径（三步）：1) 检查线程状态 2) 轮询队列 3) 超时退出。
+        性能瓶颈：轮询间隔与超时设置影响等待时长。
+        排障入口：异常信息包含线程状态与超时秒数。
         """
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            # Check if thread is still alive
             if not thread.is_alive():
-                # Thread finished, try to get any result it might have sent
                 try:
                     result = result_queue.get_nowait()
                 except queue.Empty:
-                    # Thread finished without sending result
                     msg = "Worker thread crashed unexpectedly without producing result."
                     raise RuntimeError(msg) from None
                 else:
                     self.log("Thread completed and result retrieved")
                     return result
 
-            # Poll the queue instead of blocking
             try:
                 result = result_queue.get(timeout=1)
             except queue.Empty:
-                # No result yet, continue monitoring
                 continue
             else:
                 self.log("Result received from worker thread")
                 return result
 
-        # Overall timeout reached
         msg = f"Thread timed out after {timeout} seconds"
         raise TimeoutError(msg)
 
     def _stop_thread_gracefully(self, thread: threading.Thread, timeout: int = 10):
-        """Wait for thread to complete gracefully.
+        """等待线程自然结束（不强杀）。
 
-        Note: Python threads cannot be forcefully killed, so we just wait.
-        The thread should respond to shutdown signals via the queue.
+        契约：线程已结束则直接返回。
+        副作用：阻塞等待至超时。
+        失败语义：线程超时仍存活仅记录日志。
+        决策：不强制终止线程。
+        问题：Python 线程无法安全强杀，易导致资源泄露。
+        方案：使用 `join` 等待并记录超时告警。
+        代价：超时后仍可能有后台线程存活。
+        重评：当可迁移到可中断的任务执行框架时。
         """
         if not thread.is_alive():
             return
@@ -145,6 +176,24 @@ class DoclingInlineComponent(BaseFileComponent):
             self.log("Warning: Thread still alive after timeout")
 
     def process_files(self, file_list: list[BaseFileComponent.BaseFile]) -> list[BaseFileComponent.BaseFile]:
+        """处理文件并返回带 DoclingDocument 的数据。
+
+        契约：`file_list` 中的文件路径必须存在；返回与输入对齐的输出列表。
+        副作用：启动工作线程并调用本地 Docling 依赖。
+        失败语义：依赖缺失抛 `ImportError`，处理异常原样抛出。
+        关键路径（三步）：
+        1) 校验依赖并提取文件路径。
+        2) 启动线程执行 Docling 处理并等待结果。
+        3) 解析结果并回填输出。
+        异常流：依赖缺失、线程崩溃、超时或 OCR 依赖缺失。
+        性能瓶颈：Docling 解析与 OCR 模型推理。
+        排障入口：日志关键字 `Error during processing` 或异常信息。
+        决策：使用线程而非多进程执行 Docling 任务。
+        问题：多进程会导致缓存无法共享且内存占用大。
+        方案：单进程多线程共享 `DocumentConverter` 缓存。
+        代价：受 GIL 影响并发吞吐有限。
+        重评：当处理量显著增大且可接受多进程开销时。
+        """
         try:
             from docling.document_converter import DocumentConverter  # noqa: F401
         except ImportError as e:
@@ -164,8 +213,7 @@ class DoclingInlineComponent(BaseFileComponent):
         if self.pic_desc_llm is not None:
             pic_desc_config = _serialize_pydantic_model(self.pic_desc_llm)
 
-        # Use threading instead of multiprocessing for memory sharing
-        # This enables the global DocumentConverter cache to work across runs
+        # 注意：使用线程共享内存以复用全局 DocumentConverter 缓存。
         result_queue: queue.Queue = queue.Queue()
         thread = threading.Thread(
             target=docling_worker,
@@ -178,7 +226,8 @@ class DoclingInlineComponent(BaseFileComponent):
                 "pic_desc_config": pic_desc_config,
                 "pic_desc_prompt": self.pic_desc_prompt,
             },
-            daemon=False,  # Allow thread to complete even if main thread exits
+            # 注意：允许线程在主线程退出后继续收尾，避免中途终止。
+            daemon=False,
         )
 
         result = None
@@ -193,19 +242,18 @@ class DoclingInlineComponent(BaseFileComponent):
             self.log(f"Error during processing: {e}")
             raise
         finally:
-            # Wait for thread to complete gracefully
             self._stop_thread_gracefully(thread)
 
-        # Enhanced error checking with dependency-specific handling
+        # 注意：对依赖缺失与中断场景进行细分处理。
         if isinstance(result, dict) and "error" in result:
             error_msg = result["error"]
 
-            # Handle dependency errors specifically
+            # 注意：OCR 依赖缺失单独提示安装方式。
             if result.get("error_type") == "dependency_error":
                 dependency_name = result.get("dependency_name", "Unknown dependency")
                 install_command = result.get("install_command", "Please check documentation")
 
-                # Create a user-friendly error message
+                # 注意：拼装面向用户的安装提示。
                 user_message = (
                     f"Missing OCR dependency: {dependency_name}. "
                     f"{install_command} "
@@ -213,11 +261,9 @@ class DoclingInlineComponent(BaseFileComponent):
                 )
                 raise ImportError(user_message)
 
-            # Handle other specific errors
             if error_msg.startswith("Docling is not installed"):
                 raise ImportError(error_msg)
 
-            # Handle graceful shutdown
             if "Worker interrupted by SIGINT" in error_msg or "shutdown" in result:
                 self.log("Docling process cancelled by user")
                 result = []

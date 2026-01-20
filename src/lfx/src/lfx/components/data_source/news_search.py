@@ -1,3 +1,18 @@
+"""
+模块名称：新闻搜索组件
+
+本模块通过 `Google News` 的 `RSS` 源获取新闻列表，并输出结构化文章数据。
+主要功能包括：
+- 按关键词/主题/地理位置检索新闻
+- 解析 `RSS` 为 `DataFrame`
+
+关键组件：
+- `NewsSearchComponent`
+
+设计背景：提供无需 `API` Key 的新闻检索入口，便于轻量级场景使用。
+注意事项：依赖外部 `RSS` 服务，失败时返回错误数据表。
+"""
+
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -10,6 +25,14 @@ from lfx.schema import DataFrame
 
 
 class NewsSearchComponent(Component):
+    """新闻搜索组件
+
+    契约：
+    - 输入：查询关键词或主题/地理参数
+    - 输出：`DataFrame`（包含新闻列表）
+    - 副作用：记录日志并设置 `self.status`
+    - 失败语义：请求失败时返回带错误信息的 `DataFrame`
+    """
     display_name = "News Search"
     description = "Searches Google News via RSS. Returns clean article data."
     documentation: str = "https://docs.langflow.org/web-search"
@@ -85,7 +108,24 @@ class NewsSearchComponent(Component):
     outputs = [Output(name="articles", display_name="News Articles", method="search_news")]
 
     def search_news(self) -> DataFrame:
-        # Defaults
+        """执行新闻搜索并返回 `DataFrame`
+
+        关键路径（三步）：
+        1) 依据参数构造 `RSS` URL
+        2) 请求并解析 `XML`
+        3) 提取字段并返回 `DataFrame`
+
+        异常流：请求失败或解析失败时返回错误数据表。
+        性能瓶颈：外部请求延迟。
+        排障入口：`self.status` 与日志。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`DataFrame`
+        - 副作用：更新 `self.status`
+        - 失败语义：失败时返回错误 `DataFrame`
+        """
+        # 默认值
         hl = getattr(self, "hl", None) or "en-US"
         gl = getattr(self, "gl", None) or "US"
         ceid = getattr(self, "ceid", None) or f"{gl}:{hl.split('-')[0]}"
@@ -93,19 +133,19 @@ class NewsSearchComponent(Component):
         location = getattr(self, "location", None)
         query = getattr(self, "query", None)
 
-        # Build base URL
+        # 构建基础 `RSS` `URL`
         if topic:
-            # Topic-based feed
+            # 主题订阅
             base_url = f"https://news.google.com/rss/headlines/section/topic/{quote_plus(topic.upper())}"
             params = f"?hl={hl}&gl={gl}&ceid={ceid}"
             rss_url = base_url + params
         elif location:
-            # Location-based feed
+            # 地理位置订阅
             base_url = f"https://news.google.com/rss/headlines/section/geo/{quote_plus(location)}"
             params = f"?hl={hl}&gl={gl}&ceid={ceid}"
             rss_url = base_url + params
         elif query:
-            # Keyword search feed
+            # 关键词搜索订阅
             base_url = "https://news.google.com/rss/search?q="
             query_parts = [query]
             query_encoded = quote_plus(" ".join(query_parts))
@@ -163,4 +203,12 @@ class NewsSearchComponent(Component):
         return DataFrame(df_articles)
 
     def clean_html(self, html_string: str) -> str:
+        """清理 `HTML` 并返回纯文本
+
+        契约：
+        - 输入：`HTML` 字符串
+        - 输出：纯文本字符串
+        - 副作用：无
+        - 失败语义：无
+        """
         return BeautifulSoup(html_string, "html.parser").get_text(separator=" ", strip=True)

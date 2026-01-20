@@ -1,11 +1,17 @@
-"""Enhanced file component with Docling support and process isolation.
+"""
+模块名称：文件读取组件（含 Docling）
 
-Notes:
------
-- ALL Docling parsing/export runs in a separate OS process to prevent memory
-  growth and native library state from impacting the main Langflow process.
-- Standard text/structured parsing continues to use existing BaseFileComponent
-  utilities (and optional threading via `parallel_load_data`).
+本模块提供文件读取与解析能力，支持本地/云存储，并在高级模式下通过 Docling 子进程解析复杂格式。
+主要功能包括：
+- 支持本地、S3 与 Google Drive 的文件读取
+- 根据文件类型在标准解析与 Docling 解析之间切换
+- 在工具模式下提供无参读取能力
+
+关键组件：
+- FileComponent：文件读取与解析入口
+
+设计背景：将 Docling 的重型解析隔离到子进程，避免主进程内存增长与状态污染。
+注意事项：Astra Cloud 禁用高级解析；部分扩展仅在高级模式下可用。
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from lfx.utils.validate_cloud import is_astra_cloud_environment
 
 
 def _get_storage_location_options():
-    """Get storage location options, filtering out Local if in Astra cloud environment."""
+    """获取存储位置选项（云环境隐藏本地存储）。"""
     all_options = [{"name": "AWS", "icon": "Amazon"}, {"name": "Google Drive", "icon": "google"}]
     if is_astra_cloud_environment():
         return all_options
@@ -43,20 +49,25 @@ def _get_storage_location_options():
 
 
 class FileComponent(BaseFileComponent):
-    """File component with optional Docling processing (isolated in a subprocess)."""
+    """文件读取组件（可选 Docling 子进程解析）。
+
+    契约：输入文件路径来自上传或云存储；高级模式要求 Docling 兼容扩展名。
+    副作用：读取文件、可能触发子进程解析与云存储下载。
+    失败语义：参数缺失/解析失败会抛 `ValueError`/`RuntimeError` 或返回错误 `Data`。
+    """
 
     display_name = "Read File"
-    # description is now a dynamic property - see get_tool_description()
+    # 注意：`description` 为动态属性，见 `get_tool_description`
     _base_description = "Loads content from one or more files."
     documentation: str = "https://docs.langflow.org/read-file"
     icon = "file-text"
     name = "File"
-    add_tool_output = True  # Enable tool mode toggle without requiring tool_mode inputs
+    add_tool_output = True  # 启用工具模式切换，无需 tool_mode 输入
 
-    # Extensions that can be processed without Docling (using standard text parsing)
+    # 无需 Docling 的扩展（标准文本解析）
     TEXT_EXTENSIONS = TEXT_FILE_TYPES
 
-    # Extensions that require Docling for processing (images, advanced office formats, etc.)
+    # 需 Docling 处理的扩展（图片/高级办公格式等）
     DOCLING_ONLY_EXTENSIONS = [
         "adoc",
         "asciidoc",
@@ -81,13 +92,13 @@ class FileComponent(BaseFileComponent):
         "webp",
     ]
 
-    # Docling-supported/compatible extensions; TEXT_FILE_TYPES are supported by the base loader.
+    # Docling 兼容扩展（基础加载支持 TEXT_FILE_TYPES）
     VALID_EXTENSIONS = [
         *TEXT_EXTENSIONS,
         *DOCLING_ONLY_EXTENSIONS,
     ]
 
-    # Fixed export settings used when markdown export is requested.
+    # Markdown 导出固定配置
     EXPORT_FORMAT = "Markdown"
     IMAGE_MODE = "placeholder"
 
@@ -96,8 +107,8 @@ class FileComponent(BaseFileComponent):
     for input_item in _base_inputs:
         if isinstance(input_item, FileInput) and input_item.name == "path":
             input_item.real_time_refresh = True
-            input_item.tool_mode = False  # Disable tool mode for file upload input
-            input_item.required = False  # Make it optional so it doesn't error in tool mode
+            input_item.tool_mode = False  # 关闭上传输入的工具模式
+            input_item.required = False  # 工具模式下允许为空
             break
 
     inputs = [
@@ -120,10 +131,10 @@ class FileComponent(BaseFileComponent):
             ),
             show=False,
             advanced=True,
-            tool_mode=True,  # Required for Toolset toggle, but _get_tools() ignores this parameter
+            tool_mode=True,  # 仅用于工具开关，_get_tools() 会忽略该参数
             required=False,
         ),
-        # AWS S3 specific inputs
+        # AWS S3 专属输入
         SecretStrInput(
             name="aws_access_key_id",
             display_name="AWS Access Key ID",
@@ -163,7 +174,7 @@ class FileComponent(BaseFileComponent):
             advanced=False,
             required=True,
         ),
-        # Google Drive specific inputs
+        # Google Drive 专属输入
         SecretStrInput(
             name="service_account_key",
             display_name="GCP Credentials Secret Key",
@@ -189,7 +200,7 @@ class FileComponent(BaseFileComponent):
                 "Enable advanced document processing and export with Docling for PDFs, images, and office documents. "
                 "Note that advanced document processing can consume significant resources."
             ),
-            # Disabled in cloud
+            # 云环境禁用
             show=not is_astra_cloud_environment(),
         ),
         DropdownInput(
@@ -234,7 +245,7 @@ class FileComponent(BaseFileComponent):
             advanced=True,
             show=False,
         ),
-        # Deprecated input retained for backward-compatibility.
+        # 兼容保留的已弃用输入
         BoolInput(
             name="use_multithreading",
             display_name="[Deprecated] Use Multithreading",
@@ -262,25 +273,22 @@ class FileComponent(BaseFileComponent):
         Output(display_name="Raw Content", name="message", method="load_files_message", tool_mode=True),
     ]
 
-    # ------------------------------ Tool description with file names --------------
+    # ------------------------------ 工具描述（包含文件名）--------------
 
     def get_tool_description(self) -> str:
-        """Return a dynamic description that includes the names of uploaded files.
-
-        This helps the Agent understand which files are available to read.
-        """
+        """返回包含已上传文件名的动态描述。"""
         base_description = "Loads and returns the content from uploaded files."
 
-        # Get the list of uploaded file paths
+        # 获取已上传文件路径列表
         file_paths = getattr(self, "path", None)
         if not file_paths:
             return base_description
 
-        # Ensure it's a list
+        # 统一为列表
         if not isinstance(file_paths, list):
             file_paths = [file_paths]
 
-        # Extract just the file names from the paths
+        # 提取文件名
         file_names = []
         for fp in file_paths:
             if fp:
@@ -295,24 +303,20 @@ class FileComponent(BaseFileComponent):
 
     @property
     def description(self) -> str:
-        """Dynamic description property that includes uploaded file names."""
+        """动态描述属性（包含已上传文件名）。"""
         return self.get_tool_description()
 
     async def _get_tools(self) -> list:
-        """Override to create a tool without parameters.
-
-        The Read File component should use the files already uploaded via UI,
-        not accept file paths from the Agent (which wouldn't know the internal paths).
-        """
+        """构建无参工具，直接读取已上传文件。"""
         from langchain_core.tools import StructuredTool
         from pydantic import BaseModel
 
-        # Empty schema - no parameters needed
+        # 空参数模型：不接受外部路径
         class EmptySchema(BaseModel):
-            """No parameters required - uses pre-uploaded files."""
+            """无参数模型：使用预上传文件。"""
 
         async def read_files_tool() -> str:
-            """Read the content of uploaded files."""
+            """读取已上传文件内容。"""
             try:
                 result = self.load_files_message()
                 if hasattr(result, "get_text"):
@@ -340,23 +344,23 @@ class FileComponent(BaseFileComponent):
 
         return [tool]
 
-    # ------------------------------ UI helpers --------------------------------------
+    # ------------------------------ UI 辅助方法 --------------------------------------
 
     def _path_value(self, template: dict) -> list[str]:
-        """Return the list of currently selected file paths from the template."""
+        """从模板中读取当前选中的文件路径。"""
         return template.get("path", {}).get("file_path", [])
 
     def _disable_docling_fields_in_cloud(self, build_config: dict[str, Any]) -> None:
-        """Disable all Docling-related fields in cloud environments."""
+        """在云环境禁用所有 Docling 相关字段。"""
         if "advanced_mode" in build_config:
             build_config["advanced_mode"]["show"] = False
             build_config["advanced_mode"]["value"] = False
-        # Hide all Docling-related fields
+        # 隐藏 Docling 相关字段
         docling_fields = ("pipeline", "ocr_engine", "doc_key", "md_image_placeholder", "md_page_break_placeholder")
         for field in docling_fields:
             if field in build_config:
                 build_config[field]["show"] = False
-        # Also disable OCR engine specifically
+        # 同时禁用 OCR 引擎
         if "ocr_engine" in build_config:
             build_config["ocr_engine"]["value"] = "None"
 
@@ -366,18 +370,27 @@ class FileComponent(BaseFileComponent):
         field_value: Any,
         field_name: str | None = None,
     ) -> dict[str, Any]:
-        """Show/hide Advanced Parser and related fields based on selection context."""
-        # Update storage location options dynamically based on cloud environment
+        """根据选择项展示/隐藏高级解析相关字段。
+
+        关键路径（三步）：
+        1) 刷新存储位置选项并处理选择。
+        2) 根据存储位置切换输入字段可见性。
+        3) 按文件类型与高级模式开关显示 Docling 相关字段。
+
+        异常流：无显式抛错，错误由上游字段校验处理。
+        排障入口：检查 `build_config` 中 `advanced_mode/pipeline/ocr_engine` 的可见状态。
+        """
+        # 根据云环境动态刷新存储选项
         if "storage_location" in build_config:
             updated_options = _get_storage_location_options()
             build_config["storage_location"]["options"] = updated_options
 
-        # Handle storage location selection
+        # 处理存储位置选择
         if field_name == "storage_location":
-            # Extract selected storage location
+            # 提取所选存储位置
             selected = [location["name"] for location in field_value] if isinstance(field_value, list) else []
 
-            # Hide all storage-specific fields first
+            # 先隐藏所有存储相关字段
             storage_fields = [
                 "aws_access_key_id",
                 "aws_secret_access_key",
@@ -392,17 +405,17 @@ class FileComponent(BaseFileComponent):
                 if f_name in build_config:
                     build_config[f_name]["show"] = False
 
-            # Show fields based on selected storage location
+            # 根据存储位置显示字段
             if len(selected) == 1:
                 location = selected[0]
 
                 if location == "Local":
-                    # Show file upload input for local storage
+                    # 本地存储：显示上传输入
                     if "path" in build_config:
                         build_config["path"]["show"] = True
 
                 elif location == "AWS":
-                    # Hide file upload input, show AWS fields
+                    # AWS：隐藏上传输入，显示 AWS 字段
                     if "path" in build_config:
                         build_config["path"]["show"] = False
 
@@ -419,7 +432,7 @@ class FileComponent(BaseFileComponent):
                             build_config[f_name]["advanced"] = False
 
                 elif location == "Google Drive":
-                    # Hide file upload input, show Google Drive fields
+                    # Google Drive：隐藏上传输入，显示 Drive 字段
                     if "path" in build_config:
                         build_config["path"]["show"] = False
 
@@ -428,7 +441,7 @@ class FileComponent(BaseFileComponent):
                         if f_name in build_config:
                             build_config[f_name]["show"] = True
                             build_config[f_name]["advanced"] = False
-            # No storage location selected - show file upload by default
+            # 未选择存储位置：默认显示上传输入
             elif "path" in build_config:
                 build_config["path"]["show"] = True
 
@@ -437,11 +450,11 @@ class FileComponent(BaseFileComponent):
         if field_name == "path":
             paths = self._path_value(build_config)
 
-            # Disable in cloud environments
+            # 云环境禁用 Docling
             if is_astra_cloud_environment():
                 self._disable_docling_fields_in_cloud(build_config)
             else:
-                # If all files can be processed by docling, do so
+                # 仅当全部文件可由 Docling 处理时展示高级模式
                 allow_advanced = all(not file_path.endswith((".csv", ".xlsx", ".parquet")) for file_path in paths)
                 build_config["advanced_mode"]["show"] = allow_advanced
                 if not allow_advanced:
@@ -457,9 +470,9 @@ class FileComponent(BaseFileComponent):
                         if field in build_config:
                             build_config[field]["show"] = False
 
-        # Docling Processing
+        # Docling 处理逻辑
         elif field_name == "advanced_mode":
-            # Disable in cloud environments - don't show Docling fields even if advanced_mode is toggled
+            # 云环境：无论开关状态均隐藏 Docling 字段
             if is_astra_cloud_environment():
                 self._disable_docling_fields_in_cloud(build_config)
             else:
@@ -477,7 +490,7 @@ class FileComponent(BaseFileComponent):
                             build_config[field]["advanced"] = not bool(field_value)
 
         elif field_name == "pipeline":
-            # Disable in cloud environments - don't show OCR engine even if pipeline is changed
+            # 云环境：不显示 OCR 选项
             if is_astra_cloud_environment():
                 self._disable_docling_fields_in_cloud(build_config)
             elif field_value == "standard":
@@ -490,7 +503,7 @@ class FileComponent(BaseFileComponent):
         return build_config
 
     def update_outputs(self, frontend_node: dict[str, Any], field_name: str, field_value: Any) -> dict[str, Any]:  # noqa: ARG002
-        """Dynamically show outputs based on file count/type and advanced mode."""
+        """根据文件数量/类型与高级模式动态输出端口。"""
         if field_name not in ["path", "advanced_mode", "pipeline"]:
             return frontend_node
 
@@ -542,47 +555,39 @@ class FileComponent(BaseFileComponent):
                     Output(display_name="File Path", name="path", method="load_files_path", tool_mode=True),
                 )
         else:
-            # Multiple files => DataFrame output; advanced parser disabled
+            # 多文件：仅输出 DataFrame，并禁用高级解析
             frontend_node["outputs"].append(
                 Output(display_name="Files", name="dataframe", method="load_files", tool_mode=True)
             )
 
         return frontend_node
 
-    # ------------------------------ Core processing ----------------------------------
+    # ------------------------------ 核心处理 ----------------------------------
 
     def _get_selected_storage_location(self) -> str:
-        """Get the selected storage location from the SortableListInput."""
+        """从选择器中获取存储位置。"""
         if hasattr(self, "storage_location") and self.storage_location:
             if isinstance(self.storage_location, list) and len(self.storage_location) > 0:
                 return self.storage_location[0].get("name", "")
             if isinstance(self.storage_location, dict):
                 return self.storage_location.get("name", "")
-        return "Local"  # Default to Local if not specified
+        return "Local"  # 未配置时默认本地
 
     def _validate_and_resolve_paths(self) -> list[BaseFileComponent.BaseFile]:
-        """Override to handle file_path_str input from tool mode and cloud storage.
-
-        Priority:
-        1. Cloud storage (AWS/Google Drive) if selected
-        2. file_path_str (if provided by the tool call)
-        3. path (uploaded file from UI)
-        """
+        """解析输入路径，优先处理云存储与工具模式路径。"""
         storage_location = self._get_selected_storage_location()
 
-        # Handle AWS S3
+        # AWS S3
         if storage_location == "AWS":
             return self._read_from_aws_s3()
 
-        # Handle Google Drive
+        # Google Drive
         if storage_location == "Google Drive":
             return self._read_from_google_drive()
 
-        # Handle Local storage
-        # Check if file_path_str is provided (from tool mode)
+        # 本地存储：优先使用工具模式路径
         file_path_str = getattr(self, "file_path_str", None)
         if file_path_str:
-            # Use the string path from tool mode
             from pathlib import Path
 
             from lfx.schema.data import Data
@@ -598,26 +603,25 @@ class FileComponent(BaseFileComponent):
             data_obj = Data(data={self.SERVER_FILE_PATH_FIELDNAME: str(resolved_path)})
             return [BaseFileComponent.BaseFile(data_obj, resolved_path, delete_after_processing=False)]
 
-        # Otherwise use the default implementation (uses path FileInput)
+        # 否则使用默认实现（FileInput 上传路径）
         return super()._validate_and_resolve_paths()
 
     def _read_from_aws_s3(self) -> list[BaseFileComponent.BaseFile]:
-        """Read file from AWS S3."""
+        """从 AWS S3 读取文件。"""
         from lfx.base.data.cloud_storage_utils import create_s3_client, validate_aws_credentials
 
-        # Validate AWS credentials
+        # 校验 AWS 凭据
         validate_aws_credentials(self)
         if not getattr(self, "s3_file_key", None):
             msg = "S3 File Key is required"
             raise ValueError(msg)
 
-        # Create S3 client
+        # 创建 S3 客户端
         s3_client = create_s3_client(self)
 
-        # Download file to temp location
         import tempfile
 
-        # Get file extension from S3 key
+        # 从 S3 key 推断扩展名
         file_extension = Path(self.s3_file_key).suffix or ""
 
         with tempfile.NamedTemporaryFile(mode="wb", suffix=file_extension, delete=False) as temp_file:
@@ -625,13 +629,13 @@ class FileComponent(BaseFileComponent):
             try:
                 s3_client.download_fileobj(self.bucket_name, self.s3_file_key, temp_file)
             except Exception as e:
-                # Clean up temp file on failure
+                # 失败时清理临时文件
                 with contextlib.suppress(OSError):
                     Path(temp_file_path).unlink()
                 msg = f"Failed to download file from S3: {e}"
                 raise RuntimeError(msg) from e
 
-        # Create BaseFile object
+        # 构建 BaseFile
         from lfx.schema.data import Data
 
         temp_path = Path(temp_file_path)
@@ -639,14 +643,14 @@ class FileComponent(BaseFileComponent):
         return [BaseFileComponent.BaseFile(data_obj, temp_path, delete_after_processing=True)]
 
     def _read_from_google_drive(self) -> list[BaseFileComponent.BaseFile]:
-        """Read file from Google Drive."""
+        """从 Google Drive 读取文件。"""
         import tempfile
 
         from googleapiclient.http import MediaIoBaseDownload
 
         from lfx.base.data.cloud_storage_utils import create_google_drive_service
 
-        # Validate Google Drive credentials
+        # 校验 Google Drive 凭据
         if not getattr(self, "service_account_key", None):
             msg = "GCP Credentials Secret Key is required for Google Drive storage"
             raise ValueError(msg)
@@ -654,12 +658,12 @@ class FileComponent(BaseFileComponent):
             msg = "Google Drive File ID is required"
             raise ValueError(msg)
 
-        # Create Google Drive service with read-only scope
+        # 创建只读 Google Drive 服务
         drive_service = create_google_drive_service(
             self.service_account_key, scopes=["https://www.googleapis.com/auth/drive.readonly"]
         )
 
-        # Get file metadata to determine file name and extension
+        # 获取文件元信息以确定名称与扩展名
         try:
             file_metadata = drive_service.files().get(fileId=self.file_id, fields="name,mimeType").execute()
             file_name = file_metadata.get("name", "download")
@@ -672,7 +676,7 @@ class FileComponent(BaseFileComponent):
             )
             raise ValueError(msg) from e
 
-        # Download file to temp location
+        # 下载到临时文件
         file_extension = Path(file_name).suffix or ""
         with tempfile.NamedTemporaryFile(mode="wb", suffix=file_extension, delete=False) as temp_file:
             temp_file_path = temp_file.name
@@ -683,13 +687,13 @@ class FileComponent(BaseFileComponent):
                 while not done:
                     _status, done = downloader.next_chunk()
             except Exception as e:
-                # Clean up temp file on failure
+                # 失败时清理临时文件
                 with contextlib.suppress(OSError):
                     Path(temp_file_path).unlink()
                 msg = f"Failed to download file from Google Drive: {e}"
                 raise RuntimeError(msg) from e
 
-        # Create BaseFile object
+        # 构建 BaseFile
         from lfx.schema.data import Data
 
         temp_path = Path(temp_file_path)
@@ -697,7 +701,7 @@ class FileComponent(BaseFileComponent):
         return [BaseFileComponent.BaseFile(data_obj, temp_path, delete_after_processing=True)]
 
     def _is_docling_compatible(self, file_path: str) -> bool:
-        """Lightweight extension gate for Docling-compatible types."""
+        """基于扩展名判断 Docling 兼容性。"""
         docling_exts = (
             ".adoc",
             ".asciidoc",
@@ -733,20 +737,12 @@ class FileComponent(BaseFileComponent):
         return file_path.lower().endswith(docling_exts)
 
     async def _get_local_file_for_docling(self, file_path: str) -> tuple[str, bool]:
-        """Get a local file path for Docling processing, downloading from S3 if needed.
-
-        Args:
-            file_path: Either a local path or S3 key (format "flow_id/filename")
-
-        Returns:
-            tuple[str, bool]: (local_path, should_delete) where should_delete indicates
-                              if this is a temporary file that should be cleaned up
-        """
+        """获取 Docling 处理所需的本地文件路径（必要时从 S3 下载）。"""
         settings = get_settings_service().settings
         if settings.storage_type == "local":
             return file_path, False
 
-        # S3 storage - download to temp file
+        # S3 存储：下载至临时文件
         parsed = parse_storage_path(file_path)
         if not parsed:
             msg = f"Invalid S3 path format: {file_path}. Expected 'flow_id/filename'"
@@ -755,7 +751,7 @@ class FileComponent(BaseFileComponent):
         storage_service = get_storage_service()
         flow_id, filename = parsed
 
-        # Get file content from S3
+        # 从 S3 获取文件内容
         content = await storage_service.get_file(flow_id, filename)
 
         suffix = Path(filename).suffix
@@ -766,12 +762,14 @@ class FileComponent(BaseFileComponent):
         return temp_path, True
 
     def _process_docling_in_subprocess(self, file_path: str) -> Data | None:
-        """Run Docling in a separate OS process and map the result to a Data object.
+        """在子进程运行 Docling 并映射为 `Data`。
 
-        We avoid multiprocessing pickling by launching `python -c "<script>"` and
-        passing JSON config via stdin. The child prints a JSON result to stdout.
+        关键路径（三步）：
+        1) 根据存储类型准备本地文件路径。
+        2) 调用子进程解析并返回结构化结果。
+        3) 清理临时文件并回传 `Data`。
 
-        For S3 storage, the file is downloaded to a temp file first.
+        异常流：解析失败返回包含 `error` 的 `Data`，不在此处抛错。
         """
         if not file_path:
             return None
@@ -786,19 +784,20 @@ class FileComponent(BaseFileComponent):
         try:
             return self._process_docling_subprocess_impl(local_path, file_path)
         finally:
-            # Clean up temp file if we created one
+            # 如为临时文件则清理
             if should_delete:
                 with contextlib.suppress(Exception):
-                    Path(local_path).unlink()  # Ignore cleanup errors
+                    Path(local_path).unlink()  # 忽略清理错误
 
     def _process_docling_subprocess_impl(self, local_file_path: str, original_file_path: str) -> Data | None:
-        """Implementation of Docling subprocess processing.
+        """Docling 子进程执行实现。
 
-        Args:
-            local_file_path: Path to local file to process
-            original_file_path: Original file path to include in metadata
-        Returns:
-            Data object with processed content
+        关键路径（三步）：
+        1) 组装配置并通过 stdin 传给子进程脚本。
+        2) 解析子进程输出 JSON 并校验成功标志。
+        3) 统一 `file_path` 并构造 `Data` 返回。
+
+        异常流：子进程输出异常或 JSON 不合法时返回包含 `error` 的 `Data`。
         """
         args: dict[str, Any] = {
             "file_path": local_file_path,
@@ -812,7 +811,7 @@ class FileComponent(BaseFileComponent):
             ),
         }
 
-        # Child script for isolating the docling processing
+        # 子进程脚本（隔离 Docling 处理）
         child_script = textwrap.dedent(
             r"""
             import json, sys
@@ -827,7 +826,7 @@ class FileComponent(BaseFileComponent):
                     raise e
 
             def create_converter(strategy, input_format, DocumentConverter, pipeline, ocr_engine):
-                # --- Standard PDF/IMAGE pipeline (your existing behavior), with optional OCR ---
+                # --- 标准 PDF/图片流水线（含可选 OCR）---
                 if pipeline == "standard":
                     try:
                         from docling.datamodel.pipeline_options import PdfPipelineOptions  # type: ignore
@@ -843,7 +842,7 @@ class FileComponent(BaseFileComponent):
                                 fac = get_ocr_factory(allow_external_plugins=False)
                                 pipe.ocr_options = fac.create_options(kind=ocr_engine)
                             except Exception:
-                                # If OCR setup fails, disable it
+                                # OCR 初始化失败则关闭
                                 pipe.do_ocr = False
 
                         fmt = {}
@@ -856,7 +855,7 @@ class FileComponent(BaseFileComponent):
                     except Exception:
                         return DocumentConverter()
 
-                # --- Vision-Language Model (VLM) pipeline ---
+                # --- 视觉语言模型（VLM）流水线 ---
                 if pipeline == "vlm":
                     try:
                         from docling.datamodel.pipeline_options import VlmPipelineOptions
@@ -875,7 +874,7 @@ class FileComponent(BaseFileComponent):
                             except ImportError as e:
                                 raise e
 
-                        # VLM paths generally don't need OCR; keep OCR off by default here.
+                        # VLM 通常不需要 OCR，默认关闭
                         fmt = {}
                         if hasattr(input_format, "PDF"):
                             fmt[getattr(input_format, "PDF")] = PdfFormatOption(
@@ -892,7 +891,7 @@ class FileComponent(BaseFileComponent):
                     except Exception as e:
                         raise e
 
-                # --- Fallback: default converter with no special options ---
+                # --- 回退：默认转换器 ---
                 return DocumentConverter()
 
             def export_markdown(document, ImageRefMode, image_mode, img_ph, pg_ph):
@@ -966,7 +965,7 @@ class FileComponent(BaseFileComponent):
                         print(json.dumps({"ok": True, "mode": "markdown", "text": text, "meta": meta}))
                         return
 
-                    # structured
+                    # 结构化输出
                     try:
                         doc_dict = doc.export_to_dict()
                     except Exception as e:
@@ -989,7 +988,7 @@ class FileComponent(BaseFileComponent):
             """
         )
 
-        # Validate file_path to avoid command injection or unsafe input
+        # 校验 file_path，避免命令注入或不安全输入
         if not isinstance(args["file_path"], str) or any(c in args["file_path"] for c in [";", "|", "&", "$", "`"]):
             return Data(data={"error": "Unsafe file path detected.", "file_path": args["file_path"]})
 
@@ -1017,14 +1016,14 @@ class FileComponent(BaseFileComponent):
 
         if not result.get("ok"):
             error_msg = result.get("error", "Unknown Docling error")
-            # Override meta file_path with original_file_path to ensure correct path matching
+            # 覆盖 meta 的 file_path，确保与原路径匹配
             meta = result.get("meta", {})
             meta["file_path"] = original_file_path
             return Data(data={"error": error_msg, **meta})
 
         meta = result.get("meta", {})
-        # Override meta file_path with original_file_path to ensure correct path matching
-        # The subprocess returns the temp file path, but we need the original S3/local path for rollup_data
+        # 覆盖 meta 的 file_path，避免临时路径影响聚合
+        # 子进程返回临时路径，但 rollup_data 需要原始 S3/本地路径
         meta["file_path"] = original_file_path
         if result.get("mode") == "markdown":
             exported_content = str(result.get("text", ""))
@@ -1040,30 +1039,34 @@ class FileComponent(BaseFileComponent):
         self,
         file_list: list[BaseFileComponent.BaseFile],
     ) -> list[BaseFileComponent.BaseFile]:
-        """Process input files.
+        """处理输入文件列表并返回结果。
 
-        - advanced_mode => Docling in a separate process.
-        - Otherwise => standard parsing in current process (optionally threaded).
+        关键路径（三步）：
+        1) 校验输入与文件类型，必要时进行图片内容验证。
+        2) 高级模式下走 Docling 子进程解析并展开结果。
+        3) 否则走标准解析并按并发配置处理。
+
+        异常流：不满足高级模式要求时抛 `ValueError`；解析失败记录到 `Data.error` 或抛错。
+        性能瓶颈：Docling 子进程与并发读取为主要耗时点。
         """
         if not file_list:
             msg = "No files to process."
             raise ValueError(msg)
 
-        # Validate image files to detect content/extension mismatches
-        # This prevents API errors like "Image does not match the provided media type"
+        # 校验图片内容与扩展名匹配，避免媒体类型错误
         image_extensions = {"jpeg", "jpg", "png", "gif", "webp", "bmp", "tiff"}
         settings = get_settings_service().settings
         for file in file_list:
             extension = file.path.suffix[1:].lower()
             if extension in image_extensions:
-                # Read bytes based on storage type
+                # 按存储类型读取字节内容
                 try:
                     if settings.storage_type == "s3":
-                        # For S3 storage, use storage service to read file bytes
+                        # S3 存储通过存储服务读取字节
                         file_path_str = str(file.path)
                         content = run_until_complete(read_file_bytes(file_path_str))
                     else:
-                        # For local storage, read bytes directly from filesystem
+                        # 本地存储直接读取字节
                         content = file.path.read_bytes()
 
                     is_valid, error_msg = validate_image_content_type(
@@ -1076,9 +1079,9 @@ class FileComponent(BaseFileComponent):
                             raise ValueError(error_msg)
                 except (OSError, FileNotFoundError) as e:
                     self.log(f"Could not read file for validation: {e}")
-                    # Continue - let it fail later with better error
+                    # 继续流程，后续由更明确的错误处理
 
-        # Validate that files requiring Docling are only processed when advanced mode is enabled
+        # 仅在高级模式开启时处理 Docling 专用扩展
         if not self.advanced_mode:
             for file in file_list:
                 extension = file.path.suffix[1:].lower()
@@ -1112,14 +1115,14 @@ class FileComponent(BaseFileComponent):
 
         docling_compatible = all(self._is_docling_compatible(str(f.path)) for f in file_list)
 
-        # Advanced path: Check if ALL files are compatible with Docling
+        # 高级路径：仅当全部文件兼容 Docling 时启用
         if self.advanced_mode and docling_compatible:
             final_return: list[BaseFileComponent.BaseFile] = []
             for file in file_list:
                 file_path = str(file.path)
                 advanced_data: Data | None = self._process_docling_in_subprocess(file_path)
 
-                # Handle None case - Docling processing failed or returned None
+                # Docling 返回 None 时视为失败并降级
                 if advanced_data is None:
                     error_data = Data(
                         data={
@@ -1130,10 +1133,10 @@ class FileComponent(BaseFileComponent):
                     final_return.extend(self.rollup_data([file], [error_data]))
                     continue
 
-                # --- UNNEST: expand each element in `doc` to its own Data row
+                # --- 展开：将 `doc` 中每个元素展开为独立 Data 行
                 payload = getattr(advanced_data, "data", {}) or {}
 
-                # Check for errors first
+                # 优先处理错误返回
                 if "error" in payload:
                     error_msg = payload.get("error", "Unknown error")
                     error_data = Data(
@@ -1148,7 +1151,7 @@ class FileComponent(BaseFileComponent):
 
                 doc_rows = payload.get("doc")
                 if isinstance(doc_rows, list) and doc_rows:
-                    # Non-empty list of structured rows
+                    # 结构化结果非空
                     rows: list[Data | None] = [
                         Data(
                             data={
@@ -1160,8 +1163,7 @@ class FileComponent(BaseFileComponent):
                     ]
                     final_return.extend(self.rollup_data([file], rows))
                 elif isinstance(doc_rows, list) and not doc_rows:
-                    # Empty list - file was processed but no text content found
-                    # Create a Data object indicating no content was extracted
+                    # 结构化结果为空：文件已处理但未提取到文本
                     self.log(f"No text extracted from '{file_path}', creating placeholder data")
                     empty_data = Data(
                         data={
@@ -1173,11 +1175,11 @@ class FileComponent(BaseFileComponent):
                     )
                     final_return.extend(self.rollup_data([file], [empty_data]))
                 else:
-                    # If not structured, keep as-is (e.g., markdown export or error dict)
-                    # Ensure file_path is set for proper rollup matching
+                    # 非结构化结果保持原样（如 markdown 或错误字典）
+                    # 确保 file_path 存在以便 rollup 匹配
                     if not payload.get("file_path"):
                         payload["file_path"] = file_path
-                        # Create new Data with file_path
+                        # 补充 file_path 后重建 Data
                         advanced_data = Data(
                             data=payload,
                             text=getattr(advanced_data, "text", None),
@@ -1185,7 +1187,7 @@ class FileComponent(BaseFileComponent):
                     final_return.extend(self.rollup_data([file], [advanced_data]))
             return final_return
 
-        # Standard multi-file (or single non-advanced) path
+        # 标准路径：多文件或未启用高级模式
         concurrency = 1 if not self.use_multithreading else max(1, self.concurrency_multithreading)
 
         file_paths = [str(f.path) for f in file_list]
@@ -1198,17 +1200,17 @@ class FileComponent(BaseFileComponent):
         )
         return self.rollup_data(file_list, my_data)
 
-    # ------------------------------ Output helpers -----------------------------------
+    # ------------------------------ 输出辅助 -----------------------------------
 
     def load_files_helper(self) -> DataFrame:
         result = self.load_files()
 
-        # Result is a DataFrame - check if it has any rows
+        # 结果为空则报错
         if result.empty:
             msg = "Could not extract content from the provided file(s)."
             raise ValueError(msg)
 
-        # Check for error column with error messages
+        # 若仅有错误列则直接抛错
         if "error" in result.columns:
             errors = result["error"].dropna().tolist()
             if errors and not any(col in result.columns for col in ["text", "doc", "exported_content"]):
@@ -1217,16 +1219,16 @@ class FileComponent(BaseFileComponent):
         return result
 
     def load_files_dataframe(self) -> DataFrame:
-        """Load files using advanced Docling processing and export to DataFrame format."""
+        """使用 Docling 高级解析并返回 DataFrame。"""
         self.markdown = False
         return self.load_files_helper()
 
     def load_files_markdown(self) -> Message:
-        """Load files using advanced Docling processing and export to Markdown format."""
+        """使用 Docling 高级解析并返回 Markdown。"""
         self.markdown = True
         result = self.load_files_helper()
 
-        # Result is a DataFrame - check for text or exported_content columns
+        # 优先返回 text/exported_content
         if "text" in result.columns and not result["text"].isna().all():
             text_values = result["text"].dropna().tolist()
             if text_values:
@@ -1237,5 +1239,5 @@ class FileComponent(BaseFileComponent):
             if content_values:
                 return Message(text=str(content_values[0]))
 
-        # Return empty message with info that no text was found
+        # 无文本时返回占位消息
         return Message(text="(No text content extracted from file)")

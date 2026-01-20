@@ -1,3 +1,19 @@
+"""
+模块名称：Data 条件路由组件
+
+本模块提供基于 Data 字段值的条件路由能力，主要用于对 Data 或 Data 列表
+进行条件判断并选择 True/False 分支输出。
+主要功能包括：
+- 支持字符串比较与布尔验证
+- 支持单条 Data 与列表输入
+
+关键组件：
+- `DataConditionalRouterComponent`：Data 条件路由组件
+
+设计背景：在数据流中提供对结构化字段的条件判断能力。
+注意事项：组件已标记为 legacy，推荐使用替代组件。
+"""
+
 from typing import Any
 
 from lfx.custom.custom_component.component import Component
@@ -7,6 +23,11 @@ from lfx.schema.dotdict import dotdict
 
 
 class DataConditionalRouterComponent(Component):
+    """基于 Data 字段的条件路由组件。
+
+    契约：`process_data` 返回符合条件的 Data 或列表；状态信息写入 `self.status`。
+    失败语义：输入非法时返回包含错误信息的 `Data`。
+    """
     display_name = "Condition"
     description = "Route Data object(s) based on a condition applied to a specified key, including boolean validation."
     icon = "split"
@@ -46,6 +67,7 @@ class DataConditionalRouterComponent(Component):
     ]
 
     def compare_values(self, item_value: str, compare_value: str, operator: str) -> bool:
+        """按操作符比较字符串值。"""
         if operator == "equals":
             return item_value == compare_value
         if operator == "not equals":
@@ -61,6 +83,7 @@ class DataConditionalRouterComponent(Component):
         return False
 
     def parse_boolean(self, value):
+        """解析布尔语义值，支持字符串与原生布尔。"""
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -68,6 +91,7 @@ class DataConditionalRouterComponent(Component):
         return bool(value)
 
     def validate_input(self, data_item: Data) -> bool:
+        """校验输入是否为 Data 且包含指定 key。"""
         if not isinstance(data_item, Data):
             self.status = "Input is not a Data object"
             return False
@@ -77,6 +101,14 @@ class DataConditionalRouterComponent(Component):
         return True
 
     def process_data(self) -> Data | list[Data]:
+        """处理单条或多条 Data 并按条件路由输出。
+
+        关键路径（三步）：
+        1) 判断输入为列表或单条
+        2) 对每条 Data 进行条件判断
+        3) 输出符合条件的分支结果
+        异常流：输入非法时返回包含错误信息的 `Data`。
+        """
         if isinstance(self.data_input, list):
             true_output = []
             false_output = []
@@ -96,6 +128,7 @@ class DataConditionalRouterComponent(Component):
         return self.data_input
 
     def process_single_data(self, data_item: Data) -> bool:
+        """处理单条 Data，返回条件是否成立。"""
         item_value = data_item.data[self.key_name]
         operator = self.operator
 
@@ -114,6 +147,7 @@ class DataConditionalRouterComponent(Component):
         return False
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据操作符动态调整比较值字段的显示。"""
         if field_name == "operator":
             if field_value == "boolean validator":
                 build_config["compare_value"]["show"] = False

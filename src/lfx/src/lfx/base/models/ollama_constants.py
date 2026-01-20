@@ -1,8 +1,25 @@
+"""
+模块名称：Ollama 模型元数据
+
+本模块维护 Ollama 的模型元数据、嵌入模型与常见连接地址，主要用于 UI 选择与兼容支持。
+主要功能包括：
+- 提供支持工具调用的模型元数据列表
+- 提供嵌入模型的简表与元数据表
+- 提供常用本地连接地址与默认 API URL
+
+关键组件：
+- `OLLAMA_MODELS_DETAILED`：工具调用模型元数据
+- `OLLAMA_EMBEDDING_MODELS`：嵌入模型名列表
+
+设计背景：Ollama 模型与部署地址多样，需提供稳定的默认项。
+注意事项：此列表不等同于本地实际安装模型列表。
+"""
+
 from .model_metadata import create_model_metadata
 
-# Unified model metadata - single source of truth
+# 统一元数据：作为唯一事实来源
 OLLAMA_MODELS_DETAILED = [
-    # Tool Calling Models
+    # 支持工具调用的模型
     create_model_metadata(
         provider="Ollama",
         name="llama3.3",
@@ -173,14 +190,14 @@ OLLAMA_MODELS_DETAILED = [
     ),
 ]
 
-# Filter lists based on metadata properties
+# 依据元数据过滤得到的可用列表
 OLLAMA_TOOL_MODELS_BASE = [
     metadata["name"]
     for metadata in OLLAMA_MODELS_DETAILED
     if metadata.get("tool_calling", False) and not metadata.get("not_supported", False)
 ]
 
-# Embedding models - following OpenAI's pattern of keeping these as a simple list
+# 嵌入模型列表（遵循 OpenAI 简表风格）
 # https://ollama.com/search?c=embedding
 OLLAMA_EMBEDDING_MODELS = [
     "nomic-embed-text",
@@ -194,7 +211,7 @@ OLLAMA_EMBEDDING_MODELS = [
     "jina-embeddings-v2-base-en",
 ]
 
-# Embedding models as detailed metadata
+# 嵌入模型元数据版本
 OLLAMA_EMBEDDING_MODELS_DETAILED = [
     create_model_metadata(
         provider="Ollama",
@@ -205,7 +222,7 @@ OLLAMA_EMBEDDING_MODELS_DETAILED = [
     for name in OLLAMA_EMBEDDING_MODELS
 ]
 
-# Connection URLs
+# 常见连接地址
 URL_LIST = [
     "http://localhost:11434",
     "http://host.docker.internal:11434",
@@ -213,6 +230,6 @@ URL_LIST = [
     "http://0.0.0.0:11434",
 ]
 
-# Backwards compatibility
+# 向后兼容别名
 OLLAMA_MODEL_NAMES = OLLAMA_TOOL_MODELS_BASE
 DEFAULT_OLLAMA_API_URL = "https://ollama.com"

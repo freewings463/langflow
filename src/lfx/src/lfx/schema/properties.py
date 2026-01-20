@@ -1,4 +1,4 @@
-"""Properties and Source schema classes copied from langflow for lfx package."""
+"""消息属性相关 schema。"""
 
 from typing import Literal
 
@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class Source(BaseModel):
+    """消息来源信息。"""
     id: str | None = Field(default=None, description="The id of the source component.")
     display_name: str | None = Field(default=None, description="The display name of the source component.")
     source: str | None = Field(
@@ -15,6 +16,7 @@ class Source(BaseModel):
 
 
 class Properties(BaseModel):
+    """消息展示属性。"""
     text_color: str | None = None
     background_color: str | None = None
     edited: bool = False

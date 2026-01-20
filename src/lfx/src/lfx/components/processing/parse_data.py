@@ -1,3 +1,10 @@
+"""Data 转 Message 解析组件。
+
+本模块根据模板将 Data 列表转换为 Message 或新的 Data 列表。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：模板可引用 `text` 或 `data` 中的任意键。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.helpers.data import data_to_text, data_to_text_list
 from lfx.io import DataInput, MultilineInput, Output, StrInput
@@ -6,6 +13,11 @@ from lfx.schema.message import Message
 
 
 class ParseDataComponent(Component):
+    """Data 解析组件封装。
+
+    契约：输入为 Data 列表与模板；输出为 Message 或 Data 列表。
+    副作用：更新 `self.status`。
+    """
     display_name = "Data to Message"
     description = "Convert Data objects into Messages using any {field_name} from input data."
     icon = "message-square"
@@ -51,18 +63,21 @@ class ParseDataComponent(Component):
     ]
 
     def _clean_args(self) -> tuple[list[Data], str, str]:
+        """规范化输入参数。"""
         data = self.data if isinstance(self.data, list) else [self.data]
         template = self.template
         sep = self.sep
         return data, template, sep
 
     def parse_data(self) -> Message:
+        """将 Data 列表渲染为单一 Message。"""
         data, template, sep = self._clean_args()
         result_string = data_to_text(template, data, sep)
         self.status = result_string
         return Message(text=result_string)
 
     def parse_data_as_list(self) -> list[Data]:
+        """按模板生成新的 Data 列表。"""
         data, template, _ = self._clean_args()
         text_list, data_list = data_to_text_list(template, data)
         for item, text in zip(data_list, text_list, strict=True):

@@ -1,3 +1,21 @@
+"""
+模块名称：Qdrant 向量库组件
+
+本模块提供 Qdrant 向量检索组件，支持本地/远程服务连接与相似度检索。
+主要功能包括：
+- 组装 Qdrant 连接参数并构建向量库实例
+- 将输入文档写入集合或连接已有集合
+- 执行相似度检索并返回 `Data` 列表
+
+关键组件：
+- `QdrantVectorStoreComponent`
+- `build_vector_store`
+- `search_documents`
+
+设计背景：以统一接口接入 Qdrant 向量库能力。
+注意事项：`embedding` 必须为 `Embeddings` 实例；未提供文档时仅建立客户端连接。
+"""
+
 from langchain_community.vectorstores import Qdrant
 from langchain_core.embeddings import Embeddings
 
@@ -14,6 +32,15 @@ from lfx.schema.data import Data
 
 
 class QdrantVectorStoreComponent(LCVectorStoreComponent):
+    """Qdrant 向量库组件。
+
+    契约：
+    - 输入：集合名、连接参数、距离函数与向量字段配置
+    - 输出：向量库实例或检索结果 `list[Data]`
+    - 副作用：可能创建集合并写入文档
+    - 失败语义：`embedding` 类型错误时抛 `TypeError`
+    """
+
     display_name = "Qdrant"
     description = "Qdrant Vector Store with search capabilities"
     icon = "Qdrant"
@@ -50,6 +77,15 @@ class QdrantVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> Qdrant:
+        """构建 Qdrant 向量库实例。
+
+        关键路径（三步）：
+        1) 组装集合与服务端配置参数
+        2) 规范化输入文档并校验 `embedding` 类型
+        3) 有文档则写入创建；无文档则仅连接现有集合
+
+        异常流：`embedding` 不是 `Embeddings` 时抛 `TypeError`。
+        """
         qdrant_kwargs = {
             "collection_name": self.collection_name,
             "content_payload_key": self.content_payload_key,
@@ -70,7 +106,7 @@ class QdrantVectorStoreComponent(LCVectorStoreComponent):
 
         server_kwargs = {k: v for k, v in server_kwargs.items() if v is not None}
 
-        # Convert DataFrame to Data if needed using parent's method
+        # 注意：输入数据可能来自 DataFrame/自定义类型，先统一为 LangChain 文档
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -95,6 +131,14 @@ class QdrantVectorStoreComponent(LCVectorStoreComponent):
         return qdrant
 
     def search_documents(self) -> list[Data]:
+        """执行向量检索并返回 `Data` 列表。
+
+        契约：
+        - 输入：`search_query` 文本与 `number_of_results`
+        - 输出：`list[Data]`；空查询返回空列表
+        - 副作用：更新 `self.status`
+        - 失败语义：底层向量库异常将向上抛出
+        """
         vector_store = self.build_vector_store()
 
         if self.search_query and isinstance(self.search_query, str) and self.search_query.strip():

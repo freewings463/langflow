@@ -1,3 +1,14 @@
+"""数据操作组件。
+
+本模块提供 Data 的选择、过滤、更新、路径提取与 JQ 查询等操作。
+主要功能包括：
+- 动态展示操作相关的输入字段
+- 基于单一操作执行 Data 变换
+- 兼容 JSON 修复与 JQ 查询
+
+注意事项：一次仅支持一个操作；部分操作仅支持单条 Data 输入。
+"""
+
 import ast
 import json
 from typing import TYPE_CHECKING, Any
@@ -37,6 +48,12 @@ OPERATORS = {
 
 
 class DataOperationsComponent(Component):
+    """Data 操作组件封装。
+
+    契约：输入为 Data 列表与单一操作；输出为 `Data`。
+    副作用：根据操作动态更新配置与日志输出。
+    失败语义：非法组合/缺失字段时抛 `ValueError` 或 `TypeError`。
+    """
     display_name = "Data Operations"
     description = "Perform various operations on a Data object."
     icon = "file-json"
@@ -83,6 +100,7 @@ class DataOperationsComponent(Component):
 
     @staticmethod
     def extract_all_paths(obj, path=""):
+        """提取 JSON 所有可访问路径。"""
         paths = []
         if isinstance(obj, dict):
             for k, v in obj.items():
@@ -97,6 +115,7 @@ class DataOperationsComponent(Component):
 
     @staticmethod
     def remove_keys_recursive(obj, keys_to_remove):
+        """递归移除指定键。"""
         if isinstance(obj, dict):
             return {
                 k: DataOperationsComponent.remove_keys_recursive(v, keys_to_remove)
@@ -109,6 +128,7 @@ class DataOperationsComponent(Component):
 
     @staticmethod
     def rename_keys_recursive(obj, rename_map):
+        """递归重命名键。"""
         if isinstance(obj, dict):
             return {
                 rename_map.get(k, k): DataOperationsComponent.rename_keys_recursive(v, rename_map)
@@ -139,7 +159,7 @@ class DataOperationsComponent(Component):
             real_time_refresh=True,
             limit=1,
         ),
-        # select keys inputs
+        # 选择键输入
         MessageTextInput(
             name="select_keys_input",
             display_name="Select Keys",
@@ -147,7 +167,7 @@ class DataOperationsComponent(Component):
             show=False,
             is_list=True,
         ),
-        # filter values inputs
+        # 过滤值输入
         MessageTextInput(
             name="filter_key",
             display_name="Filter Key",
@@ -174,7 +194,7 @@ class DataOperationsComponent(Component):
             show=False,
             is_list=True,
         ),
-        # update/ Append data inputs
+        # 追加/更新输入
         DictInput(
             name="append_update_data",
             display_name="Append or Update",
@@ -183,7 +203,7 @@ class DataOperationsComponent(Component):
             value={"key": "value"},
             is_list=True,
         ),
-        # remove keys inputs
+        # 删除键输入
         MessageTextInput(
             name="remove_keys_input",
             display_name="Remove Keys",
@@ -191,7 +211,7 @@ class DataOperationsComponent(Component):
             show=False,
             is_list=True,
         ),
-        # rename keys inputs
+        # 重命名键输入
         DictInput(
             name="rename_keys_input",
             display_name="Rename Keys",
@@ -225,13 +245,22 @@ class DataOperationsComponent(Component):
         Output(display_name="Data", name="data_output", method="as_data"),
     ]
 
-    # Helper methods for data operations
+    # 数据操作辅助方法
     def get_data_dict(self) -> dict:
-        """Extract data dictionary from Data object."""
+        """抽取 Data 的字典形式。"""
         data = self.data[0] if isinstance(self.data, list) and len(self.data) == 1 else self.data
         return data.model_dump()
 
     def json_query(self) -> Data:
+        """执行 JQ 查询并返回结果 Data。
+
+        契约：`query` 必填；输出为 `Data`。
+        失败语义：JSON/查询错误抛 `ValueError`。
+        关键路径（三步）：
+        1) 序列化并修复 JSON；
+        2) 执行 JQ 查询；
+        3) 规范化结果并返回。
+        """
         import json
 
         import jq
@@ -262,33 +291,32 @@ class DataOperationsComponent(Component):
             raise ValueError(msg) from e
 
     def get_normalized_data(self) -> dict:
-        """Get normalized data dictionary, handling the 'data' key if present."""
+        """返回统一的数据字典（优先使用 `data` 字段）。"""
         data_dict = self.get_data_dict()
         return data_dict.get("data", data_dict)
 
     def data_is_list(self) -> bool:
-        """Check if data contains multiple items."""
+        """判断是否为多条 Data 输入。"""
         return isinstance(self.data, list) and len(self.data) > 1
 
     def validate_single_data(self, operation: str) -> None:
-        """Validate that the operation is being performed on a single data object."""
+        """确保操作仅作用于单条 Data。"""
         if self.data_is_list():
             msg = f"{operation} operation is not supported for multiple data objects."
             raise ValueError(msg)
 
     def operation_exception(self, operations: list[str]) -> None:
-        """Raise exception for incompatible operations."""
+        """抛出不兼容操作组合异常。"""
         msg = f"{operations} operations are not supported in combination with each other."
         raise ValueError(msg)
 
-    # Data transformation operations
+    # 数据变换操作
     def select_keys(self, *, evaluate: bool | None = None) -> Data:
-        """Select specific keys from the data dictionary."""
+        """选择指定键并可选执行字面量解析。"""
         self.validate_single_data("Select Keys")
         data_dict = self.get_normalized_data()
         filter_criteria: list[str] = self.select_keys_input
 
-        # Filter the data
         if len(filter_criteria) == 1 and filter_criteria[0] == "data":
             filtered = data_dict["data"]
         else:
@@ -297,15 +325,13 @@ class DataOperationsComponent(Component):
                 raise ValueError(msg)
             filtered = {key: value for key, value in data_dict.items() if key in filter_criteria}
 
-        # Create a new Data object with the filtered data
         if evaluate:
             filtered = self.recursive_eval(filtered)
 
-        # Return a new Data object with the filtered data directly in the data attribute
         return Data(data=filtered)
 
     def remove_keys(self) -> Data:
-        """Remove specified keys from the data dictionary, recursively."""
+        """递归移除指定键。"""
         self.validate_single_data("Remove Keys")
         data_dict = self.get_normalized_data()
         remove_keys_input: list[str] = self.remove_keys_input
@@ -314,7 +340,7 @@ class DataOperationsComponent(Component):
         return Data(data=filtered)
 
     def rename_keys(self) -> Data:
-        """Rename keys in the data dictionary, recursively."""
+        """递归重命名指定键。"""
         self.validate_single_data("Rename Keys")
         data_dict = self.get_normalized_data()
         rename_keys_input: dict[str, str] = self.rename_keys_input
@@ -323,40 +349,40 @@ class DataOperationsComponent(Component):
         return Data(data=renamed)
 
     def recursive_eval(self, data: Any) -> Any:
-        """Recursively evaluate string values in a dictionary or list.
-
-        If the value is a string that can be evaluated, it will be evaluated.
-        Otherwise, the original value is returned.
-        """
+        """递归解析可被字面量求值的字符串。"""
         if isinstance(data, dict):
             return {k: self.recursive_eval(v) for k, v in data.items()}
         if isinstance(data, list):
             return [self.recursive_eval(item) for item in data]
         if isinstance(data, str):
             try:
-                # Only attempt to evaluate strings that look like Python literals
+                # 注意：仅尝试解析可能是字面量的字符串
                 if (
                     data.strip().startswith(("{", "[", "(", "'", '"'))
                     or data.strip().lower() in ("true", "false", "none")
                     or data.strip().replace(".", "").isdigit()
                 ):
                     return ast.literal_eval(data)
-                # return data
             except (ValueError, SyntaxError, TypeError, MemoryError):
-                # If evaluation fails for any reason, return the original string
                 return data
             else:
                 return data
         return data
 
     def evaluate_data(self) -> Data:
-        """Evaluate string values in the data dictionary."""
+        """对 Data 中字符串进行字面量解析。"""
         self.validate_single_data("Literal Eval")
         logger.info("evaluating data")
         return Data(**self.recursive_eval(self.get_data_dict()))
 
     def combine_data(self, *, evaluate: bool | None = None) -> Data:
-        """Combine multiple data objects into one."""
+        """合并多条 Data 为一条。
+
+        关键路径（三步）：
+        1) 校验输入数量；
+        2) 按键合并并处理列表/非列表冲突；
+        3) 可选执行字面量解析并返回。
+        """
         logger.info("combining data")
         if not self.data_is_list():
             return self.data[0] if self.data else Data(data={})
@@ -378,7 +404,7 @@ class DataOperationsComponent(Component):
                     else:
                         combined_data[key].append(value)
                 else:
-                    # If current value is not a list, convert it to list and add new value
+                    # 实现：非列表值转为列表后追加
                     combined_data[key] = (
                         [combined_data[key], value] if not isinstance(value, list) else [combined_data[key], *value]
                     )
@@ -389,8 +415,7 @@ class DataOperationsComponent(Component):
         return Data(**combined_data)
 
     def filter_data(self, input_data: list[dict[str, Any]], filter_key: str, filter_value: str, operator: str) -> list:
-        """Filter list data based on key, value, and operator."""
-        # Validate inputs
+        """按指定条件过滤列表项。"""
         if not input_data:
             self.status = "Input data is empty."
             return []
@@ -399,7 +424,6 @@ class DataOperationsComponent(Component):
             self.status = "Filter key or value is missing."
             return input_data
 
-        # Filter the data
         filtered_data = []
         for item in input_data:
             if isinstance(item, dict) and filter_key in item:
@@ -411,13 +435,14 @@ class DataOperationsComponent(Component):
         return filtered_data
 
     def compare_values(self, item_value: Any, filter_value: str, operator: str) -> bool:
+        """按操作符比较值。"""
         comparison_func = OPERATORS.get(operator)
         if comparison_func:
             return comparison_func(item_value, filter_value)
         return False
 
     def multi_filter_data(self) -> Data:
-        """Apply multiple filters to the data."""
+        """对列表字段应用多条件过滤。"""
         self.validate_single_data("Filter Values")
         data_filtered = self.get_normalized_data()
 
@@ -443,7 +468,7 @@ class DataOperationsComponent(Component):
         return Data(**data_filtered)
 
     def append_update(self) -> Data:
-        """Append or Update with new key-value pairs."""
+        """追加或更新键值对。"""
         self.validate_single_data("Append or Update")
         data_filtered = self.get_normalized_data()
 
@@ -452,8 +477,15 @@ class DataOperationsComponent(Component):
 
         return Data(**data_filtered)
 
-    # Configuration and execution methods
+    # 配置与执行方法
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None) -> dotdict:
+        """根据所选操作动态调整输入配置。
+
+        关键路径（三步）：
+        1) 处理操作选择并更新列表输入模式；
+        2) 按操作显示/隐藏相关字段；
+        3) 解析路径选择示例并更新下拉项。
+        """
         if field_name == "operations":
             build_config["operations"]["value"] = field_value
             selected_actions = [action["name"] for action in field_value]
@@ -483,6 +515,7 @@ class DataOperationsComponent(Component):
         return build_config
 
     def json_path(self) -> Data:
+        """根据选定路径提取 JSON 值。"""
         try:
             if not self.data or not self.selected_key:
                 msg = "Missing input data or selected key."
@@ -499,6 +532,13 @@ class DataOperationsComponent(Component):
             return Data(data={"error": str(e)})
 
     def as_data(self) -> Data:
+        """根据当前选择的操作执行并返回 Data。
+
+        关键路径（三步）：
+        1) 校验操作选择；
+        2) 映射到处理函数并执行；
+        3) 返回结果或空 Data。
+        """
         if not hasattr(self, "operations") or not self.operations:
             return Data(data={})
 

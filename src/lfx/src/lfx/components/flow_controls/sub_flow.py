@@ -1,3 +1,20 @@
+"""
+模块名称：Sub Flow 组件
+
+本模块提供将 Flow 转为组件并动态生成输入字段的能力，主要用于在当前
+流程内嵌调用其他 Flow。
+主要功能包括：
+- 获取 Flow 列表并加载 Graph
+- 从 Graph 输入顶点生成动态输入字段
+- 执行子 Flow 并整理输出为 Data 列表
+
+关键组件：
+- `SubFlowComponent`：子流程组件
+
+设计背景：在不显式工具化的场景下复用 Flow 逻辑。
+注意事项：组件已标记为 legacy，推荐使用替代组件。
+"""
+
 from typing import Any
 
 from lfx.base.flow_processing.utils import build_data_from_result_data
@@ -12,6 +29,7 @@ from lfx.schema.dotdict import dotdict
 
 
 class SubFlowComponent(Component):
+    """将 Flow 包装为动态输入组件的子流程组件。"""
     display_name = "Sub Flow"
     description = "Generates a Component from a Flow, with all of its inputs, and "
     name = "SubFlow"
@@ -20,10 +38,12 @@ class SubFlowComponent(Component):
     icon = "Workflow"
 
     async def get_flow_names(self) -> list[str]:
+        """获取可用 Flow 名称列表。"""
         flow_data = await self.alist_flows()
         return [flow_data.data["name"] for flow_data in flow_data]
 
     async def get_flow(self, flow_name: str) -> Data | None:
+        """按名称获取 Flow 数据记录。"""
         flow_datas = await self.alist_flows()
         for flow_data in flow_datas:
             if flow_data.data["name"] == flow_name:
@@ -31,6 +51,14 @@ class SubFlowComponent(Component):
         return None
 
     async def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据 Flow 选择动态更新构建配置。
+
+        关键路径（三步）：
+        1) 刷新 Flow 名称选项
+        2) 选择 Flow 后加载 Graph
+        3) 生成输入字段并写回配置
+        异常流：Flow 加载或解析失败会记录日志。
+        """
         if field_name == "flow_name":
             build_config["flow_name"]["options"] = await self.get_flow_names()
 
@@ -49,9 +77,9 @@ class SubFlowComponent(Component):
                 else:
                     try:
                         graph = Graph.from_payload(flow_data.data["data"])
-                        # Get all inputs from the graph
+                        # 实现：获取图的输入顶点
                         inputs = get_flow_inputs(graph)
-                        # Add inputs to the build config
+                        # 实现：将输入字段写入构建配置
                         build_config = self.add_inputs_to_build_config(inputs, build_config)
                     except Exception:  # noqa: BLE001
                         await logger.aexception(f"Error building graph for flow {field_value}")
@@ -59,6 +87,11 @@ class SubFlowComponent(Component):
         return build_config
 
     def add_inputs_to_build_config(self, inputs_vertex: list[Vertex], build_config: dotdict):
+        """将 Flow 输入顶点转换为 build_config 字段。
+
+        契约：按 `vertex.id|input_name` 生成唯一字段名。
+        副作用：修改传入的 build_config。
+        """
         new_fields: list[dotdict] = []
 
         for vertex in inputs_vertex:
@@ -90,6 +123,14 @@ class SubFlowComponent(Component):
     outputs = [Output(name="flow_outputs", display_name="Flow Outputs", method="generate_results")]
 
     async def generate_results(self) -> list[Data]:
+        """执行子 Flow 并返回所有输出 Data。
+
+        关键路径（三步）：
+        1) 将动态字段聚合为 tweaks
+        2) 运行子 Flow 获取输出
+        3) 将输出转换为 Data 列表
+        异常流：无显式异常抛出，空输出返回空列表。
+        """
         tweaks: dict = {}
         for field in self._attributes:
             if field != "flow_name" and "|" in field:

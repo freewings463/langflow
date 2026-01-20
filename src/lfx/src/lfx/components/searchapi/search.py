@@ -1,3 +1,20 @@
+"""
+模块名称：SearchAPI 搜索组件
+
+模块目的：封装 SearchApi 的搜索能力并输出 `Data`/`DataFrame` 结构。
+使用场景：在流程中调用外部搜索引擎（Google/Bing/DuckDuckGo）获取结果。
+主要功能包括：
+- 定义搜索输入参数（引擎、查询、参数、结果截断）
+- 调用 `SearchApiAPIWrapper` 获取搜索结果
+- 将结果转换为 `Data` 列表与 `DataFrame`
+
+关键组件：
+- `SearchComponent`：搜索组件入口
+
+设计背景：复用 LangChain 社区封装，减少 API 适配成本。
+注意：`api_key` 缺失或无效会导致调用失败，调用方需提示配置问题。
+"""
+
 from typing import Any
 
 from langchain_community.utilities.searchapi import SearchApiAPIWrapper
@@ -10,6 +27,17 @@ from lfx.schema.dataframe import DataFrame
 
 
 class SearchComponent(Component):
+    """SearchAPI 搜索组件。
+
+    契约：输入搜索参数与查询文本，输出结构化结果 `DataFrame`。
+    关键路径：由 `fetch_content` 拉取结果并裁剪字段，再由 `fetch_content_dataframe` 包装。
+
+    决策：通过 `SearchApiAPIWrapper` 适配 SearchApi
+    问题：需要统一不同搜索引擎的结果结构
+    方案：复用上游 wrapper 并自行裁剪字段
+    代价：依赖上游返回结构（如 `organic_results`）稳定
+    重评：当返回结构变更或需要更多字段时
+    """
     display_name: str = "SearchApi"
     description: str = "Calls the SearchApi API with result limiting. Supports Google, Bing and DuckDuckGo."
     documentation: str = "https://www.searchapi.io/docs/google"
@@ -33,12 +61,32 @@ class SearchComponent(Component):
     ]
 
     def _build_wrapper(self):
+        """构建 SearchApi 客户端包装器。
+
+        契约：依赖 `engine` 与 `api_key`，返回可执行搜索请求的 wrapper。
+        失败语义：缺失或无效 `api_key` 将在调用阶段触发异常。
+        """
         return SearchApiAPIWrapper(engine=self.engine, searchapi_api_key=self.api_key)
 
     def run_model(self) -> DataFrame:
+        """组件运行入口，保持与框架 `run_model` 约定一致。"""
         return self.fetch_content_dataframe()
 
     def fetch_content(self) -> list[Data]:
+        """执行搜索并返回结构化结果列表。
+
+        契约：返回 `Data` 列表，字段包含 `title`/`link`/`snippet`（已截断）。
+        副作用：调用外部 SearchApi 服务（网络 I/O）。
+
+        关键路径（三步）：
+        1) 创建 wrapper
+        2) 执行搜索并截断 `organic_results`
+        3) 转换为 `Data` 并写入 `status`
+
+        注意：依赖 `organic_results` 字段存在；缺失时返回空列表。
+        性能：远端搜索耗时，结果量受 `max_results` 限制。
+        排障：关注上游异常堆栈与 SearchApi 返回错误信息。
+        """
         wrapper = self._build_wrapper()
 
         def search_func(
@@ -70,10 +118,10 @@ class SearchComponent(Component):
         return results
 
     def fetch_content_dataframe(self) -> DataFrame:
-        """Convert the search results to a DataFrame.
+        """将搜索结果转换为 `DataFrame` 以便下游消费。
 
-        Returns:
-            DataFrame: A DataFrame containing the search results.
+        契约：返回包含搜索结果的 `DataFrame`。
+        失败语义：若上游失败将由 `fetch_content` 抛异常。
         """
         data = self.fetch_content()
         return DataFrame(data)

@@ -1,3 +1,15 @@
+"""模块名称：vLLM 向量嵌入组件
+
+本模块封装基于 OpenAI 兼容接口的 vLLM 嵌入模型。
+主要功能包括：配置模型名与 API 端点、设置维度与请求参数、构建 `OpenAIEmbeddings`。
+
+关键组件：
+- `VllmEmbeddingsComponent`：vLLM 向量嵌入组件入口
+
+设计背景：统一 vLLM 推理服务的向量嵌入接入方式。
+注意事项：`dimensions` 仅部分模型支持；`api_base` 默认本地 vLLM 端点。
+"""
+
 from langchain_openai import OpenAIEmbeddings
 
 from lfx.base.embeddings.model import LCEmbeddingsModel
@@ -6,6 +18,17 @@ from lfx.io import BoolInput, DictInput, FloatInput, IntInput, MessageTextInput,
 
 
 class VllmEmbeddingsComponent(LCEmbeddingsModel):
+    """vLLM 向量嵌入组件。
+
+    契约：输入 `model_name/api_base/api_key/dimensions` 等；输出 `Embeddings`；
+    副作用：无；失败语义：底层请求异常由客户端抛出。
+    关键路径：1) 组装参数 2) 创建 `OpenAIEmbeddings` 实例 3) 返回嵌入模型。
+    决策：将空值参数传为 `None`
+    问题：避免把空字符串作为有效参数传入
+    方案：对 `api_key/timeout/default_*` 做 None 化
+    代价：服务端默认值不可控
+    重评：当需要固定默认值时改为显式传参
+    """
     display_name = "vLLM Embeddings"
     description = "Generate embeddings using vLLM models via OpenAI-compatible API."
     icon = "vLLM"
@@ -94,6 +117,17 @@ class VllmEmbeddingsComponent(LCEmbeddingsModel):
     ]
 
     def build_embeddings(self) -> Embeddings:
+        """构建 vLLM 嵌入模型实例。
+
+        契约：输入 `model_name/api_base` 等；输出 `OpenAIEmbeddings`；
+        副作用无；失败语义：请求异常透传。
+        关键路径：1) 规范化参数 2) 初始化 embeddings 实例。
+        决策：`dimensions` 为空时不传
+        问题：部分模型不支持自定义维度
+        方案：空值回退为 `None`
+        代价：无法强制统一维度
+        重评：当模型统一支持维度时改为必填
+        """
         return OpenAIEmbeddings(
             model=self.model_name,
             base_url=self.api_base or "http://localhost:8000/v1",

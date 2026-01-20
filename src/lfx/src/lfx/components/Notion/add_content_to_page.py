@@ -17,12 +17,14 @@ MIN_ROWS_IN_TABLE = 3
 
 
 class AddContentToPage(LCToolComponent):
+    # 将 Markdown 转为 Notion Block 并追加到指定页面
     display_name: str = "Add Content to Page "
     description: str = "Convert markdown text to Notion blocks and append them to a Notion page."
     documentation: str = "https://developers.notion.com/reference/patch-block-children"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：Markdown 文本、目标块 ID、Notion 密钥
         MultilineInput(
             name="markdown_text",
             display_name="Markdown Text",
@@ -42,14 +44,17 @@ class AddContentToPage(LCToolComponent):
     ]
 
     class AddContentToPageSchema(BaseModel):
+        # 工具入参 Schema
         markdown_text: str = Field(..., description="The markdown text to convert to Notion blocks.")
         block_id: str = Field(..., description="The ID of the page/block to add the content.")
 
     def run_model(self) -> Data:
+        # 直接执行并包装为 Data 输出
         result = self._add_content_to_page(self.markdown_text, self.block_id)
         return Data(data=result, text=json.dumps(result))
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="add_content_to_notion_page",
             description="Convert markdown text to Notion blocks and append them to a Notion page.",
@@ -59,10 +64,12 @@ class AddContentToPage(LCToolComponent):
 
     def _add_content_to_page(self, markdown_text: str, block_id: str) -> dict[str, Any] | str:
         try:
+            # Markdown -> HTML -> 解析为 Notion blocks
             html_text = markdown(markdown_text)
             soup = BeautifulSoup(html_text, "html.parser")
             blocks = self.process_node(soup)
 
+            # 追加块内容到目标页面/块
             url = f"https://api.notion.com/v1/blocks/{block_id}/children"
             headers = {
                 "Authorization": f"Bearer {self.notion_secret}",
@@ -79,6 +86,7 @@ class AddContentToPage(LCToolComponent):
 
             return response.json()
         except requests.exceptions.RequestException as e:
+            # 请求失败时返回详细错误信息
             error_message = f"Error: Failed to add content to Notion page. {e}"
             if hasattr(e, "response") and e.response is not None:
                 error_message += f" Status code: {e.response.status_code}, Response: {e.response.text}"
@@ -88,6 +96,7 @@ class AddContentToPage(LCToolComponent):
             return f"Error: An unexpected error occurred while adding content to Notion page. {e}"
 
     def process_node(self, node):
+        # 将 HTML 节点递归转换为 Notion blocks
         blocks = []
         if isinstance(node, str):
             text = node.strip()
@@ -130,6 +139,7 @@ class AddContentToPage(LCToolComponent):
         elif node.name == "table":
             blocks.extend(self.process_table(node))
 
+        # 深度优先遍历子节点
         for child in node.children:
             if isinstance(child, str):
                 continue
@@ -138,21 +148,25 @@ class AddContentToPage(LCToolComponent):
         return blocks
 
     def extract_language_and_code(self, code_text):
+        # 解析代码块语言与内容
         lines = code_text.split("\n")
         language = lines[0].strip()
         code = "\n".join(lines[1:]).strip()
         return language, code
 
     def is_code_block(self, text):
+        # 判断是否为代码块
         return text.startswith("```")
 
     def extract_code_block(self, text):
+        # 提取 ``` 代码块中的语言与内容
         lines = text.split("\n")
         language = lines[0].strip("`").strip()
         code = "\n".join(lines[1:]).strip("`").strip()
         return language, code
 
     def is_table(self, text):
+        # 通过分隔行判断是否为表格
         rows = text.split("\n")
         if len(rows) < MIN_ROWS_IN_TABLE:
             return False
@@ -170,6 +184,7 @@ class AddContentToPage(LCToolComponent):
         return has_separator
 
     def process_list(self, node, list_type):
+        # 处理有序/无序/任务列表
         blocks = []
         for item in node.find_all("li"):
             item_text = item.get_text(strip=True)
@@ -184,6 +199,7 @@ class AddContentToPage(LCToolComponent):
         return blocks
 
     def process_table(self, node):
+        # 处理表格，生成 table 与 table_row blocks
         blocks = []
         header_row = node.find("thead").find("tr") if node.find("thead") else None
         body_rows = node.find("tbody").find_all("tr") if node.find("tbody") else []
@@ -210,6 +226,7 @@ class AddContentToPage(LCToolComponent):
         return blocks
 
     def create_block(self, block_type: str, content: str, **kwargs) -> dict[str, Any]:
+        # 构造 Notion Block 结构
         block: dict[str, Any] = {
             "object": "block",
             "type": block_type,

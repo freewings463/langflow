@@ -1,3 +1,13 @@
+"""JSON 清洗组件。
+
+本模块用于修复/清洗 LLM 输出的非规范 JSON 文本。
+主要功能包括：
+- 删除控制字符、规范化 Unicode、验证 JSON
+- 使用 `json_repair` 修复常见格式问题
+
+注意事项：清洗失败会抛 `ValueError`。
+"""
+
 import json
 import unicodedata
 
@@ -8,6 +18,12 @@ from lfx.template.field.base import Output
 
 
 class JSONCleaner(Component):
+    """JSON 清洗组件封装。
+
+    契约：输入为 JSON 字符串；输出为清洗后的 `Message`。
+    副作用：更新 `self.status`。
+    失败语义：依赖缺失抛 `ImportError`；JSON 不合法抛 `ValueError`。
+    """
     icon = "braces"
     display_name = "JSON Cleaner"
     description = (
@@ -45,13 +61,19 @@ class JSONCleaner(Component):
     ]
 
     def clean_json(self) -> Message:
+        """按选项清洗 JSON 字符串并返回结果。
+
+        关键路径（三步）：
+        1) 定位 JSON 主体并应用可选清洗；
+        2) 使用 `json_repair` 修复格式；
+        3) 写入状态并返回结果。
+        """
         try:
             from json_repair import repair_json
         except ImportError as e:
             msg = "Could not import the json_repair package. Please install it with `pip install json_repair`."
             raise ImportError(msg) from e
 
-        """Clean the input JSON string based on provided options and return the cleaned JSON string."""
         json_str = self.json_str
         remove_control_chars = self.remove_control_chars
         normalize_unicode = self.normalize_unicode
@@ -82,15 +104,15 @@ class JSONCleaner(Component):
             raise ValueError(msg) from e
 
     def _remove_control_characters(self, s: str) -> str:
-        """Remove control characters from the string."""
+        """移除控制字符。"""
         return s.translate(self.translation_table)
 
     def _normalize_unicode(self, s: str) -> str:
-        """Normalize Unicode characters in the string."""
+        """规范化 Unicode。"""
         return unicodedata.normalize("NFC", s)
 
     def _validate_json(self, s: str) -> str:
-        """Validate the JSON string."""
+        """验证 JSON 合法性。"""
         try:
             json.loads(s)
         except json.JSONDecodeError as e:
@@ -99,6 +121,6 @@ class JSONCleaner(Component):
         return s
 
     def __init__(self, *args, **kwargs):
-        # Create a translation table that maps control characters to None
+        # 实现：生成控制字符删除映射表
         super().__init__(*args, **kwargs)
         self.translation_table = str.maketrans("", "", "".join(chr(i) for i in range(32)) + chr(127))

@@ -1,3 +1,18 @@
+"""
+模块名称：HCD 向量库组件
+
+本模块提供基于 Hyper-Converged Database (HCD) 的向量库组件封装。主要功能包括：
+- 构建 HCD 向量库连接并写入文档
+- 支持相似度搜索与过滤条件
+
+关键组件：
+- `HCDVectorStoreComponent`
+
+设计背景：需要在 LFX 中接入 HCD 作为向量存储后端。
+使用场景：向量检索与知识库构建。
+注意事项：依赖 `langchain-astradb` 与 `astrapy`，缺失会抛 `ImportError`。
+"""
+
 from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
 from lfx.helpers.data import docs_to_data
 from lfx.inputs.inputs import DictInput, FloatInput
@@ -14,6 +29,18 @@ from lfx.schema.data import Data
 
 
 class HCDVectorStoreComponent(LCVectorStoreComponent):
+    """HCD 向量库组件
+
+    契约：输入 HCD 连接配置与检索参数；输出 `list[Data]`；
+    副作用：写入向量库、记录日志、更新 `self.status`；
+    失败语义：依赖缺失抛 `ImportError`，搜索/写入异常抛 `ValueError`。
+    关键路径：1) 构建向量库 2) 写入文档 3) 执行检索并转换为 `Data`。
+    决策：通过 `setup_mode` 控制集合初始化。
+    问题：不同部署环境需要不同初始化策略。
+    方案：将 `setup_mode` 暴露为输入参数。
+    代价：错误配置可能导致初始化失败。
+    重评：当引入统一环境配置时。
+    """
     display_name: str = "Hyper-Converged Database"
     description: str = "Implementation of Vector Store using Hyper-Converged Database (HCD) with search capabilities"
     name = "HCD"
@@ -117,7 +144,7 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
             name="embedding",
             display_name="Embedding or Astra Vectorize",
             input_types=["Embeddings", "dict"],
-            # TODO: This should be optional, but need to refactor langchain-astradb first.
+            # TODO：此处应为可选，需先重构 `langchain-astradb`
             info="Allows either an embedding model or an Astra Vectorize configuration.",
         ),
         StrInput(
@@ -166,6 +193,20 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self):
+        """构建 HCD 向量库实例
+
+        契约：返回 `AstraDBVectorStore` 实例；副作用：可能创建集合并写入文档；
+        失败语义：依赖缺失抛 `ImportError`，初始化失败抛 `ValueError`。
+        关键路径（三步）：1) 解析 `setup_mode` 2) 组装参数 3) 初始化向量库并写入。
+        异常流：配置错误或连接失败。
+        性能瓶颈：批量写入与索引构建。
+        排障入口：异常信息与日志。
+        决策：允许使用 Vectorize 配置或本地 embedding。
+        问题：HCD 可能需要服务端向量化或本地嵌入。
+        方案：根据 `embedding` 类型分支处理。
+        代价：输入格式复杂。
+        重评：当统一为单一向量化方式时。
+        """
         try:
             from langchain_astradb import AstraDBVectorStore
             from langchain_astradb.utils.astradb import SetupMode
@@ -241,7 +282,13 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
         return vector_store
 
     def _add_documents_to_vector_store(self, vector_store) -> None:
-        # Convert DataFrame to Data if needed using parent's method
+        """写入文档到 HCD 向量库
+
+        契约：读取 `ingest_data` 并写入 `vector_store`；
+        副作用：写入向量库与日志；
+        失败语义：非 `Data` 输入抛 `TypeError`，写入失败抛 `ValueError`。
+        关键路径：1) 规范化输入 2) 转换为 `Document` 3) 写入向量库。
+        """
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -263,6 +310,10 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
             self.log("No documents to add to the Vector Store.")
 
     def _map_search_type(self) -> str:
+        """映射搜索类型到后端枚举
+
+        契约：返回 search_type 字符串；副作用：无；失败语义：未知类型回退 `similarity`。
+        """
         if self.search_type == "Similarity with score threshold":
             return "similarity_score_threshold"
         if self.search_type == "MMR (Max Marginal Relevance)":
@@ -270,6 +321,11 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
         return "similarity"
 
     def _build_search_args(self):
+        """构建搜索参数字典
+
+        契约：返回包含 `k`/`score_threshold`/`filter` 的字典；
+        副作用：无；失败语义：无。
+        """
         args = {
             "k": self.number_of_results,
             "score_threshold": self.search_score_threshold,
@@ -282,6 +338,13 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
         return args
 
     def search_documents(self) -> list[Data]:
+        """执行检索并返回 `Data` 列表
+
+        契约：使用 `build_vector_store` 构建实例并检索；
+        副作用：记录日志并更新 `self.status`；
+        失败语义：搜索异常抛 `ValueError`。
+        关键路径：1) 构建向量库 2) 调用 `search` 3) 转换为 `Data`。
+        """
         vector_store = self.build_vector_store()
 
         self.log(f"Search query: {self.search_query}")
@@ -308,6 +371,10 @@ class HCDVectorStoreComponent(LCVectorStoreComponent):
         return []
 
     def get_retriever_kwargs(self):
+        """返回检索器参数
+
+        契约：返回 `search_type` 与 `search_kwargs`；副作用：无；失败语义：无。
+        """
         search_args = self._build_search_args()
         return {
             "search_type": self._map_search_type(),

@@ -1,7 +1,17 @@
-"""Script loading utilities for LFX CLI.
+"""
+模块名称：CLI 脚本加载工具
 
-This module provides functionality to load and validate Python scripts
-containing LFX graph variables.
+本模块提供脚本加载与图对象提取能力，主要用于从 Python 脚本中定位并返回 LFX Graph。主要功能包括：
+- 动态加载脚本模块并执行
+- 校验图实例类型与必要组件
+- 从执行结果中提取输出结构
+
+关键组件：
+- `load_graph_from_script`：脚本执行入口
+- `find_graph_variable`：静态分析定位 `get_graph`/`graph`
+
+设计背景：CLI 需兼容脚本式 flow 入口并提供明确的错误提示。
+注意事项：脚本执行会触发用户代码副作用，调用方需在 CLI 层提示风险。
 """
 
 import ast
@@ -22,7 +32,12 @@ if TYPE_CHECKING:
 
 @contextmanager
 def temporary_sys_path(path: str):
-    """Temporarily add a path to sys.path."""
+    """临时将路径加入 `sys.path`。
+
+    契约：进入上下文时插入，退出时移除（若原本不存在）。
+    失败语义：无。
+    副作用：修改 `sys.path`。
+    """
     if path not in sys.path:
         sys.path.insert(0, path)
         try:
@@ -34,8 +49,13 @@ def temporary_sys_path(path: str):
 
 
 def _load_module_from_script(script_path: Path) -> Any:
-    """Load a Python module from a script file."""
-    # Use the script name as the module name to allow inspect to find it
+    """从脚本文件加载模块对象。
+
+    契约：返回已执行的模块对象；模块名使用脚本名以便 `inspect` 定位。
+    失败语义：无法创建 spec 或执行失败时抛 `ImportError`/原始异常。
+    副作用：执行脚本代码并写入 `sys.modules`。
+    """
+    # 注意：使用脚本名作为模块名，便于 `inspect.getmodule` 定位
     module_name = script_path.stem
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
@@ -44,7 +64,7 @@ def _load_module_from_script(script_path: Path) -> Any:
 
     module = importlib.util.module_from_spec(spec)
 
-    # Register in sys.modules so inspect.getmodule works
+    # 注意：注册到 `sys.modules`，否则 `inspect.getmodule` 无法识别
     sys.modules[module_name] = module
 
     try:
@@ -59,14 +79,18 @@ def _load_module_from_script(script_path: Path) -> Any:
 
 
 def _validate_graph_instance(graph_obj: Any) -> "Graph":
-    """Extract information from a graph object."""
+    """校验并返回 Graph 实例。
+
+    契约：要求对象为 `lfx.graph.Graph` 且包含 `Chat Input` 与 `Chat Output` 组件。
+    失败语义：类型或组件缺失时抛 `TypeError`/`ValueError`。
+    副作用：无。
+    """
     from lfx.graph import Graph
 
     if not isinstance(graph_obj, Graph):
         msg = f"Graph object is not a LFX Graph instance: {type(graph_obj)}"
         raise TypeError(msg)
 
-    # Find ChatInput and ChatOutput components
     display_names: set[str] = set()
     for vertex in graph_obj.vertices:
         if vertex.custom_component is not None:
@@ -84,31 +108,30 @@ def _validate_graph_instance(graph_obj: Any) -> "Graph":
 
 
 async def load_graph_from_script(script_path: Path) -> "Graph":
-    """Load and execute a Python script to extract the 'graph' variable or call 'get_graph' function.
+    """执行脚本并提取 Graph。
 
-    Args:
-        script_path (Path): Path to the Python script file
+    契约：优先调用 `get_graph()`，否则读取模块变量 `graph`。
+    失败语义：执行失败或未找到图时抛 `RuntimeError`。
+    副作用：执行用户脚本代码。
 
-    Returns:
-        Graph: The loaded and validated graph instance
+    关键路径（三步）：
+    1) 动态加载并执行脚本模块
+    2) 解析 `get_graph` 或 `graph` 变量
+    3) 校验图实例并返回
     """
     try:
-        # Load the module
         module = _load_module_from_script(script_path)
 
         graph_obj = None
 
-        # First, try to get graph from 'get_graph' function (preferred for async code)
         if hasattr(module, "get_graph") and callable(module.get_graph):
             get_graph_func = module.get_graph
 
-            # Check if get_graph is async and handle accordingly
             if inspect.iscoroutinefunction(get_graph_func):
                 graph_obj = await get_graph_func()
             else:
                 graph_obj = get_graph_func()
 
-        # Fallback to 'graph' variable for backward compatibility
         elif hasattr(module, "graph"):
             graph_obj = module.graph
 
@@ -132,7 +155,12 @@ async def load_graph_from_script(script_path: Path) -> "Graph":
 
 
 def extract_message_from_result(results: list) -> str:
-    """Extract the message from the results."""
+    """从结果中提取完整消息体。
+
+    契约：优先从 `Chat Output` 组件读取消息并序列化为 JSON 字符串。
+    失败语义：解析失败时返回字符串化的消息或默认提示。
+    副作用：无。
+    """
     for result in results:
         if (
             hasattr(result, "vertex")
@@ -141,16 +169,19 @@ def extract_message_from_result(results: list) -> str:
         ):
             message: Message = result.result_dict.results["message"]
             try:
-                # Parse the JSON to get just the text content
                 return json.dumps(json.loads(message.model_dump_json()), ensure_ascii=False)
             except (json.JSONDecodeError, AttributeError):
-                # Fallback to string representation
                 return str(message)
     return "No response generated"
 
 
 def extract_text_from_result(results: list) -> str:
-    """Extract just the text content from the results."""
+    """从结果中提取纯文本内容。
+
+    契约：优先返回 `message.text`；若为 dict 则返回 `text` 字段。
+    失败语义：解析失败时返回字符串化内容或默认提示。
+    副作用：无。
+    """
     for result in results:
         if (
             hasattr(result, "vertex")
@@ -159,20 +190,28 @@ def extract_text_from_result(results: list) -> str:
         ):
             message: dict | Message = result.result_dict.results.get("message")
             try:
-                # Return just the text content
                 if isinstance(message, dict):
                     text_content = message.get("text") if message.get("text") else str(message)
                 else:
                     text_content = message.text
                 return str(text_content)
             except AttributeError:
-                # Fallback to string representation
                 return str(message)
     return "No response generated"
 
 
 def extract_structured_result(results: list, *, extract_text: bool = True) -> dict:
-    """Extract structured result data from the results."""
+    """从结果中抽取结构化输出。
+
+    契约：返回包含 `success/type/component` 等字段的字典。
+    失败语义：提取失败时返回 `success=False` 的错误结构。
+    副作用：无。
+
+    关键路径（三步）：
+    1) 遍历结果查找 `Chat Output` 组件
+    2) 根据 `extract_text` 抽取消息或返回原始对象
+    3) 组装统一的结构化输出
+    """
     for result in results:
         if (
             hasattr(result, "vertex")
@@ -203,24 +242,24 @@ def extract_structured_result(results: list, *, extract_text: bool = True) -> di
 
 
 def find_graph_variable(script_path: Path) -> dict | None:
-    """Parse a Python script and find the 'graph' variable assignment or 'get_graph' function.
+    """静态分析脚本以定位 `get_graph` 或 `graph`。
 
-    Args:
-        script_path (Path): Path to the Python script file
+    契约：优先返回 `get_graph` 定义信息，若不存在则返回 `graph` 赋值信息。
+    失败语义：语法或读取错误时返回 None 并输出提示。
+    副作用：读取并解析脚本文本。
 
-    Returns:
-        dict | None: Information about the graph variable or get_graph function if found, None otherwise
+    关键路径（三步）：
+    1) 读取脚本文本并生成 AST
+    2) 搜索 `get_graph` 定义（含 async）
+    3) 兜底寻找 `graph` 赋值
     """
     try:
         with script_path.open(encoding="utf-8") as f:
             content = f.read()
 
-        # Parse the script using AST
         tree = ast.parse(content)
 
-        # Look for 'get_graph' function definitions (preferred) or 'graph' variable assignments
         for node in ast.walk(tree):
-            # Check for get_graph function definition
             if isinstance(node, ast.FunctionDef) and node.name == "get_graph":
                 line_number = node.lineno
                 is_async = isinstance(node, ast.AsyncFunctionDef)
@@ -234,7 +273,6 @@ def find_graph_variable(script_path: Path) -> dict | None:
                     "source_line": content.split("\n")[line_number - 1].strip(),
                 }
 
-            # Check for async get_graph function definition
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "get_graph":
                 line_number = node.lineno
 
@@ -247,21 +285,15 @@ def find_graph_variable(script_path: Path) -> dict | None:
                     "source_line": content.split("\n")[line_number - 1].strip(),
                 }
 
-            # Fallback: look for assignments to 'graph' variable
             if isinstance(node, ast.Assign):
-                # Check if any target is named 'graph'
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id == "graph":
-                        # Found a graph assignment
                         line_number = node.lineno
 
-                        # Try to extract some information about the assignment
                         if isinstance(node.value, ast.Call):
-                            # It's a function call like Graph(...)
                             if isinstance(node.value.func, ast.Name):
                                 func_name = node.value.func.id
                             elif isinstance(node.value.func, ast.Attribute):
-                                # Handle cases like Graph.from_payload(...)
                                 if isinstance(node.value.func.value, ast.Name):
                                     func_name = f"{node.value.func.value.id}.{node.value.func.attr}"
                                 else:
@@ -269,7 +301,6 @@ def find_graph_variable(script_path: Path) -> dict | None:
                             else:
                                 func_name = "Unknown"
 
-                            # Count arguments
                             arg_count = len(node.value.args) + len(node.value.keywords)
 
                             return {
@@ -279,7 +310,6 @@ def find_graph_variable(script_path: Path) -> dict | None:
                                 "arg_count": arg_count,
                                 "source_line": content.split("\n")[line_number - 1].strip(),
                             }
-                        # Some other type of assignment
                         return {
                             "line_number": line_number,
                             "type": "assignment",
@@ -296,5 +326,4 @@ def find_graph_variable(script_path: Path) -> dict | None:
         typer.echo(f"Error parsing '{script_path}': {e}")
         return None
     else:
-        # No graph variable found
         return None

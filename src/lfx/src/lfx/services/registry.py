@@ -1,6 +1,13 @@
-"""Service registration decorator for pluggable services.
+"""
+模块名称：服务注册装饰器
 
-Allows services to self-register with the service manager using a decorator.
+本模块提供服务注册装饰器，便于插件式服务自注册。
+主要功能包括：
+- 通过装饰器将服务类注册到管理器
+- 支持覆盖已有注册
+
+设计背景：简化插件式服务的注册流程。
+注意事项：Settings 服务不可通过装饰器覆盖。
 """
 
 from __future__ import annotations
@@ -17,24 +24,13 @@ ServiceT = TypeVar("ServiceT", bound="Service")
 
 
 def register_service(service_type: ServiceType, *, override: bool = True):
-    """Decorator to register a service class with the service manager.
+    """注册服务类的装饰器。
 
-    Usage:
-        @register_service(ServiceType.DATABASE_SERVICE)
-        class DatabaseService(Service):
-            name = "database_service"
-            ...
-
-    Args:
-        service_type: The ServiceType enum value for this service
-        override: Whether to override existing registrations (default: True)
-
-    Returns:
-        Decorator function that registers the service class
+    契约：注册成功后返回原类，不改变其行为。
     """
 
     def decorator(service_class: type[ServiceT]) -> type[ServiceT]:
-        """Register the service class and return it unchanged."""
+        """注册服务类并返回原类。"""
         try:
             from lfx.services.manager import get_service_manager
 
@@ -42,7 +38,7 @@ def register_service(service_type: ServiceType, *, override: bool = True):
             service_manager.register_service_class(service_type, service_class, override=override)
             logger.debug(f"Registered service via decorator: {service_type.value} -> {service_class.__name__}")
         except ValueError:
-            # Re-raise ValueError (used for settings service protection)
+            # 注意：Settings 服务保护逻辑直接抛出。
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Failed to register service {service_type.value} from decorator: {exc}")

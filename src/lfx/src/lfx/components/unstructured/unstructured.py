@@ -1,3 +1,18 @@
+"""
+模块名称：lfx.components.unstructured.unstructured
+
+本模块提供基于 Unstructured.io API 的文件解析能力，主要用于将多类型文件转为结构化文本数据。主要功能包括：
+- 功能1：按 `VALID_EXTENSIONS` 过滤支持文件类型
+- 功能2：组装 API 参数并调用 Unstructured Loader
+- 功能3：将返回文档转换为 `Data` 并规范字段
+
+关键组件：
+- UnstructuredComponent：封装文件处理流程与参数契约
+
+设计背景：统一文件解析入口，避免各组件重复对接外部 API。
+注意事项：必须提供 `api_key`；可选 `api_url` 与 `chunking_strategy` 会影响输出；返回数据会重命名 `source` 字段。
+"""
+
 from langchain_unstructured import UnstructuredLoader
 
 from lfx.base.data.base_file import BaseFileComponent
@@ -18,7 +33,6 @@ class UnstructuredComponent(BaseFileComponent):
     icon = "Unstructured"
     name = "Unstructured"
 
-    # https://docs.unstructured.io/api-reference/api-services/overview#supported-file-types
     VALID_EXTENSIONS = [
         "bmp",
         "csv",
@@ -93,12 +107,13 @@ class UnstructuredComponent(BaseFileComponent):
             self.log("No files to process.")
             return file_list
 
-        # https://docs.unstructured.io/api-reference/api-services/api-parameters
+        # 注意：`unstructured_args` 透传 API 参数，错误键值会由 API 直接报错
         args = self.unstructured_args or {}
 
         if self.chunking_strategy:
             args["chunking_strategy"] = self.chunking_strategy
 
+        # 注意：强制使用 API 端分区（`partition_via_api=True`）
         args["api_key"] = self.api_key
         args["partition_via_api"] = True
         if self.api_url:
@@ -113,7 +128,7 @@ class UnstructuredComponent(BaseFileComponent):
 
         processed_data: list[Data | None] = [Data.from_document(doc) if doc else None for doc in documents]
 
-        # Rename the `source` field to `self.SERVER_FILE_PATH_FIELDNAME`, to avoid conflicts with the `source` field
+        # 注意：重命名 `source` 字段以避免与内部字段冲突
         for data in processed_data:
             if data and "source" in data.data:
                 data.data[self.SERVER_FILE_PATH_FIELDNAME] = data.data.pop("source")

@@ -1,3 +1,14 @@
+"""事件管理器。
+
+本模块提供轻量事件注册与派发能力，支持将事件写入队列供流式消费。
+主要功能包括：
+- 注册事件并绑定回调
+- 将事件序列化后推送到队列
+- 提供默认事件管理器工厂
+
+注意事项：回调签名必须包含 `manager`、`event_type`、`data` 三个参数。
+"""
+
 from __future__ import annotations
 
 import inspect
@@ -13,7 +24,7 @@ from typing_extensions import Protocol
 from lfx.log.logger import logger
 
 if TYPE_CHECKING:
-    # Lightweight type stub for log types
+    # 仅用于类型提示的轻量定义
     LoggableType = dict | str | int | float | bool | list | None
 
 
@@ -26,16 +37,24 @@ class PartialEventCallback(Protocol):
 
 
 class EventManager:
+    """事件管理器封装。
+
+    契约：注册事件后可通过属性访问回调；`send_event` 输出到队列。
+    副作用：写入队列并更新日志。
+    失败语义：回调签名不合法抛 `ValueError`。
+    """
+
     def __init__(self, queue):
         self.queue = queue
         self.events: dict[str, PartialEventCallback] = {}
 
     @staticmethod
     def _validate_callback(callback: EventCallback) -> None:
+        """校验回调签名符合约定。"""
         if not callable(callback):
             msg = "Callback must be callable"
             raise TypeError(msg)
-        # Check if it has `self, event_type and data`
+        # 注意：必须包含 manager/event_type/data 三个参数
         sig = inspect.signature(callback)
         parameters = ["manager", "event_type", "data"]
         if len(sig.parameters) != len(parameters):
@@ -51,6 +70,13 @@ class EventManager:
         event_type: str,
         callback: EventCallback | None = None,
     ) -> None:
+        """注册事件并绑定回调。
+
+        关键路径（三步）：
+        1) 校验事件名格式；
+        2) 构建回调并绑定事件类型；
+        3) 写入事件映射表。
+        """
         if not name:
             msg = "Event name cannot be empty"
             raise ValueError(msg)
@@ -64,10 +90,17 @@ class EventManager:
         self.events[name] = callback_
 
     def send_event(self, *, event_type: str, data: LoggableType):
+        """序列化事件并推送到队列。
+
+        关键路径（三步）：
+        1) 规范化数据并生成事件载荷；
+        2) 序列化为 JSON 字符串；
+        3) 写入队列（如可用）。
+        """
         try:
-            # Simple event creation without heavy dependencies
+            # 注意：避免引入重依赖，仅做轻量处理
             if isinstance(data, dict) and event_type in {"message", "error", "warning", "info", "token"}:
-                # For lfx, keep it simple without playground event creation
+                # lfx 保持简化，不创建 playground 事件
                 pass
         except Exception:  # noqa: BLE001
             logger.debug(f"Error processing event: {event_type}")
@@ -82,13 +115,16 @@ class EventManager:
                 logger.debug("Queue not available for event")
 
     def noop(self, *, data: LoggableType) -> None:
+        """空操作回调，用作缺省事件处理。"""
         pass
 
     def __getattr__(self, name: str) -> PartialEventCallback:
+        """按名称获取事件回调，未注册则返回空操作。"""
         return self.events.get(name, self.noop)
 
 
 def create_default_event_manager(queue=None):
+    """创建包含默认事件的 EventManager。"""
     manager = EventManager(queue)
     manager.register_event("on_token", "token")
     manager.register_event("on_vertices_sorted", "vertices_sorted")
@@ -103,6 +139,7 @@ def create_default_event_manager(queue=None):
 
 
 def create_stream_tokens_event_manager(queue=None):
+    """创建仅用于流式 token 的 EventManager。"""
     manager = EventManager(queue)
     manager.register_event("on_message", "add_message")
     manager.register_event("on_token", "token")

@@ -1,3 +1,19 @@
+"""
+模块名称：MCP 工具组件
+
+本模块封装与 MCP Server 的交互逻辑，支持工具列表拉取、缓存与动态输入生成。
+主要功能：
+- 解析 MCP Server 配置并加载工具列表；
+- 按工具 schema 动态生成输入项；
+- 执行工具并返回结构化输出。
+
+关键组件：
+- MCPToolsComponent：MCP 工具组件入口。
+
+设计背景：统一 MCP Server 的接入与工具执行流程，避免在节点层重复实现。
+注意事项：缓存启用会影响配置更新生效时机，必要时关闭 `use_cache`。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -28,20 +44,15 @@ def resolve_mcp_config(
     server_config_from_value: dict | None,
     server_config_from_db: dict | None,
 ) -> dict | None:
-    """Resolve MCP server config with proper precedence.
+    """解析 MCP Server 配置并处理优先级
 
-    Resolves the configuration for an MCP server with the following precedence:
-    1. Database config (takes priority) - ensures edits are reflected
-    2. Config from value/tweaks (fallback) - allows REST API to provide config for new servers
-
-    Args:
-        server_name: Name of the MCP server
-        server_config_from_value: Config provided via value/tweaks (optional)
-        server_config_from_db: Config from database (optional)
-
-    Returns:
-        Final config to use (DB takes priority, falls back to value)
-        Returns None if no config found in either location
+    契约：优先使用数据库配置，其次使用传入配置；两者为空返回 None。
+    关键路径：1) 读取 DB 配置 2) 回退到 value 配置。
+    决策：数据库配置优先于前端传入
+    问题：编辑后的配置必须即时生效
+    方案：以 DB 为权威来源
+    代价：DB 不可用时只能回退
+    重评：当配置完全由 API 侧控制时
     """
     if server_config_from_db:
         return server_config_from_db
@@ -49,31 +60,50 @@ def resolve_mcp_config(
 
 
 class MCPToolsComponent(ComponentWithCache):
+    """MCP 工具组件封装
+
+    契约：依赖 MCP Server 配置与工具列表；输出为工具执行结果 `DataFrame`。
+    关键路径：1) 解析/缓存 MCP Server 配置 2) 拉取工具 schema 3) 执行工具并返回输出。
+    决策：提供可选缓存以减少重复拉取
+    问题：工具列表获取成本高且频繁
+    方案：用组件缓存复用工具列表
+    代价：配置更新可能延迟生效
+    重评：当 MCP Server 变更频率高时
+    """
     schema_inputs: list = []
     tools: list[StructuredTool] = []
     _not_load_actions: bool = False
     _tool_cache: dict = {}
-    _last_selected_server: str | None = None  # Cache for the last selected server
+    _last_selected_server: str | None = None  # 注意：缓存最近选择的服务器以减少重复刷新。
 
     def __init__(self, **data) -> None:
+        """初始化 MCP 组件并准备缓存结构
+
+        契约：构造后保证缓存键存在，并初始化 stdio/http 客户端。
+        关键路径：1) 初始化共享缓存结构 2) 创建客户端实例。
+        """
         super().__init__(**data)
-        # Initialize cache keys to avoid CacheMiss when accessing them
+        # 注意：预置缓存键以避免 CacheMiss。
         self._ensure_cache_structure()
 
-        # Initialize clients with access to the component cache
+        # 实现：客户端复用组件缓存以共享会话/工具状态。
         self.stdio_client: MCPStdioClient = MCPStdioClient(component_cache=self._shared_component_cache)
         self.streamable_http_client: MCPStreamableHttpClient = MCPStreamableHttpClient(
             component_cache=self._shared_component_cache
         )
 
     def _ensure_cache_structure(self):
-        """Ensure the cache has the required structure."""
-        # Check if servers key exists and is not CacheMiss
+        """确保组件缓存具备必要键
+
+        契约：保证 `servers` 与 `last_selected_server` 键存在。
+        关键路径：1) 检查键是否存在 2) 缺失则写入默认值。
+        """
+        # 注意：缺失键会导致后续访问失败。
         servers_value = safe_cache_get(self._shared_component_cache, "servers")
         if servers_value is None:
             safe_cache_set(self._shared_component_cache, "servers", {})
 
-        # Check if last_selected_server key exists and is not CacheMiss
+        # 注意：为空字符串表示尚未选择服务器。
         last_server_value = safe_cache_get(self._shared_component_cache, "last_selected_server")
         if last_server_value is None:
             safe_cache_set(self._shared_component_cache, "last_selected_server", "")
@@ -159,7 +189,13 @@ class MCPToolsComponent(ComponentWithCache):
     ]
 
     async def _validate_schema_inputs(self, tool_obj) -> list[InputTypes]:
-        """Validate and process schema inputs for a tool."""
+        """校验并生成工具输入字段
+
+        契约：返回 `InputTypes` 列表；无有效参数时返回空列表。
+        关键路径：1) 展平 schema 2) 生成输入 schema 3) 转换为 Langflow 输入。
+        异常流：schema 异常时抛 `ValueError`。
+        排障入口：日志 `Error validating schema inputs`。
+        """
         try:
             if not tool_obj or not hasattr(tool_obj, "args_schema"):
                 msg = "Invalid tool object or missing input schema"
@@ -185,7 +221,21 @@ class MCPToolsComponent(ComponentWithCache):
             return schema_inputs
 
     async def update_tool_list(self, mcp_server_value=None):
-        # Accepts mcp_server_value as dict {name, config} or uses self.mcp_server
+        """加载或刷新 MCP 工具列表
+
+        契约：返回 `(tools, server_info)`；失败抛 `ValueError/TimeoutError`。
+        关键路径（三步）：
+        1) 解析 server_name 与缓存策略
+        2) 优先使用缓存/数据库配置
+        3) 拉取工具并更新缓存
+        异常流：超时抛 `TimeoutError`，其他异常抛 `ValueError`。
+        决策：数据库配置优先并可被缓存
+        问题：编辑配置需要及时生效但又要减少拉取成本
+        方案：DB 优先 + 可选缓存
+        代价：缓存可能导致延迟更新
+        重评：当配置变更频繁且必须实时生效时
+        """
+        # 实现：允许传入 {name, config}，否则使用组件字段。
         mcp_server = mcp_server_value if mcp_server_value is not None else getattr(self, "mcp_server", None)
         server_name = None
         server_config_from_value = None
@@ -198,10 +248,10 @@ class MCPToolsComponent(ComponentWithCache):
             self.tools = []
             return [], {"name": server_name, "config": server_config_from_value}
 
-        # Check if caching is enabled, default to False
+        # 注意：缓存默认关闭，避免配置更新不生效。
         use_cache = getattr(self, "use_cache", False)
 
-        # Use shared cache if available and caching is enabled
+        # 实现：启用缓存时优先读取共享缓存。
         cached = None
         if use_cache:
             servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
@@ -214,10 +264,10 @@ class MCPToolsComponent(ComponentWithCache):
                 self._tool_cache = cached["tool_cache"]
                 server_config_from_value = cached["config"]
             except (TypeError, KeyError, AttributeError) as e:
-                # Handle corrupted cache data by clearing it and continuing to fetch fresh tools
+                # 排障：缓存损坏时清除并回退到重新拉取。
                 msg = f"Unable to use cached data for MCP Server{server_name}: {e}"
                 await logger.awarning(msg)
-                # Clear the corrupted cache entry
+                # 注意：仅清除当前 server 的缓存，避免影响其他服务。
                 current_servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
                 if isinstance(current_servers_cache, dict) and server_name in current_servers_cache:
                     current_servers_cache.pop(server_name)
@@ -226,8 +276,7 @@ class MCPToolsComponent(ComponentWithCache):
                 return self.tools, {"name": server_name, "config": server_config_from_value}
 
         try:
-            # Try to fetch from database first to ensure we have the latest config
-            # This ensures database updates (like editing a server) take effect
+            # 决策：优先从数据库获取，确保编辑生效。
             try:
                 from langflow.api.v2.mcp import get_server
                 from langflow.services.database.models.user.crud import get_user_by_id
@@ -245,7 +294,7 @@ class MCPToolsComponent(ComponentWithCache):
                     raise ValueError(msg)
                 current_user = await get_user_by_id(db, self.user_id)
 
-                # Try to get server config from DB/API
+                # 实现：尝试从 DB/API 获取服务器配置。
                 server_config_from_db = await get_server(
                     server_name,
                     current_user,
@@ -254,7 +303,7 @@ class MCPToolsComponent(ComponentWithCache):
                     settings_service=get_settings_service(),
                 )
 
-            # Resolve config with proper precedence: DB takes priority, falls back to value
+            # 实现：按优先级合并配置。
             server_config = resolve_mcp_config(
                 server_name=server_name,
                 server_config_from_value=server_config_from_value,
@@ -265,16 +314,15 @@ class MCPToolsComponent(ComponentWithCache):
                 self.tools = []
                 return [], {"name": server_name, "config": server_config}
 
-            # Add verify_ssl option to server config if not present
+            # 注意：未配置时补充 verify_ssl，避免隐式默认不一致。
             if "verify_ssl" not in server_config:
                 verify_ssl = getattr(self, "verify_ssl", True)
                 server_config["verify_ssl"] = verify_ssl
 
-            # Merge headers from component input with server config headers
-            # Component headers take precedence over server config headers
+            # 实现：组件 headers 优先于服务端配置 headers。
             component_headers = getattr(self, "headers", None) or []
             if component_headers:
-                # Convert list of {"key": k, "value": v} to dict
+                # 注意：支持 list/dict 两种 headers 输入格式。
                 component_headers_dict = {}
                 if isinstance(component_headers, list):
                     for item in component_headers:
@@ -285,7 +333,7 @@ class MCPToolsComponent(ComponentWithCache):
 
                 if component_headers_dict:
                     existing_headers = server_config.get("headers", {}) or {}
-                    # Ensure existing_headers is a dict (convert from list if needed)
+                    # 注意：服务端 headers 可能为 list，需先归一化为 dict。
                     if isinstance(existing_headers, list):
                         existing_dict = {}
                         for item in existing_headers:
@@ -306,7 +354,7 @@ class MCPToolsComponent(ComponentWithCache):
             self._tool_cache = tool_cache
             self.tools = tool_list
 
-            # Cache the result only if caching is enabled
+            # 注意：仅在启用缓存时写入缓存。
             if use_cache:
                 cache_data = {
                     "tools": tool_list,
@@ -315,7 +363,7 @@ class MCPToolsComponent(ComponentWithCache):
                     "config": server_config,
                 }
 
-                # Safely update the servers cache
+                # 实现：安全写入共享缓存。
                 current_servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
                 if isinstance(current_servers_cache, dict):
                     current_servers_cache[server_name] = cache_data
@@ -333,12 +381,25 @@ class MCPToolsComponent(ComponentWithCache):
             return tool_list, {"name": server_name, "config": server_config}
 
     async def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:
-        """Toggle the visibility of connection-specific fields based on the selected mode."""
+        """更新构建配置并切换工具/服务器相关字段
+
+        契约：返回更新后的 `build_config`；必要时会刷新工具列表。
+        关键路径（三步）：
+        1) 根据变更字段刷新工具列表或清理配置
+        2) 处理缓存/工具模式逻辑
+        3) 更新工具输入与占位状态
+        异常流：更新失败抛 `ValueError`。
+        排障入口：日志 `Error in update_build_config`。
+        决策：在构建阶段处理工具刷新
+        问题：工具列表依赖外部服务器变化
+        方案：基于字段变更触发刷新与缓存
+        代价：构建阶段可能触发网络请求
+        重评：当支持后台异步刷新时
+        """
         try:
             if field_name == "tool":
                 try:
-                    # Always refresh tools when cache is disabled, or when tools list is empty
-                    # This ensures database edits are reflected immediately when cache is disabled
+                    # 注意：未启用缓存或工具为空时强制刷新，确保配置变更生效。
                     use_cache = getattr(self, "use_cache", False)
                     if len(self.tools) == 0 or not use_cache:
                         try:
@@ -398,26 +459,24 @@ class MCPToolsComponent(ComponentWithCache):
                 _last_selected_server = safe_cache_get(self._shared_component_cache, "last_selected_server", "")
                 server_changed = current_server_name != _last_selected_server
 
-                # Determine if "Tool Mode" is active by checking if the tool dropdown is hidden.
+                # 注意：tool_mode 启用时隐藏下拉框并以 placeholder 方式传参。
                 is_in_tool_mode = build_config["tools_metadata"]["show"]
 
-                # Get use_cache setting to determine if we should use cached data
+                # 实现：按 use_cache 决定是否走缓存路径。
                 use_cache = getattr(self, "use_cache", False)
 
-                # Fast path: if server didn't change and we already have options, keep them as-is
-                # BUT only if caching is enabled or we're in tool mode
+                # 注意：若服务未变且已有 options，可在缓存开启或工具模式下走快速路径。
                 existing_options = build_config.get("tool", {}).get("options") or []
                 if not server_changed and existing_options:
-                    # In non-tool mode with cache disabled, skip the fast path to force refresh
+                    # 注意：非工具模式且禁用缓存时必须刷新。
                     if not is_in_tool_mode and not use_cache:
-                        pass  # Continue to refresh logic below
+                        pass  # 注意：继续执行刷新逻辑。
                     else:
                         if not is_in_tool_mode:
                             build_config["tool"]["show"] = True
                         return build_config
 
-                # To avoid unnecessary updates, only proceed if the server has actually changed
-                # OR if caching is disabled (to force refresh in non-tool mode)
+                # 注意：仅当服务变更或禁用缓存时刷新，避免频繁请求。
                 if (_last_selected_server in (current_server_name, "")) and build_config["tool"]["show"] and use_cache:
                     if current_server_name:
                         servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
@@ -432,15 +491,14 @@ class MCPToolsComponent(ComponentWithCache):
                         return build_config
                 safe_cache_set(self._shared_component_cache, "last_selected_server", current_server_name)
 
-                # When cache is disabled, clear any cached data for this server
-                # This ensures we always fetch fresh data from the database
+                # 注意：关闭缓存时清理当前服务缓存，强制拉取最新数据。
                 if not use_cache and current_server_name:
                     servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
                     if isinstance(servers_cache, dict) and current_server_name in servers_cache:
                         servers_cache.pop(current_server_name)
                         safe_cache_set(self._shared_component_cache, "servers", servers_cache)
 
-                # Check if tools are already cached for this server before clearing
+                # 实现：启用缓存时先读取已缓存工具。
                 cached_tools = None
                 if current_server_name and use_cache:
                     servers_cache = safe_cache_get(self._shared_component_cache, "servers", {})
@@ -453,41 +511,35 @@ class MCPToolsComponent(ComponentWithCache):
                                 self.tool_names = cached["tool_names"]
                                 self._tool_cache = cached["tool_cache"]
                             except (TypeError, KeyError, AttributeError) as e:
-                                # Handle corrupted cache data by ignoring it
+                                # 排障：缓存损坏时忽略并回退刷新。
                                 msg = f"Unable to use cached data for MCP Server,{current_server_name}: {e}"
                                 await logger.awarning(msg)
                                 cached_tools = None
 
-                # Clear tools when cache is disabled OR when we don't have cached tools
-                # This ensures fresh tools are fetched after database edits
+                # 注意：禁用缓存或无缓存时清空工具列表以触发刷新。
                 if not cached_tools or not use_cache:
-                    self.tools = []  # Clear previous tools to force refresh
+                    self.tools = []  # 注意：清空旧工具以强制刷新。
 
-                # Clear previous tool inputs if:
-                # 1. Server actually changed
-                # 2. Cache is disabled (meaning tool list will be refreshed)
+                # 注意：服务变更或禁用缓存时清理旧工具输入。
                 if server_changed or not use_cache:
                     self.remove_non_default_keys(build_config)
 
-                # Only show the tool dropdown if not in tool_mode
+                # 注意：非 tool_mode 才显示工具下拉框。
                 if not is_in_tool_mode:
                     build_config["tool"]["show"] = True
                     if cached_tools:
-                        # Use cached tools to populate options immediately
+                        # 实现：使用缓存工具立即填充 options。
                         build_config["tool"]["options"] = [tool.name for tool in cached_tools]
                         build_config["tool"]["placeholder"] = "Select a tool"
                     else:
-                        # Show loading state only when we need to fetch tools
+                        # 实现：需要拉取时展示加载态。
                         build_config["tool"]["placeholder"] = "Loading tools..."
                         build_config["tool"]["options"] = []
-                    # Force a value refresh when:
-                    # 1. Server changed
-                    # 2. We don't have cached tools
-                    # 3. Cache is disabled (to force refresh on config changes)
+                    # 注意：服务变更/无缓存/禁用缓存时强制刷新值触发重渲染。
                     if server_changed or not cached_tools or not use_cache:
                         build_config["tool"]["value"] = uuid.uuid4()
                 else:
-                    # Keep the tool dropdown hidden if in tool_mode
+                    # 注意：工具模式下保持隐藏，避免与工具输入冲突。
                     self._not_load_actions = True
                     build_config["tool"]["show"] = False
 
@@ -514,7 +566,17 @@ class MCPToolsComponent(ComponentWithCache):
             return build_config
 
     def get_inputs_for_all_tools(self, tools: list) -> dict:
-        """Get input schemas for all tools."""
+        """获取所有工具的输入字段定义
+
+        契约：返回 `{tool_name: inputs}` 字典；忽略无效工具。
+        关键路径：1) 展平 schema 2) 生成输入定义 3) 汇总返回。
+        异常流：单个工具解析失败只记录日志，不影响其他工具。
+        决策：失败隔离而非整体失败
+        问题：单工具 schema 异常不应影响其他工具
+        方案：捕获异常并跳过该工具
+        代价：可能隐藏部分错误
+        重评：当需要强一致性时
+        """
         inputs = {}
         for tool in tools:
             if not tool or not hasattr(tool, "name"):
@@ -531,13 +593,19 @@ class MCPToolsComponent(ComponentWithCache):
         return inputs
 
     def remove_non_default_keys(self, build_config: dict) -> None:
-        """Remove non-default keys from the build config."""
+        """移除非默认字段以清理动态输入。"""
         for key in list(build_config.keys()):
             if key not in self.default_keys:
                 build_config.pop(key)
 
     async def _update_tool_config(self, build_config: dict, tool_name: str) -> None:
-        """Update tool configuration with proper error handling."""
+        """更新选中工具的动态输入
+
+        契约：根据 `tool_name` 重建动态输入并尽量保留原值。
+        关键路径：1) 获取工具对象 2) 清理旧输入 3) 添加新输入并回填值。
+        异常流：schema 校验失败时清空 `schema_inputs` 并返回。
+        排障入口：日志 `Schema validation error for tool`。
+        """
         if not self.tools:
             self.tools, build_config["mcp_server"]["value"] = await self.update_tool_list()
 
@@ -553,23 +621,23 @@ class MCPToolsComponent(ComponentWithCache):
             return
 
         try:
-            # Store current values before removing inputs (only for the current tool)
+            # 注意：先缓存当前值，避免切换后丢失用户输入。
             current_values = {}
             for key, value in build_config.items():
                 if key not in self.default_keys and isinstance(value, dict) and "value" in value:
                     current_values[key] = value["value"]
 
-            # Remove ALL non-default keys (all previous tool inputs)
+            # 注意：清空旧工具输入，避免残留字段误提交。
             self.remove_non_default_keys(build_config)
 
-            # Get and validate new inputs for the selected tool
+            # 实现：按新工具 schema 生成输入列表。
             self.schema_inputs = await self._validate_schema_inputs(tool_obj)
             if not self.schema_inputs:
                 msg = f"No input parameters to configure for tool '{tool_name}'"
                 await logger.ainfo(msg)
                 return
 
-            # Add new inputs to build config for the selected tool only
+            # 实现：仅为当前工具添加输入字段。
             for schema_input in self.schema_inputs:
                 if not schema_input or not hasattr(schema_input, "name"):
                     msg = "Invalid schema input detected, skipping"
@@ -584,7 +652,7 @@ class MCPToolsComponent(ComponentWithCache):
 
                     build_config[name] = input_dict
 
-                    # Preserve existing value if the parameter name exists in current_values
+                    # 注意：若字段名相同则保留历史值。
                     if name in current_values:
                         build_config[name]["value"] = current_values[name]
 
@@ -603,11 +671,25 @@ class MCPToolsComponent(ComponentWithCache):
             raise ValueError(msg) from e
 
     async def build_output(self) -> DataFrame:
-        """Build output with improved error handling and validation."""
+        """执行 MCP 工具并返回输出
+
+        契约：返回 `DataFrame`；未选择工具时返回错误行。
+        关键路径（三步）：
+        1) 更新工具列表与会话上下文
+        2) 组装工具参数并执行
+        3) 格式化输出为 DataFrame
+        异常流：执行失败抛 `ValueError`。
+        排障入口：日志 `Error in build_output`。
+        决策：统一输出为 DataFrame
+        问题：工具返回体结构不一致
+        方案：在组件内规范化为 DataFrame
+        代价：复杂嵌套结构可能被扁平化或包装
+        重评：当下游可直接消费原始结构时
+        """
         try:
             self.tools, _ = await self.update_tool_list()
             if self.tool != "":
-                # Set session context for persistent MCP sessions using Langflow session ID
+                # 注意：为可复用会话设置 session_context，减少 MCP 重建成本。
                 session_context = self._get_session_context()
                 if session_context:
                     self.stdio_client.set_session_context(session_context)
@@ -642,26 +724,34 @@ class MCPToolsComponent(ComponentWithCache):
             raise ValueError(msg) from e
 
     def process_output_item(self, item_dict):
-        """Process the output of a tool."""
+        """规范化单条工具输出
+
+        契约：输入 dict，返回可序列化 dict。
+        关键路径：1) 尝试解析 text 为 JSON 2) 包装非 dict 结果。
+        """
         if item_dict.get("type") == "text":
             text = item_dict.get("text")
             try:
                 parsed = json.loads(text)
-                # Ensure we always return a dictionary for DataFrame compatibility
+                # 注意：DataFrame 期望 dict 结构，非 dict 需包装。
                 if isinstance(parsed, dict):
                     return parsed
-                # Wrap non-dict parsed values in a dictionary
+                # 注意：保持原文与解析值，便于排障。
                 return {"text": text, "parsed_value": parsed, "type": "text"}  # noqa: TRY300
             except json.JSONDecodeError:
                 return item_dict
         return item_dict
 
     def _get_session_context(self) -> str | None:
-        """Get the Langflow session ID for MCP session caching."""
-        # Try to get session ID from the component's execution context
+        """生成 MCP 会话上下文标识
+
+        契约：返回 `session_id_server` 或 None。
+        关键路径：1) 读取 graph.session_id 2) 拼接 server_name。
+        """
+        # 注意：优先使用图执行上下文中的 session_id。
         if hasattr(self, "graph") and hasattr(self.graph, "session_id"):
             session_id = self.graph.session_id
-            # Include server name to ensure different servers get different sessions
+            # 注意：拼接 server_name 以隔离不同 MCP Server 会话。
             server_name = ""
             mcp_server = getattr(self, "mcp_server", None)
             if isinstance(mcp_server, dict):
@@ -672,7 +762,7 @@ class MCPToolsComponent(ComponentWithCache):
         return None
 
     async def _get_tools(self):
-        """Get cached tools or update if necessary."""
+        """获取工具列表（必要时刷新）。"""
         mcp_server = getattr(self, "mcp_server", None)
         if not self._not_load_actions:
             tools, _ = await self.update_tool_list(mcp_server)

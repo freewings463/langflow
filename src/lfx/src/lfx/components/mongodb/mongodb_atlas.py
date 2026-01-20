@@ -1,3 +1,21 @@
+"""
+模块名称：MongoDB Atlas 向量库组件
+
+本模块提供 MongoDB Atlas Vector Search 的向量库组件，支持写入文档与相似度检索。
+主要功能包括：
+- 建立 MongoDB Atlas 连接（支持 mTLS）
+- 创建/校验向量搜索索引
+- 构建 `MongoDBAtlasVectorSearch` 并执行相似度检索
+
+关键组件：
+- `MongoVectorStoreComponent`
+- `build_vector_store`
+- `search_documents`
+
+设计背景：在 Langflow 中以统一接口接入 Atlas 向量检索。
+注意事项：mTLS 会写入临时证书文件；索引创建后需等待生效。
+"""
+
 import tempfile
 import time
 
@@ -13,6 +31,15 @@ from lfx.schema.data import Data
 
 
 class MongoVectorStoreComponent(LCVectorStoreComponent):
+    """MongoDB Atlas 向量库组件。
+
+    契约：
+    - 输入：连接 URI、数据库/集合/索引信息、向量维度与相似度配置
+    - 输出：向量库实例或检索结果 `list[Data]`
+    - 副作用：可能创建索引、写入文档、删除文档（覆盖模式）
+    - 失败语义：连接或索引异常时抛 `ValueError`/`ImportError`
+    """
+
     display_name = "MongoDB Atlas"
     description = "MongoDB Atlas Vector Store with search capabilities"
     name = "MongoDBAtlasVector"
@@ -95,13 +122,23 @@ class MongoVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> MongoDBAtlasVectorSearch:
+        """构建向量库客户端并可选写入文档。
+
+        关键路径（三步）：
+        1) 校验依赖并建立 MongoDB 连接（必要时启用 mTLS）
+        2) 规范化输入文档并根据插入模式清理集合
+        3) 创建 `MongoDBAtlasVectorSearch` 实例并返回
+
+        异常流：连接/证书写入失败抛 `ValueError`；缺依赖抛 `ImportError`。
+        排障入口：异常消息包含 `Failed to connect to MongoDB Atlas` 或证书写入错误。
+        """
         try:
             from pymongo import MongoClient
         except ImportError as e:
             msg = "Please install pymongo to use MongoDB Atlas Vector Store"
             raise ImportError(msg) from e
 
-        # Create temporary files for the client certificate
+        # 注意：mTLS 需要落盘证书，失败时抛出异常并中止构建
         if self.enable_mtls:
             client_cert_path = None
             try:
@@ -138,7 +175,7 @@ class MongoVectorStoreComponent(LCVectorStoreComponent):
             msg = f"Failed to connect to MongoDB Atlas: {e}"
             raise ValueError(msg) from e
 
-        # Convert DataFrame to Data if needed using parent's method
+        # 注意：输入数据可能来自 DataFrame/自定义类型，先统一为 LangChain 文档
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -157,6 +194,14 @@ class MongoVectorStoreComponent(LCVectorStoreComponent):
         return MongoDBAtlasVectorSearch(embedding=self.embedding, collection=collection, index_name=self.index_name)
 
     def search_documents(self) -> list[Data]:
+        """执行向量相似度检索并返回 Data 列表。
+
+        契约：
+        - 输入：`search_query` 文本与 `number_of_results`
+        - 输出：`list[Data]`；若无查询条件返回空列表
+        - 副作用：必要时创建向量索引；更新 `self.status`
+        - 失败语义：索引或网络异常向上抛出
+        """
         from bson.objectid import ObjectId
 
         vector_store = self.build_vector_store()
@@ -179,14 +224,18 @@ class MongoVectorStoreComponent(LCVectorStoreComponent):
         return []
 
     def __insert_mode(self, collection: Collection) -> None:
+        """根据插入模式决定是否清空集合。"""
         if self.insert_mode == "overwrite":
-            collection.delete_many({})  # Delete all documents while preserving collection structure
+            collection.delete_many({})  # 注意：清空文档但保留集合结构
 
     def verify_search_index(self, collection: Collection) -> None:
-        """Verify if the search index exists, if not, create it.
+        """校验向量索引是否存在，不存在则创建。
 
-        Args:
-            collection (Collection): The collection to verify the search index on.
+        契约：
+        - 输入：目标集合
+        - 输出：无返回值
+        - 副作用：可能创建搜索索引并等待 20 秒
+        - 失败语义：索引创建失败将抛出 pymongo 异常
         """
         indexes = collection.list_search_indexes()
 
@@ -196,9 +245,10 @@ class MongoVectorStoreComponent(LCVectorStoreComponent):
         if self.index_name not in index_names and index_type != "vectorSearch":
             collection.create_search_index(self.__create_index_definition())
 
-            time.sleep(20)  # Give some time for index to be ready
+            time.sleep(20)  # 注意：等待索引可用，避免紧接检索失败
 
     def __create_index_definition(self) -> SearchIndexModel:
+        """生成向量索引定义（可选包含过滤字段）。"""
         fields = [
             {
                 "type": "vector",

@@ -1,3 +1,17 @@
+"""模块名称：通用工具集合
+
+模块目的：提供跨模块复用的基础工具与格式化逻辑。
+主要功能：
+- 容器环境探测与 `localhost` 重写
+- 从类/方法构建前端模板描述
+- 字段类型与显示属性的统一格式化
+- Settings 异步更新与辅助工具
+使用场景：节点模板生成、配置更新、容器内服务访问等。
+关键组件：`detect_container_environment`、`build_template_from_function`、`format_dict`
+设计背景：跨模块共享工具集中维护，降低重复实现与耦合。
+注意事项：部分函数会原地修改传入字典；容器探测依赖宿主文件与环境变量。
+"""
+
 import difflib
 import importlib
 import inspect
@@ -20,16 +34,20 @@ from lfx.utils import constants
 
 
 def detect_container_environment() -> str | None:
-    """Detect if running in a container and return the appropriate container type.
+    """检测是否在容器中运行并返回容器类型。
 
-    Returns:
-        'docker' if running in Docker, 'podman' if running in Podman, None otherwise.
+    关键路径：
+    1) 检查 `/.dockerenv` 文件
+    2) 读取 `/proc/self/cgroup` 关键词
+    3) 读取 `container` 环境变量
+
+    异常流：读取系统文件失败时忽略并继续后续策略。
     """
-    # Check for .dockerenv file (Docker)
+    # `Docker`：`.dockerenv` 文件存在
     if Path("/.dockerenv").exists():
         return "docker"
 
-    # Check cgroup for container indicators
+    # 读取 cgroup 标识
     try:
         with Path("/proc/self/cgroup").open() as f:
             content = f.read()
@@ -40,7 +58,7 @@ def detect_container_environment() -> str | None:
     except (FileNotFoundError, PermissionError):
         pass
 
-    # Check environment variables (lowercase 'container' is the standard for Podman)
+    # `Podman` 标准环境变量
     if os.getenv("container") == "podman":  # noqa: SIM112
         return "podman"
 
@@ -48,23 +66,22 @@ def detect_container_environment() -> str | None:
 
 
 def get_container_host() -> str | None:
-    """Get the hostname to access host services from within a container.
+    """获取容器内访问宿主机的可用主机名或 IP。
 
-    Tries multiple methods to find the correct hostname:
-    1. host.containers.internal (Podman) or host.docker.internal (Docker)
-    2. Gateway IP from routing table (fallback for Linux)
+    关键路径：
+    1) 根据容器类型尝试标准域名
+    2) 读取路由表推导网关 IP（Linux 兜底）
 
-    Returns:
-        The hostname or IP to use, or None if not in a container.
+    失败语义：无法判断容器或无可用域名/网关时返回 None。
     """
-    # Check if we're in a container first
+    # 先判断是否在容器环境
     container_type = detect_container_environment()
     if not container_type:
         return None
 
-    # Try container-specific hostnames first based on detected type
+    # 按容器类型尝试标准域名
     if container_type == "podman":
-        # Podman: try host.containers.internal first
+        # `Podman`：优先 `host.containers.internal`
         try:
             socket.getaddrinfo("host.containers.internal", None)
         except socket.gaierror:
@@ -72,7 +89,7 @@ def get_container_host() -> str | None:
         else:
             return "host.containers.internal"
 
-        # Fallback to host.docker.internal (for Podman Desktop on macOS)
+        # `Podman Desktop on macOS` 兼容域名
         try:
             socket.getaddrinfo("host.docker.internal", None)
         except socket.gaierror:
@@ -80,7 +97,7 @@ def get_container_host() -> str | None:
         else:
             return "host.docker.internal"
     else:
-        # Docker: try host.docker.internal first
+        # `Docker`：优先 `host.docker.internal`
         try:
             socket.getaddrinfo("host.docker.internal", None)
         except socket.gaierror:
@@ -88,7 +105,7 @@ def get_container_host() -> str | None:
         else:
             return "host.docker.internal"
 
-        # Fallback to host.containers.internal (unlikely but possible)
+        # 备用域名（少见）
         try:
             socket.getaddrinfo("host.containers.internal", None)
         except socket.gaierror:
@@ -96,18 +113,18 @@ def get_container_host() -> str | None:
         else:
             return "host.containers.internal"
 
-    # Fallback: try to get gateway IP from routing table (Linux containers)
+    # 兜底：读取路由表推导网关 IP（Linux）
     try:
         with Path("/proc/net/route").open() as f:
-            # Skip header
+            # 跳过表头
             next(f)
             for line in f:
                 fields = line.strip().split()
-                min_field_count = 3  # Minimum fields needed: interface, destination, gateway
-                if len(fields) >= min_field_count and fields[1] == "00000000":  # Default route
-                    # Gateway is in hex format (little-endian)
+                min_field_count = 3  # 最少字段：接口/目的地/网关
+                if len(fields) >= min_field_count and fields[1] == "00000000":  # 默认路由
+                    # 网关为小端十六进制
                     gateway_hex = fields[2]
-                    # Convert little-endian hex to dotted IPv4
+                    # 转换为 IPv4
                     gw_int = int(gateway_hex, 16)
                     return socket.inet_ntoa(struct.pack("<L", gw_int))
     except (FileNotFoundError, PermissionError, IndexError, ValueError):
@@ -117,32 +134,16 @@ def get_container_host() -> str | None:
 
 
 def transform_localhost_url(url: str | None) -> str | None:
-    """Transform localhost URLs to container-accessible hosts when running in a container.
+    """将容器内的 `localhost` URL 重写为可访问宿主机的地址。
 
-    Automatically detects if running inside a container and finds the appropriate host
-    address to replace localhost/127.0.0.1. Tries in order:
-    - host.docker.internal (if resolvable)
-    - host.containers.internal (if resolvable)
-    - Gateway IP from routing table (fallback)
+    关键路径：
+    1) 为空则直接返回
+    2) 探测容器宿主地址
+    3) 替换 `localhost/127.0.0.1`
 
-    Args:
-        url: The original URL, can be None or empty string
-
-    Returns:
-        Transformed URL with container-accessible host if applicable, otherwise the original URL.
-        Returns None if url is None, empty string if url is empty string.
-
-    Example:
-        >>> transform_localhost_url("http://localhost:5001")
-        # Returns "http://host.docker.internal:5001" if running in Docker and hostname resolves
-        # Returns "http://172.17.0.1:5001" if running in Docker on Linux (gateway IP fallback)
-        # Returns "http://localhost:5001" if not in a container
-        >>> transform_localhost_url(None)
-        # Returns None
-        >>> transform_localhost_url("")
-        # Returns ""
+    失败语义：无法探测宿主地址时返回原始 URL。
     """
-    # Guard against None and empty string to prevent TypeError
+    # 空值直接返回，避免 TypeError
     if not url:
         return url
 
@@ -151,7 +152,7 @@ def transform_localhost_url(url: str | None) -> str | None:
     if not container_host:
         return url
 
-    # Replace localhost and 127.0.0.1 with the container host
+    # 替换本地回环地址
     localhost_patterns = ["localhost", "127.0.0.1"]
 
     for pattern in localhost_patterns:
@@ -162,18 +163,28 @@ def transform_localhost_url(url: str | None) -> str | None:
 
 
 def unescape_string(s: str):
-    # Replace escaped new line characters with actual new line characters
+    """将转义的 `\\n` 替换为真实换行。"""
     return s.replace("\\n", "\n")
 
 
 def remove_ansi_escape_codes(text):
+    """移除字符串中的 ANSI 转义序列。"""
     return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
 
 
 def build_template_from_function(name: str, type_to_loader_dict: dict, *, add_function: bool = False):
+    """根据类返回类型构建前端模板描述。
+
+    关键路径：
+    1) 校验目标类名存在于 `type_to_loader_dict`
+    2) 解析类 docstring 与字段默认值
+    3) 组装模板与基类信息
+
+    异常流：类名不存在抛 `ValueError`；默认工厂解析失败记录日志并回退为 None。
+    """
     classes = [item.__annotations__["return"].__name__ for item in type_to_loader_dict.values()]
 
-    # Raise error if name is not in chains
+    # 目标类名不存在则直接报错
     if name not in classes:
         msg = f"{name} not found"
         raise ValueError(msg)
@@ -182,7 +193,7 @@ def build_template_from_function(name: str, type_to_loader_dict: dict, *, add_fu
         if v.__annotations__["return"].__name__ == name:
             class_ = v.__annotations__["return"]
 
-            # Get the docstring
+            # 解析类 docstring
             docs = parse(class_.__doc__)
 
             variables = {"_type": _type}
@@ -203,8 +214,7 @@ def build_template_from_function(name: str, type_to_loader_dict: dict, *, add_fu
                         variables[class_field_items][name_] = value_
 
                 variables[class_field_items]["placeholder"] = docs.params.get(class_field_items, "")
-            # Adding function to base classes to allow
-            # the output to be a function
+            # 允许输出为函数类型
             base_classes = get_base_classes(class_)
             if add_function:
                 base_classes.append("Callable")
@@ -224,9 +234,18 @@ def build_template_from_method(
     *,
     add_function: bool = False,
 ):
+    """根据类方法签名构建模板描述。
+
+    关键路径：
+    1) 校验类/方法存在
+    2) 解析方法签名与 docstring
+    3) 组装模板与基类信息
+
+    失败语义：类名或方法不存在时抛 `ValueError`。
+    """
     classes = [item.__name__ for item in type_to_cls_dict.values()]
 
-    # Raise error if class_name is not in classes
+    # 类名不存在直接报错
     if class_name not in classes:
         msg = f"{class_name} not found."
         raise ValueError(msg)
@@ -235,24 +254,24 @@ def build_template_from_method(
         if v.__name__ == class_name:
             class_ = v
 
-            # Check if the method exists in this class
+            # 方法不存在直接报错
             if not hasattr(class_, method_name):
                 msg = f"Method {method_name} not found in class {class_name}"
                 raise ValueError(msg)
 
-            # Get the method
+            # 获取方法对象
             method = getattr(class_, method_name)
 
-            # Get the docstring
+            # 解析方法 docstring
             docs = parse(method.__doc__)
 
-            # Get the signature of the method
+            # 获取方法签名
             sig = inspect.signature(method)
 
-            # Get the parameters of the method
+            # 提取参数信息
             params = sig.parameters
 
-            # Initialize the variables dictionary with method parameters
+            # 构造参数变量映射
             variables = {
                 "_type": _type,
                 **{
@@ -268,7 +287,7 @@ def build_template_from_method(
 
             base_classes = get_base_classes(class_)
 
-            # Adding function to base classes to allow the output to be a function
+            # 允许输出为函数类型
             if add_function:
                 base_classes.append("Callable")
 
@@ -281,10 +300,7 @@ def build_template_from_method(
 
 
 def get_base_classes(cls):
-    """Get the base classes of a class.
-
-    These are used to determine the output of the nodes.
-    """
+    """获取类的基类名称集合（用于节点输出类型推断）。"""
     if hasattr(cls, "__bases__") and cls.__bases__:
         bases = cls.__bases__
         result = []
@@ -293,8 +309,7 @@ def get_base_classes(cls):
                 continue
             result.append(base.__name__)
             base_classes = get_base_classes(base)
-            # check if the base_classes are in the result
-            # if not, add them
+            # 去重追加基类名称
             for base_class in base_classes:
                 if base_class not in result:
                     result.append(base_class)
@@ -306,6 +321,7 @@ def get_base_classes(cls):
 
 
 def get_default_factory(module: str, function: str):
+    """从 `default_factory` 字符串中解析并调用默认工厂函数。"""
     pattern = r"<function (\w+)>"
 
     if match := re.search(pattern, function):
@@ -322,15 +338,7 @@ def get_default_factory(module: str, function: str):
 
 
 def update_verbose(d: dict, *, new_value: bool) -> dict:
-    """Recursively updates the value of the 'verbose' key in a dictionary.
-
-    Args:
-        d: the dictionary to update
-        new_value: the new value to set
-
-    Returns:
-        The updated dictionary.
-    """
+    """递归更新字典中 `verbose` 字段的值（原地修改）。"""
     for k, v in d.items():
         if isinstance(v, dict):
             update_verbose(v, new_value=new_value)
@@ -340,7 +348,7 @@ def update_verbose(d: dict, *, new_value: bool) -> dict:
 
 
 def sync_to_async(func):
-    """Decorator to convert a sync function to an async function."""
+    """将同步函数包装为异步函数的装饰器。"""
 
     @wraps(func)
     async def async_wrapper(*args, **kwargs):
@@ -350,10 +358,14 @@ def sync_to_async(func):
 
 
 def format_dict(dictionary: dict[str, Any], class_name: str | None = None) -> dict[str, Any]:
-    """Formats a dictionary by removing certain keys and modifying the values of other keys.
+    """格式化字段描述字典，补齐类型/显示属性/默认值等信息。
 
-    Returns:
-        A new dictionary with the desired modifications applied.
+    关键路径：
+    1) 解析并规整类型（Optional/List/Mapping/Literal）
+    2) 设置 UI 展示/密码/多行标记
+    3) 写入特定字段的默认/选项值
+
+    副作用：原地修改 `dictionary` 并返回同一对象。
     """
     for key, value in dictionary.items():
         if key == "_type":
@@ -387,33 +399,24 @@ def format_dict(dictionary: dict[str, Any], class_name: str | None = None) -> di
     return dictionary
 
 
-# "Union[Literal['f-string'], Literal['jinja2']]" -> "str"
+# 示例："Union[Literal['f-string'], Literal['jinja2']]" -> "str"
 def get_type_from_union_literal(union_literal: str) -> str:
-    # if types are literal strings
-    # the type is a string
+    # 注意：Literal 字面量联合按字符串处理
     if "Literal" in union_literal:
         return "str"
     return union_literal
 
 
 def get_type(value: Any) -> str | type:
-    """Retrieves the type value from the dictionary.
-
-    Returns:
-        The type value.
-    """
-    # get "type" or "annotation" from the value
+    """从字段字典中提取 `type/annotation`。"""
+    # 优先取 `type`，否则取 `annotation`
     type_ = value.get("type") or value.get("annotation")
 
     return type_ if isinstance(type_, str) else type_.__name__
 
 
 def remove_optional_wrapper(type_: str | type) -> str:
-    """Removes the 'Optional' wrapper from the type string.
-
-    Returns:
-        The type string with the 'Optional' wrapper removed.
-    """
+    """移除类型字符串中的 `Optional[...]` 包装。"""
     if isinstance(type_, type):
         type_ = str(type_)
     if "Optional" in type_:
@@ -423,11 +426,7 @@ def remove_optional_wrapper(type_: str | type) -> str:
 
 
 def check_list_type(type_: str, value: dict[str, Any]) -> str:
-    """Checks if the type is a list type and modifies the value accordingly.
-
-    Returns:
-        The modified type string.
-    """
+    """检测是否为集合类型并设置 `list` 标记（原地修改）。"""
     if any(list_type in type_ for list_type in ["List", "Sequence", "Set"]):
         type_ = type_.replace("List[", "").replace("Sequence[", "").replace("Set[", "")[:-1]
         value["list"] = True
@@ -438,11 +437,7 @@ def check_list_type(type_: str, value: dict[str, Any]) -> str:
 
 
 def replace_mapping_with_dict(type_: str) -> str:
-    """Replaces 'Mapping' with 'dict' in the type string.
-
-    Returns:
-        The modified type string.
-    """
+    """将 `Mapping` 类型名替换为 `dict`。"""
     if "Mapping" in type_:
         type_ = type_.replace("Mapping", "dict")
 
@@ -450,11 +445,7 @@ def replace_mapping_with_dict(type_: str) -> str:
 
 
 def get_formatted_type(key: str, type_: str) -> str:
-    """Formats the type value based on the given key.
-
-    Returns:
-        The formatted type value.
-    """
+    """根据字段名修正展示类型。"""
     if key == "allowed_tools":
         return "Tool"
 
@@ -465,11 +456,7 @@ def get_formatted_type(key: str, type_: str) -> str:
 
 
 def should_show_field(value: dict[str, Any], key: str) -> bool:
-    """Determines if the field should be shown or not.
-
-    Returns:
-        True if the field should be shown, False otherwise.
-    """
+    """判断字段是否应在 UI 中展示。"""
     return (
         (value["required"] and key != "input_variables")
         or key in FORCE_SHOW_FIELDS
@@ -478,20 +465,12 @@ def should_show_field(value: dict[str, Any], key: str) -> bool:
 
 
 def is_password_field(key: str) -> bool:
-    """Determines if the field is a password field.
-
-    Returns:
-        True if the field is a password field, False otherwise.
-    """
+    """判断字段名是否为敏感输入（密码/令牌/密钥）。"""
     return any(text in key.lower() for text in ["password", "token", "api", "key"])
 
 
 def is_multiline_field(key: str) -> bool:
-    """Determines if the field is a multiline field.
-
-    Returns:
-        True if the field is a multiline field, False otherwise.
-    """
+    """判断字段是否应以多行输入展示。"""
     return key in {
         "suffix",
         "prefix",
@@ -504,25 +483,25 @@ def is_multiline_field(key: str) -> bool:
 
 
 def set_dict_file_attributes(value: dict[str, Any]) -> None:
-    """Sets the file attributes for the 'dict_' key."""
+    """为 `dict_` 字段设置文件上传属性。"""
     value["type"] = "file"
     value["fileTypes"] = [".json", ".yaml", ".yml"]
 
 
 def replace_default_value_with_actual(value: dict[str, Any]) -> None:
-    """Replaces the default value with the actual value."""
+    """将 `default` 替换为 `value`（原地修改）。"""
     if "default" in value:
         value["value"] = value["default"]
         value.pop("default")
 
 
 def set_headers_value(value: dict[str, Any]) -> None:
-    """Sets the value for the 'headers' key."""
+    """为 `headers` 字段设置示例默认值。"""
     value["value"] = """{"Authorization": "Bearer <token>"}"""
 
 
 def add_options_to_field(value: dict[str, Any], class_name: str | None, key: str) -> None:
-    """Adds options to the field based on the class name and key."""
+    """为模型类的 `model_name` 字段添加选项列表。"""
     options_map = {
         "OpenAI": constants.OPENAI_MODELS,
         "ChatOpenAI": constants.CHAT_OPENAI_MODELS,
@@ -538,15 +517,7 @@ def add_options_to_field(value: dict[str, Any], class_name: str | None, key: str
 
 
 def build_loader_repr_from_data(data: list[Data]) -> str:
-    """Builds a string representation of the loader based on the given data.
-
-    Args:
-        data (List[Data]): A list of data.
-
-    Returns:
-        str: A string representation of the loader.
-
-    """
+    """根据数据列表构建简要展示字符串。"""
     if data:
         avg_length = sum(len(doc.text) for doc in data) / len(data)
         return f"""{len(data)} data
@@ -569,8 +540,15 @@ async def update_settings(
     max_file_size_upload: int = 100,
     webhook_polling_interval: int = 5000,
 ) -> None:
-    """Update the settings from a config file."""
-    # Check for database_url in the environment variables
+    """异步更新运行时设置。
+
+    关键路径：
+    1) 获取 settings service
+    2) 按参数更新配置
+    3) 记录关键变更日志
+
+    失败语义：无法获取 settings service 时抛 `RuntimeError`。
+    """
 
     settings_service = get_settings_service()
     if not settings_service:
@@ -610,16 +588,17 @@ async def update_settings(
 
 
 def is_class_method(func, cls):
-    """Check if a function is a class method."""
+    """判断函数是否为类方法。"""
     return inspect.ismethod(func) and func.__self__ is cls.__class__
 
 
 def escape_json_dump(edge_dict):
+    """将 JSON 字符串中的双引号替换为 `œ` 用于前端占位。"""
     return json.dumps(edge_dict).replace('"', "œ")
 
 
 def find_closest_match(string: str, list_of_strings: list[str]) -> str | None:
-    """Find the closest match in a list of strings."""
+    """在列表中寻找最相近的字符串（基于 difflib）。"""
     closest_match = difflib.get_close_matches(string, list_of_strings, n=1, cutoff=0.2)
     if closest_match:
         return closest_match[0]

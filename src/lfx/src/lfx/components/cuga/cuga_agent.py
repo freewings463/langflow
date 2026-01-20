@@ -1,3 +1,20 @@
+"""
+模块名称：Cuga Agent 组件
+
+本模块提供 Cuga Agent 的组件封装，主要用于将 Cuga 任务执行流程
+接入 LFX 的工具调用与事件处理体系。
+主要功能包括：
+- 构建 Cuga Agent 并驱动任务执行（含事件流）
+- 统一模型、记忆与工具的装配
+- 动态更新构建配置与模型提供方字段
+
+关键组件：
+- `CugaComponent`：Cuga 任务执行组件
+
+设计背景：在 LFX 中复用 Cuga 的任务编排能力并保持一致的组件体验。
+注意事项：依赖外部 Cuga/Playwright 等可选依赖，缺失会导致运行时错误。
+"""
+
 import asyncio
 import json
 import traceback
@@ -34,13 +51,10 @@ if TYPE_CHECKING:
 
 
 def set_advanced_true(component_input):
-    """Set the advanced flag to True for a component input.
+    """将输入字段标记为高级选项。
 
-    Args:
-        component_input: The component input to modify
-
-    Returns:
-        The modified component input with advanced=True
+    契约：返回被修改后的输入对象。
+    副作用：就地修改 `component_input.advanced`。
     """
     component_input.advanced = True
     return component_input
@@ -50,18 +64,16 @@ MODEL_PROVIDERS_LIST = ["OpenAI"]
 
 
 class CugaComponent(ToolCallingAgentComponent):
-    """Cuga Agent Component for advanced AI task execution.
+    """Cuga Agent 组件封装。
 
-    The Cuga component is an advanced AI agent that can execute complex tasks using
-    various tools and browser automation. It supports custom instructions, web applications,
-    and API interactions.
-
-    Attributes:
-        display_name: Human-readable name for the component
-        description: Brief description of the component's purpose
-        documentation: URL to component documentation
-        icon: Icon identifier for the UI
-        name: Internal component name
+    契约：基于配置构建 LLM、记忆与工具并输出事件流响应。
+    副作用：可能触发外部浏览器/网络调用并写入消息流状态。
+    失败语义：初始化或执行失败会抛 `ValueError` 并在日志中记录。
+    决策：以 ToolCallingAgent 事件流对接 Cuga 执行结果
+    问题：需要与 LFX 统一的事件与消息处理机制对接
+    方案：在 `message_response` 中使用 `process_agent_events` 处理流式事件
+    代价：事件语义需与 LFX 事件处理器保持一致
+    重评：当 Cuga 事件协议变化时需要同步调整
     """
 
     display_name: str = "Cuga"
@@ -162,25 +174,15 @@ class CugaComponent(ToolCallingAgentComponent):
     async def call_agent(
         self, current_input: str, tools: list[Tool], history_messages: list[Message], llm
     ) -> AsyncIterator[dict[str, Any]]:
-        """Execute the Cuga agent with the given input and tools.
+        """执行 Cuga 任务并以事件流形式输出。
 
-        This method initializes and runs the Cuga agent, processing the input through
-        the agent's workflow and yielding events for real-time monitoring.
-
-        Args:
-            current_input: The user input to process
-            tools: List of available tools for the agent
-            history_messages: Previous conversation history
-            llm: The language model instance to use
-
-        Yields:
-            dict: Agent events including tool usage, thinking, and final results
-
-        Raises:
-            ValueError: If there's an error in agent initialization
-            TypeError: If there's a type error in processing
-            RuntimeError: If there's a runtime error during execution
-            ConnectionError: If there's a connection issue
+        关键路径（三步）：
+        1) 配置 Cuga settings 与构建运行环境
+        2) 将历史消息转换为 LangChain 消息并启动任务
+        3) 将 Cuga 事件映射为 LFX 事件并持续 yield
+        异常流：初始化/执行异常会 emit `on_chain_error` 事件。
+        性能瓶颈：外部模型调用与工具执行时延。
+        排障入口：关注 `[CUGA]` 日志与 event name。
         """
         yield {
             "event": "on_chain_start",
@@ -190,11 +192,10 @@ class CugaComponent(ToolCallingAgentComponent):
         }
         logger.debug(f"[CUGA] LLM MODEL TYPE: {type(llm)}")
         if current_input:
-            # Import settings first
+            # 注意：先加载 settings 以便动态更新配置
             from cuga.config import settings
 
-            # Use Dynaconf's set() method to update settings dynamically
-            # This properly updates the settings object without corruption
+            # 决策：使用 Dynaconf 的属性赋值以避免配置对象损坏
             logger.debug("[CUGA] Updating CUGA settings via Dynaconf set() method")
 
             settings.advanced_features.registry = False
@@ -221,7 +222,7 @@ class CugaComponent(ToolCallingAgentComponent):
             from cuga.backend.llm.models import LLMManager
             from cuga.configurations.instructions_manager import InstructionsManager
 
-            # Reset var_manager if this is the first message in history
+            # 注意：首条对话会重置内部状态
             logger.debug(f"[CUGA] Checking history_messages: count={len(history_messages) if history_messages else 0}")
             if not history_messages or len(history_messages) == 0:
                 logger.debug("[CUGA] First message in history detected, resetting var_manager")
@@ -254,7 +255,7 @@ class CugaComponent(ToolCallingAgentComponent):
             logger.debug(f"[CUGA] current web apps are {self.web_apps}")
             logger.debug(f"[CUGA] Processing input: {current_input}")
             try:
-                # Convert history to LangChain format for the event
+                # 实现：将历史消息转换为 LangChain 消息格式
                 logger.debug(f"[CUGA] Converting {len(history_messages)} history messages to LangChain format")
                 lc_messages = []
                 for i, msg in enumerate(history_messages):
@@ -271,14 +272,14 @@ class CugaComponent(ToolCallingAgentComponent):
                 logger.debug(f"[CUGA] Converted to {len(lc_messages)} LangChain messages")
                 await asyncio.sleep(0.5)
 
-                # 2. Build final response
+                # 实现：组装响应占位信息
                 response_parts = []
 
                 response_parts.append(f"Processed input: '{current_input}'")
                 response_parts.append(f"Available tools: {len(tools)}")
                 last_event: StreamEvent | None = None
                 tool_run_id: str | None = None
-                # 3. Chain end event with AgentFinish
+                # 实现：任务完成后触发链结束事件
                 async for event in cuga_agent.run_task_generic_yield(
                     eval_mode=False, goal=current_input, chat_messages=lc_messages
                 ):
@@ -286,7 +287,7 @@ class CugaComponent(ToolCallingAgentComponent):
                     if last_event is not None and tool_run_id is not None:
                         logger.debug(f"[CUGA] last event {last_event}")
                         try:
-                            # TODO: Extract data
+                            # 注意：TODO 统一事件数据结构
                             data_dict = json.loads(last_event.data)
                         except json.JSONDecodeError:
                             data_dict = last_event.data
@@ -328,7 +329,7 @@ class CugaComponent(ToolCallingAgentComponent):
                 error_msg = f"CUGA Agent error: {e!s}"
                 logger.error(f"[CUGA] Error occurred: {error_msg}")
 
-                # Emit error event
+                # 实现：发送错误事件
                 yield {
                     "event": "on_chain_error",
                     "run_id": str(uuid.uuid4()),
@@ -337,21 +338,19 @@ class CugaComponent(ToolCallingAgentComponent):
                 }
 
     async def message_response(self) -> Message:
-        """Generate a message response using the Cuga agent.
+        """通过 Cuga 执行任务并返回最终消息。
 
-        This method processes the input through the Cuga agent and returns a structured
-        message response. It handles agent initialization, tool setup, and event processing.
-
-        Returns:
-            Message: The agent's response message
-
-        Raises:
-            Exception: If there's an error during agent execution
+        关键路径（三步）：
+        1) 校验输入并准备 LLM/记忆/工具
+        2) 构建事件流并交给 `process_agent_events` 处理
+        3) 返回最终 `Message` 结果
+        异常流：执行异常会抛出并记录日志；缺少 Playwright 提示安装方式。
+        排障入口：关注 `[CUGA]` 日志与消息状态字段。
         """
         logger.debug("[CUGA] Starting Cuga agent run for message_response.")
         logger.debug(f"[CUGA] Agent input value: {self.input_value}")
 
-        # Validate input is not empty
+        # 注意：输入不能为空
         if not self.input_value or not str(self.input_value).strip():
             msg = "Message cannot be empty. Please provide a valid message."
             raise ValueError(msg)
@@ -362,7 +361,7 @@ class CugaComponent(ToolCallingAgentComponent):
 
             llm_model, self.chat_history, self.tools = await self.get_agent_requirements()
 
-            # Create agent message for event processing
+            # 实现：构建用于事件处理的消息载体
             agent_message = Message(
                 sender=MESSAGE_SENDER_AI,
                 sender_name="Cuga",
@@ -371,27 +370,23 @@ class CugaComponent(ToolCallingAgentComponent):
                 session_id=self.graph.session_id,
             )
 
-            # Pre-assign an ID for event processing, following the base agent pattern
-            # This ensures streaming works even when not connected to ChatOutput
+            # 实现：预分配 ID，确保未连接 ChatOutput 时也能流式更新
             if not self.is_connected_to_chat_output():
-                # When not connected to ChatOutput, assign ID upfront for streaming support
                 agent_message.data["id"] = uuid.uuid4()
 
-            # Get input text
+            # 实现：读取输入文本
             input_text = self.input_value.text if hasattr(self.input_value, "text") else str(self.input_value)
 
-            # Create event iterator from call_agent
+            # 实现：构建事件迭代器
             event_iterator = self.call_agent(
                 current_input=input_text, tools=self.tools or [], history_messages=self.chat_history, llm=llm_model
             )
 
-            # Process events using the existing event processing system
+            # 实现：使用统一事件处理器消费事件
             from lfx.base.agents.events import process_agent_events
 
-            # Create a wrapper that forces DB updates for event handlers
-            # This ensures the UI can see loading steps in real-time via polling
+            # 注意：强制写库以便轮询 UI 实时可见
             async def force_db_update_send_message(message, id_=None, *, skip_db_update=False):  # noqa: ARG001
-                # Always persist to DB so polling-based UI shows loading steps in real-time
                 content_blocks_len = len(message.content_blocks[0].contents) if message.content_blocks else 0
                 logger.debug(
                     f"[CUGA] Sending message update - state: {message.properties.state}, "
@@ -415,7 +410,7 @@ class CugaComponent(ToolCallingAgentComponent):
             logger.error(f"[CUGA] An error occurred: {e!s}")
             logger.error(f"[CUGA] Traceback: {traceback.format_exc()}")
 
-            # Check if error is related to Playwright installation
+            # 排障：针对 Playwright 未安装的错误提示
             error_str = str(e).lower()
             if "playwright install" in error_str:
                 msg = (
@@ -429,17 +424,13 @@ class CugaComponent(ToolCallingAgentComponent):
             return result
 
     async def get_agent_requirements(self):
-        """Get the agent requirements for the Cuga agent.
+        """获取 Cuga 运行所需的模型、记忆与工具。
 
-        This method retrieves and configures all necessary components for the agent
-        including the language model, chat history, and tools.
-
-        Returns:
-            tuple: A tuple containing (llm_model, chat_history, tools)
-
-        Raises:
-            ValueError: If no language model is selected or if there's an error
-                in model initialization
+        关键路径（三步）：
+        1) 构建/获取 LLM 并记录模型名
+        2) 拉取会话历史并规范化为列表
+        3) 按配置追加当前日期工具
+        异常流：未选模型或模型初始化失败会抛 `ValueError`。
         """
         llm_model, display_name = await self.get_llm()
         if llm_model is None:
@@ -447,12 +438,12 @@ class CugaComponent(ToolCallingAgentComponent):
             raise ValueError(msg)
         self.model_name = get_model_name(llm_model, display_name=display_name)
 
-        # Get memory data
+        # 实现：获取记忆数据
         self.chat_history = await self.get_memory_data()
         if isinstance(self.chat_history, Message):
             self.chat_history = [self.chat_history]
 
-        # Add current date tool if enabled
+        # 实现：按需追加当前日期工具
         if self.add_current_date_tool:
             if not isinstance(self.tools, list):
                 self.tools = []
@@ -462,24 +453,21 @@ class CugaComponent(ToolCallingAgentComponent):
                 raise TypeError(msg)
             self.tools.append(current_date_tool)
 
-        # --- ADDED LOGGING START ---
+        # 排障：调试日志开始
         logger.debug("[CUGA] Retrieved agent requirements: LLM, chat history, and tools.")
         logger.debug(f"[CUGA] LLM model: {self.model_name}")
         logger.debug(f"[CUGA] Number of chat history messages: {len(self.chat_history)}")
         logger.debug(f"[CUGA] Tools available: {[tool.name for tool in self.tools]}")
         logger.debug(f"[CUGA] metadata: {[tool.metadata for tool in self.tools]}")
-        # --- ADDED LOGGING END ---
+        # 排障：调试日志结束
 
         return llm_model, self.chat_history, self.tools
 
     async def get_memory_data(self):
-        """Retrieve chat history messages.
+        """读取历史消息并排除当前输入消息。
 
-        This method fetches the conversation history from memory, excluding the current
-        input message to avoid duplication.
-
-        Returns:
-            list: List of Message objects representing the chat history
+        契约：返回 `Message` 列表，不包含当前输入消息。
+        副作用：读取外部记忆存储。
         """
         logger.debug("[CUGA] Retrieving chat history messages.")
         logger.debug(f"[CUGA] Session ID: {self.graph.session_id}")
@@ -499,16 +487,13 @@ class CugaComponent(ToolCallingAgentComponent):
         ]
 
     async def get_llm(self):
-        """Get language model for the Cuga agent.
+        """根据当前配置获取 LLM 实例。
 
-        This method initializes and configures the language model based on the
-        selected provider and parameters.
-
-        Returns:
-            tuple: A tuple containing (llm_model, display_name)
-
-        Raises:
-            ValueError: If the model provider is invalid or model initialization fails
+        关键路径（三步）：
+        1) 解析提供方并读取其输入配置
+        2) 组装参数并构建模型实例
+        3) 返回模型与显示名
+        异常流：提供方无效或构建失败抛 `ValueError`。
         """
         logger.debug("[CUGA] Getting language model for the agent.")
         logger.debug(f"[CUGA] Requested LLM provider: {self.agent_llm}")
@@ -536,19 +521,7 @@ class CugaComponent(ToolCallingAgentComponent):
             raise ValueError(msg) from e
 
     def _build_llm_model(self, component, inputs, prefix=""):
-        """Build LLM model with parameters.
-
-        This method constructs a language model instance using the provided component
-        class and input parameters.
-
-        Args:
-            component: The LLM component class to instantiate
-            inputs: List of input field definitions
-            prefix: Optional prefix for parameter names
-
-        Returns:
-            The configured LLM model instance
-        """
+        """根据组件与输入字段构建 LLM 实例。"""
         model_kwargs = {}
         for input_ in inputs:
             if hasattr(self, f"{prefix}{input_.name}"):
@@ -556,17 +529,7 @@ class CugaComponent(ToolCallingAgentComponent):
         return component.set(**model_kwargs).build_model()
 
     def set_component_params(self, component):
-        """Set component parameters based on provider.
-
-        This method configures component parameters according to the selected
-        model provider's requirements.
-
-        Args:
-            component: The component to configure
-
-        Returns:
-            The configured component
-        """
+        """根据提供方配置组件参数并返回组件实例。"""
         provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
         if provider_info:
             inputs = provider_info.get("inputs")
@@ -579,29 +542,12 @@ class CugaComponent(ToolCallingAgentComponent):
         return component
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:
-        """Delete specified fields from build_config.
-
-        This method removes unwanted fields from the build configuration.
-
-        Args:
-            build_config: The build configuration dictionary
-            fields: Fields to remove (can be dict or list of strings)
-        """
+        """从 build_config 中删除指定字段。"""
         for field in fields:
             build_config.pop(field, None)
 
     def update_input_types(self, build_config: dotdict) -> dotdict:
-        """Update input types for all fields in build_config.
-
-        This method ensures all fields in the build configuration have proper
-        input types defined.
-
-        Args:
-            build_config: The build configuration to update
-
-        Returns:
-            dotdict: Updated build configuration with input types
-        """
+        """补齐 build_config 中缺失的 input_types。"""
         for key, value in build_config.items():
             if isinstance(value, dict):
                 if value.get("input_types") is None:
@@ -613,21 +559,13 @@ class CugaComponent(ToolCallingAgentComponent):
     async def update_build_config(
         self, build_config: dotdict, field_value: str, field_name: str | None = None
     ) -> dotdict:
-        """Update build configuration based on field changes.
+        """按字段变更动态更新构建配置。
 
-        This method dynamically updates the component's build configuration when
-        certain fields change, particularly the model provider selection.
-
-        Args:
-            build_config: The current build configuration
-            field_value: The new value for the field
-            field_name: The name of the field being changed
-
-        Returns:
-            dotdict: Updated build configuration
-
-        Raises:
-            ValueError: If required keys are missing from the configuration
+        关键路径（三步）：
+        1) 根据提供方切换增删字段
+        2) 处理动态更新字段的配置刷新
+        3) 校验必需字段并返回更新后的配置
+        异常流：缺少必需字段时抛 `ValueError`。
         """
         if field_name in ("agent_llm",):
             build_config["agent_llm"]["value"] = field_value
@@ -653,20 +591,20 @@ class CugaComponent(ToolCallingAgentComponent):
             if field_value in provider_configs:
                 fields_to_add, fields_to_delete = provider_configs[field_value]
 
-                # Delete fields from other providers
+                # 实现：删除其他提供方字段
                 for fields in fields_to_delete:
                     self.delete_fields(build_config, fields)
 
-                # Add provider-specific fields
+                # 实现：添加当前提供方字段
                 if field_value == "OpenAI" and not any(field in build_config for field in fields_to_add):
                     build_config.update(fields_to_add)
                 else:
                     build_config.update(fields_to_add)
                 build_config["agent_llm"]["input_types"] = []
             elif field_value == "Custom":
-                # Delete all provider fields
+                # 实现：删除所有提供方字段
                 self.delete_fields(build_config, ALL_PROVIDER_FIELDS)
-                # Update with custom component
+                # 实现：替换为自定义模型选择器
                 custom_component = DropdownInput(
                     name="agent_llm",
                     display_name="Language Model",
@@ -679,10 +617,10 @@ class CugaComponent(ToolCallingAgentComponent):
                 )
                 build_config.update({"agent_llm": custom_component.to_dict()})
 
-            # Update input types for all fields
+            # 实现：更新 input_types
             build_config = self.update_input_types(build_config)
 
-            # Validate required keys
+            # 注意：校验必需字段
             default_keys = [
                 "code",
                 "_type",
@@ -720,14 +658,7 @@ class CugaComponent(ToolCallingAgentComponent):
         return dotdict({k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in build_config.items()})
 
     async def _get_tools(self) -> list[Tool]:
-        """Build agent tools.
-
-        This method constructs the list of tools available to the Cuga agent,
-        including component tools and any additional configured tools.
-
-        Returns:
-            list[Tool]: List of available tools for the agent
-        """
+        """构建 Cuga 代理可用的工具列表。"""
         logger.debug("[CUGA] Building agent tools.")
         component_toolkit = _get_component_toolkit()
         tools_names = self._build_tools_names()

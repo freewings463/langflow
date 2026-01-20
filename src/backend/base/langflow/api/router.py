@@ -1,4 +1,19 @@
-# Router for base api
+"""
+模块名称：`API` 路由聚合
+
+本模块汇总 `v1`/`v2` 路由并挂载统一前缀，主要用于对外暴露稳定入口。主要功能包括：
+- 组装 `v1` 版本路由集合
+- 组装 `v2` 版本路由集合
+- 提供 `/api` 统一入口
+
+关键组件：
+- router_v1 / router_v2：版本路由聚合
+- router：统一入口路由
+
+设计背景：版本化 `API` 需要统一入口，便于路由管理与兼容演进。
+注意事项：新增版本需同步更新此聚合模块。
+"""
+
 from fastapi import APIRouter
 
 from langflow.api.v1 import (
@@ -29,13 +44,9 @@ from langflow.api.v2 import mcp_router as mcp_router_v2
 from langflow.api.v2 import registration_router as registration_router_v2
 from langflow.api.v2 import workflow_router as workflow_router_v2
 
-router_v1 = APIRouter(
-    prefix="/v1",
-)
+router_v1 = APIRouter(prefix="/v1")
 
-router_v2 = APIRouter(
-    prefix="/v2",
-)
+router_v2 = APIRouter(prefix="/v2")
 
 router_v1.include_router(chat_router)
 router_v1.include_router(endpoints_router)

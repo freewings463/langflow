@@ -1,3 +1,19 @@
+"""
+模块名称：JigsawStack 文件上传组件
+
+本模块将本地文件上传到 JigsawStack File Storage，并返回存储结果。
+主要功能包括：
+- 读取本地文件并按二进制上传
+- 支持自定义 `key`、覆盖策略与临时公开链接
+- 统一处理上传失败并返回错误信息
+
+关键组件：
+- JigsawStackFileUploadComponent：文件上传组件入口
+
+设计背景：为 Langflow 提供标准化的文件存储能力。
+注意事项：上传涉及外部网络调用，失败时返回 `success=False`。
+"""
+
 from pathlib import Path
 
 from lfx.custom.custom_component.component import Component
@@ -6,6 +22,13 @@ from lfx.schema.data import Data
 
 
 class JigsawStackFileUploadComponent(Component):
+    """JigsawStack 文件上传组件封装。
+
+    契约：输入为本地 `file` 路径及可选 `key`/覆盖策略；输出 `Data`。
+    副作用：读取本地文件并发起网络上传。
+    失败语义：SDK 缺失抛 `ImportError`；SDK 异常返回失败 `Data`。
+    """
+
     display_name = "File Upload"
     description = "Store any file seamlessly on JigsawStack File Storage and use it in your AI applications. \
         Supports various file types including images, documents, and more."
@@ -59,6 +82,18 @@ class JigsawStackFileUploadComponent(Component):
     ]
 
     def upload_file(self) -> Data:
+        """上传文件到 JigsawStack File Storage。
+
+        契约：输入为本地 `file` 与可选 `key` 参数；输出为 `Data`。
+        副作用：读取本地文件并发起网络上传。
+        失败语义：SDK 异常返回失败 `Data`；SDK 缺失抛 `ImportError`。
+
+        关键路径（三步）：
+        1) 读取本地文件内容；
+        2) 组装上传参数（`key`/`overwrite`/`temp_public_url`）；
+        3) 调用 `client.store.upload` 并返回结果。
+
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -76,13 +111,10 @@ class JigsawStackFileUploadComponent(Component):
             params = {}
 
             if self.key:
-                # if key is provided, use it as the file store key
                 params["key"] = self.key
             if self.overwrite is not None:
-                # if overwrite is provided, use it to determine if the file should be overwritten
                 params["overwrite"] = self.overwrite
             if self.temp_public_url is not None:
-                # if temp_public_url is provided, use it to determine if a temporary public URL should
                 params["temp_public_url"] = self.temp_public_url
 
             response = client.store.upload(file_content, params)

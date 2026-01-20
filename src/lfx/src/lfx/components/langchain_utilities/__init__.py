@@ -1,3 +1,16 @@
+"""模块名称：LangChain 工具组件导出层
+
+本模块负责按需导入 `langchain_utilities` 目录下的组件，降低启动成本并避免循环依赖。
+主要功能包括：维护动态导入表、实现 `__getattr__` 懒加载、暴露 `__all__`。
+
+关键组件：
+- `_dynamic_imports`：属性名到模块名的映射
+- `__getattr__`：按需导入实现
+
+设计背景：组件数量多且依赖重，需要延迟加载。
+注意事项：访问未知属性会抛 `AttributeError`。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -92,7 +105,17 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import langchain utility components on attribute access."""
+    """按需导入组件并缓存到模块命名空间。
+
+    契约：输入属性名；输出组件对象；副作用：写入 `globals()`；
+    失败语义：不存在映射或导入失败时抛 `AttributeError`。
+    关键路径：1) 校验映射 2) 动态导入 3) 写入缓存并返回。
+    决策：使用 `import_mod` 而非直接 `importlib`
+    问题：需要统一异常信息与模块路径解析
+    方案：复用 `import_mod` 适配层
+    代价：增加一层封装依赖
+    重评：当导入路径稳定且无特殊处理时可直接使用标准库
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
@@ -106,4 +129,14 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """暴露模块可用的属性列表。
+
+    契约：输入无；输出 `__all__` 的列表副本；副作用无；失败语义：无。
+    关键路径：1) 返回 `__all__`。
+    决策：以 `__all__` 作为唯一来源
+    问题：保持导出项与文档一致
+    方案：集中维护 `__all__`
+    代价：新增组件需同步更新列表
+    重评：当引入自动注册机制时由注册表生成
+    """
     return list(__all__)

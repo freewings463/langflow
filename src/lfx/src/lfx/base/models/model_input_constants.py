@@ -1,3 +1,20 @@
+"""
+模块名称：模型输入配置与提供方映射
+
+本模块负责构建模型提供方的输入字段与 UI 配置，主要用于动态生成可用模型的表单配置。
+主要功能包括：
+- 过滤组件输入以生成提供方专属字段
+- 按输入类型与名称调整 UI 行为
+- 在模块加载时尝试注册可用的模型提供方
+
+关键组件：
+- `MODEL_PROVIDERS_DICT` / `ACTIVE_MODEL_PROVIDERS_DICT`
+- `get_filtered_inputs` / `process_inputs`
+
+设计背景：不同模型提供方的输入字段差异大，需要统一的构建与过滤入口。
+注意事项：模块导入阶段会尝试导入可选依赖，失败会被忽略。
+"""
+
 from typing_extensions import TypedDict
 
 from lfx.base.models.model import LCModelComponent
@@ -6,6 +23,8 @@ from lfx.template.field.base import Input
 
 
 class ModelProvidersDict(TypedDict):
+    """模型提供方配置字典结构。"""
+
     fields: dict
     inputs: list[InputTypes]
     prefix: str
@@ -15,6 +34,12 @@ class ModelProvidersDict(TypedDict):
 
 
 def get_filtered_inputs(component_class, provider_name: str | None = None):
+    """获取并过滤掉通用输入后的组件输入列表。
+
+    契约：返回仅包含提供方专属字段的输入配置列表。
+    副作用：实例化一次组件以读取其 `inputs`。
+    失败语义：组件初始化异常由调用方处理。
+    """
     base_input_names = {field.name for field in LCModelComponent.get_base_inputs()}
     component_instance = component_class()
 
@@ -26,17 +51,21 @@ def get_filtered_inputs(component_class, provider_name: str | None = None):
 
 
 def process_inputs(component_data: Input, provider_name: str | None = None):
-    """Processes and modifies an input configuration based on its type or name.
+    """按输入类型/名称调整 UI 行为与默认值。
 
-    Adjusts properties such as value, advanced status, real-time refresh, and additional information for specific
-    input types or names to ensure correct behavior in the UI and provider integration.
-
-    Args:
-        component_data: The input configuration to process.
-        provider_name: The name of the provider to process the inputs for.
-
-    Returns:
-        The modified input configuration.
+    契约：返回修改后的输入配置对象。
+    关键路径（三步）：
+    1) 处理敏感输入（如 API Key）并关闭默认值回填
+    2) 调整特定字段为高级/实时刷新/下拉框
+    3) 对模型名字段追加引导说明
+    异常流：类型不匹配不抛错，按默认路径返回。
+    性能瓶颈：无，纯内存操作。
+    排障入口：检查字段 `advanced/real_time_refresh/combobox` 是否按预期设置。
+    决策：敏感字段默认不从数据库加载
+    问题：自动回填 API key 会带来泄露风险
+    方案：清空 `SecretStrInput.value` 并关闭 `load_from_db`
+    代价：用户需重新输入密钥
+    重评：当提供安全的凭据托管与脱敏展示时可恢复回填
     """
     if isinstance(component_data, SecretStrInput):
         component_data.value = ""
@@ -63,30 +92,36 @@ def process_inputs(component_data: Input, provider_name: str | None = None):
 
 
 def set_advanced_true(component_input):
+    """将输入标记为高级选项。"""
     component_input.advanced = True
     return component_input
 
 
 def set_real_time_refresh_false(component_input):
+    """关闭输入的实时刷新行为。"""
     component_input.real_time_refresh = False
     return component_input
 
 
 def add_info(component_input, info_str: str):
+    """为输入追加 UI 提示信息。"""
     component_input.info = info_str
     return component_input
 
 
 def add_combobox_true(component_input):
+    """将输入标记为可选下拉框。"""
     component_input.combobox = True
     return component_input
 
 
 def create_input_fields_dict(inputs: list[Input], prefix: str) -> dict[str, Input]:
+    """将输入列表转换为带前缀的字段字典。"""
     return {f"{prefix}{input_.name}": input_.to_dict() for input_ in inputs}
 
 
 def _get_ollama_inputs_and_fields():
+    """获取 Ollama 组件输入与字段字典。"""
     try:
         from lfx.components.ollama.ollama import ChatOllamaComponent
 
@@ -98,6 +133,7 @@ def _get_ollama_inputs_and_fields():
 
 
 def _get_watsonx_inputs_and_fields():
+    """获取 IBM WatsonX 组件输入与字段字典。"""
     try:
         from lfx.components.ibm.watsonx import WatsonxAIComponent
 
@@ -109,6 +145,7 @@ def _get_watsonx_inputs_and_fields():
 
 
 def _get_google_generative_ai_inputs_and_fields():
+    """获取 Google Generative AI 组件输入与字段字典。"""
     try:
         from lfx.components.google.google_generative_ai import GoogleGenerativeAIComponent
 
@@ -123,6 +160,7 @@ def _get_google_generative_ai_inputs_and_fields():
 
 
 def _get_openai_inputs_and_fields():
+    """获取 OpenAI 组件输入与字段字典。"""
     try:
         from lfx.components.openai.openai_chat_model import OpenAIModelComponent
 
@@ -134,6 +172,7 @@ def _get_openai_inputs_and_fields():
 
 
 def _get_azure_inputs_and_fields():
+    """获取 Azure OpenAI 组件输入与字段字典。"""
     try:
         from lfx.components.azure.azure_openai import AzureChatOpenAIComponent
 
@@ -145,6 +184,7 @@ def _get_azure_inputs_and_fields():
 
 
 def _get_groq_inputs_and_fields():
+    """获取 Groq 组件输入与字段字典。"""
     try:
         from lfx.components.groq.groq import GroqModel
 
@@ -156,6 +196,7 @@ def _get_groq_inputs_and_fields():
 
 
 def _get_anthropic_inputs_and_fields():
+    """获取 Anthropic 组件输入与字段字典。"""
     try:
         from lfx.components.anthropic.anthropic import AnthropicModelComponent
 
@@ -167,6 +208,7 @@ def _get_anthropic_inputs_and_fields():
 
 
 def _get_nvidia_inputs_and_fields():
+    """获取 NVIDIA 组件输入与字段字典。"""
     try:
         from lfx.components.nvidia.nvidia import NVIDIAModelComponent
 
@@ -178,6 +220,7 @@ def _get_nvidia_inputs_and_fields():
 
 
 def _get_amazon_bedrock_inputs_and_fields():
+    """获取 Amazon Bedrock 组件输入与字段字典。"""
     try:
         from lfx.components.amazon.amazon_bedrock_model import AmazonBedrockComponent
 
@@ -189,6 +232,7 @@ def _get_amazon_bedrock_inputs_and_fields():
 
 
 def _get_sambanova_inputs_and_fields():
+    """获取 SambaNova 组件输入与字段字典。"""
     try:
         from lfx.components.sambanova.sambanova import SambaNovaComponent
 
@@ -201,7 +245,7 @@ def _get_sambanova_inputs_and_fields():
 
 MODEL_PROVIDERS_DICT: dict[str, ModelProvidersDict] = {}
 
-# Try to add each provider
+# 逐个尝试注册可用提供方（可选依赖缺失会被忽略）
 try:
     from lfx.components.openai.openai_chat_model import OpenAIModelComponent
 
@@ -352,7 +396,7 @@ try:
 except ImportError:
     pass
 
-# Expose only active providers ----------------------------------------------
+# 仅暴露激活的提供方 ----------------------------------------------
 ACTIVE_MODEL_PROVIDERS_DICT: dict[str, ModelProvidersDict] = {
     name: prov for name, prov in MODEL_PROVIDERS_DICT.items() if prov.get("is_active", True)
 }

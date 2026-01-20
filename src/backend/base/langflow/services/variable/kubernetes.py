@@ -1,3 +1,19 @@
+"""
+模块名称：Kubernetes 变量服务实现
+
+本模块实现基于 Kubernetes Secrets 的变量服务，提供变量的安全存储和管理。
+主要功能包括：
+- 通过 Kubernetes Secrets 存储和管理变量
+- 支持凭据类型和通用类型变量
+- 提供变量的加密和解密功能
+
+关键组件：
+- `KubernetesSecretService`
+
+设计背景：在 Kubernetes 环境中安全存储敏感变量，如 API 密钥等。
+注意事项：需要集群访问权限，依赖 Kubernetes API。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -24,12 +40,24 @@ if TYPE_CHECKING:
 
 class KubernetesSecretService(VariableService, Service):
     def __init__(self, settings_service: SettingsService):
+        """初始化 Kubernetes 变量服务。
+
+        契约：设置 Kubernetes Secret 管理器并存储配置服务。
+        副作用：创建 KubernetesSecretManager 实例。
+        失败语义：Kubernetes 配置无效时会抛出异常。
+        """
         self.settings_service = settings_service
         # TODO: settings_service to set kubernetes namespace
         self.kubernetes_secrets = KubernetesSecretManager()
 
     @override
     async def initialize_user_variables(self, user_id: UUID | str, session: AsyncSession) -> None:
+        """初始化用户变量。
+
+        契约：从环境变量中读取指定变量并存储到 Kubernetes Secret 中。
+        副作用：创建或更新用户的 Kubernetes Secret。
+        失败语义：创建 Secret 失败时记录异常但不中断执行。
+        """
         # Check for environment variables that should be stored in the database
         should_or_should_not = "Should" if self.settings_service.settings.store_environment_variables else "Should not"
         await logger.ainfo(f"{should_or_should_not} store environment variables in the kubernetes.")
@@ -64,6 +92,12 @@ class KubernetesSecretService(VariableService, Service):
         user_id: UUID | str,
         name: str,
     ) -> tuple[str, str]:
+        """解析变量名到 Secret 中的实际键名。
+
+        契约：根据变量名查找对应的 Secret 键值对。
+        副作用：无。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         variables = self.kubernetes_secrets.get_secret(name=secret_name)
         if not variables:
             msg = f"user_id {user_id} variable not found."
@@ -79,6 +113,12 @@ class KubernetesSecretService(VariableService, Service):
 
     @override
     async def get_variable(self, user_id: UUID | str, name: str, field: str, session: AsyncSession) -> str:
+        """获取变量值。
+
+        契约：根据用户ID和变量名获取变量值。
+        副作用：无。
+        失败语义：变量不存在或类型不匹配时抛出异常。
+        """
         secret_name = encode_user_id(user_id)
         key, value = await asyncio.to_thread(self.resolve_variable, secret_name, user_id, name)
         if key.startswith(CREDENTIAL_TYPE + "_") and field == "session_id":
@@ -95,6 +135,12 @@ class KubernetesSecretService(VariableService, Service):
         user_id: UUID | str,
         session: Session,
     ) -> list[str | None]:
+        """列出所有变量。
+
+        契约：返回指定用户的所有变量名列表。
+        副作用：无。
+        失败语义：获取 Secret 失败时返回空列表。
+        """
         variables = await asyncio.to_thread(self.kubernetes_secrets.get_secret, name=encode_user_id(user_id))
         if not variables:
             return []
@@ -113,6 +159,12 @@ class KubernetesSecretService(VariableService, Service):
         name: str,
         value: str,
     ):
+        """更新变量的内部实现。
+
+        契约：更新指定用户的变量值。
+        副作用：修改 Kubernetes Secret 中的值。
+        失败语义：变量不存在或更新失败时抛出异常。
+        """
         secret_name = encode_user_id(user_id)
         secret_key, _ = self.resolve_variable(secret_name, user_id, name)
         return self.kubernetes_secrets.update_secret(name=secret_name, data={secret_key: value})
@@ -125,19 +177,43 @@ class KubernetesSecretService(VariableService, Service):
         value: str,
         session: AsyncSession,
     ):
+        """更新变量。
+
+        契约：异步更新指定用户的变量值。
+        副作用：修改 Kubernetes Secret 中的值。
+        失败语义：变量不存在或更新失败时抛出异常。
+        """
         return await asyncio.to_thread(self._update_variable, user_id, name, value)
 
     def _delete_variable(self, user_id: UUID | str, name: str) -> None:
+        """删除变量的内部实现。
+
+        契约：从 Kubernetes Secret 中删除指定变量。
+        副作用：修改 Kubernetes Secret 中的键值对。
+        失败语义：变量不存在或删除失败时抛出异常。
+        """
         secret_name = encode_user_id(user_id)
         secret_key, _ = self.resolve_variable(secret_name, user_id, name)
         self.kubernetes_secrets.delete_secret_key(name=secret_name, key=secret_key)
 
     @override
     async def delete_variable(self, user_id: UUID | str, name: str, session: AsyncSession) -> None:
+        """删除变量。
+
+        契约：异步删除指定用户的变量。
+        副作用：从 Kubernetes Secret 中删除变量。
+        失败语义：变量不存在或删除失败时抛出异常。
+        """
         await asyncio.to_thread(self._delete_variable, user_id, name)
 
     @override
     async def delete_variable_by_id(self, user_id: UUID | str, variable_id: UUID | str, session: AsyncSession) -> None:
+        """通过ID删除变量。
+
+        契约：异步删除指定用户的变量（通过ID）。
+        副作用：从 Kubernetes Secret 中删除变量。
+        失败语义：变量不存在或删除失败时抛出异常。
+        """
         await self.delete_variable(user_id, str(variable_id), session)
 
     @override
@@ -151,6 +227,12 @@ class KubernetesSecretService(VariableService, Service):
         type_: str,
         session: AsyncSession,
     ) -> Variable:
+        """创建变量。
+
+        契约：异步创建指定用户的变量。
+        副作用：在 Kubernetes Secret 中创建新的键值对。
+        失败语义：创建失败时抛出异常。
+        """
         secret_name = encode_user_id(user_id)
         secret_key = name
         if type_ == CREDENTIAL_TYPE:
@@ -172,6 +254,12 @@ class KubernetesSecretService(VariableService, Service):
 
     @override
     async def get_all(self, user_id: UUID | str, session: AsyncSession) -> list[VariableRead]:
+        """获取所有变量。
+
+        契约：返回指定用户的所有变量。
+        副作用：无。
+        失败语义：获取 Secret 失败时返回空列表。
+        """
         secret_name = encode_user_id(user_id)
         variables = await asyncio.to_thread(self.kubernetes_secrets.get_secret, name=secret_name)
         if not variables:
@@ -204,9 +292,13 @@ class KubernetesSecretService(VariableService, Service):
 
     @override
     async def get_variable_by_id(self, user_id: UUID | str, variable_id: UUID | str, session: AsyncSession) -> Variable:
-        """Get a variable by ID.
+        """通过ID获取变量。
 
-        Note: Kubernetes secrets don't have IDs, so we use the variable_id as the name.
+        契约：根据变量ID获取变量对象。
+        副作用：无。
+        失败语义：变量不存在时抛出异常。
+        
+        注意：Kubernetes secrets 没有ID概念，所以使用 variable_id 作为名称。
         """
         secret_name = encode_user_id(user_id)
         key, value = await asyncio.to_thread(self.resolve_variable, secret_name, user_id, str(variable_id))
@@ -227,7 +319,12 @@ class KubernetesSecretService(VariableService, Service):
 
     @override
     async def get_variable_object(self, user_id: UUID | str, name: str, session: AsyncSession) -> Variable:
-        """Get a variable object by name."""
+        """通过名称获取变量对象。
+
+        契约：根据变量名获取变量对象。
+        副作用：无。
+        失败语义：变量不存在时抛出异常。
+        """
         secret_name = encode_user_id(user_id)
         key, value = await asyncio.to_thread(self.resolve_variable, secret_name, user_id, name)
 
@@ -249,9 +346,13 @@ class KubernetesSecretService(VariableService, Service):
     async def update_variable_fields(
         self, user_id: UUID | str, variable_id: UUID | str, variable: VariableUpdate, session: AsyncSession
     ) -> Variable:
-        """Update specific fields of a variable.
+        """更新变量的特定字段。
 
-        Note: Kubernetes secrets don't have IDs, so we use the variable name for updates.
+        契约：更新指定变量的特定字段。
+        副作用：修改 Kubernetes Secret 中的值。
+        失败语义：变量不存在或更新失败时抛出异常。
+        
+        注意：Kubernetes secrets 没有ID概念，所以使用变量名称进行更新。
         """
         if variable.name:
             name = variable.name

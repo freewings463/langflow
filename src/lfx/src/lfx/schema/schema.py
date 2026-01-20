@@ -1,3 +1,5 @@
+"""通用 schema 与输出日志构建工具。"""
+
 from collections.abc import Generator
 from enum import Enum
 from typing import TYPE_CHECKING, Literal
@@ -40,7 +42,8 @@ class OutputValue(BaseModel):
 
 
 def get_type(payload):
-    # Importing here to avoid circular imports
+    """识别 payload 对应的日志类型。"""
+    # 注意：避免循环导入
     from lfx.schema.data import Data
     from lfx.schema.dataframe import DataFrame
     from lfx.schema.message import Message
@@ -72,7 +75,8 @@ def get_type(payload):
 
 
 def get_message(payload):
-    # Importing here to avoid circular imports
+    """提取可记录的消息内容。"""
+    # 注意：避免循环导入
     from lfx.schema.data import Data
 
     message = None
@@ -92,8 +96,14 @@ def get_message(payload):
 
 
 def build_output_logs(vertex, result) -> dict:
-    """Build output logs from vertex outputs and results."""
-    # Importing here to avoid circular imports
+    """基于节点输出构建日志结果。
+
+    关键路径（三步）：
+    1) 读取组件输出与原始结果；
+    2) 识别类型并规范化消息；
+    3) 组装输出结构并返回。
+    """
+    # 注意：避免循环导入
     from lfx.schema.dataframe import DataFrame
     from lfx.serialization.serialization import serialize
 
@@ -133,7 +143,7 @@ def build_output_logs(vertex, result) -> dict:
 
 
 class BuildStatus(BaseModel):
-    """Build status schema for API compatibility."""
+    """构建状态响应。"""
 
     status: str
     message: str | None = None
@@ -155,7 +165,7 @@ class InputValueRequest(BaseModel):
         "Used to calculate accurate end-to-end duration.",
     )
 
-    # add an example
+    # 示例配置
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [

@@ -1,3 +1,19 @@
+"""
+模块名称：`API` 请求组件
+
+本模块提供基于 `URL` 或 `cURL` 的 `HTTP` 请求能力，支持参数解析、`SSRF` 防护与结果保存。
+主要功能包括：
+- 解析 `cURL` 并填充请求字段
+- 处理请求头/参数/请求体
+- 发送请求并返回结构化 `Data`
+
+关键组件：
+- `APIRequestComponent`
+
+设计背景：提供通用的 `HTTP` 请求入口以接入外部数据源。
+注意事项：重定向可能引入 `SSRF` 风险；`save_to_file` 会写入临时目录。
+"""
+
 import json
 import re
 import tempfile
@@ -29,7 +45,7 @@ from lfx.schema.dotdict import dotdict
 from lfx.utils.component_utils import set_current_fields, set_field_advanced, set_field_display
 from lfx.utils.ssrf_protection import SSRFProtectionError, validate_url_for_ssrf
 
-# Define fields for each mode
+# 模式对应字段
 MODE_FIELDS = {
     "URL": [
         "url_input",
@@ -38,11 +54,19 @@ MODE_FIELDS = {
     "cURL": ["curl_input"],
 }
 
-# Fields that should always be visible
+# 始终可见的字段
 DEFAULT_FIELDS = ["mode"]
 
 
 class APIRequestComponent(Component):
+    """`API` 请求组件
+
+    契约：
+    - 输入：`URL`/`cURL`、请求方法、参数、请求头、请求体等
+    - 输出：`Data`（包含响应与元信息）
+    - 副作用：发起外部请求并更新 `self.status`
+    - 失败语义：请求或解析失败时抛 `ValueError`
+    """
     display_name = "API Request"
     description = "Make HTTP requests using URL or cURL commands."
     documentation: str = "https://docs.langflow.org/api-request"
@@ -179,7 +203,14 @@ class APIRequestComponent(Component):
     ]
 
     def _parse_json_value(self, value: Any) -> Any:
-        """Parse a value that might be a JSON string."""
+        """解析可能为 `JSON` 的字符串
+
+        契约：
+        - 输入：任意值
+        - 输出：解析后的对象或原值
+        - 副作用：无
+        - 失败语义：解析失败时返回原值
+        """
         if not isinstance(value, str):
             return value
 
@@ -191,7 +222,14 @@ class APIRequestComponent(Component):
             return parsed
 
     def _process_body(self, body: Any) -> dict:
-        """Process the body input into a valid dictionary."""
+        """处理请求体并返回字典
+
+        契约：
+        - 输入：请求体（字典/字符串/列表）
+        - 输出：字典
+        - 副作用：无
+        - 失败语义：无法处理时返回空字典
+        """
         if body is None:
             return {}
         if hasattr(body, "data"):
@@ -205,26 +243,47 @@ class APIRequestComponent(Component):
         return {}
 
     def _process_dict_body(self, body: dict) -> dict:
-        """Process dictionary body by parsing JSON values."""
+        """解析字典请求体并转换内部 `JSON` 值
+
+        契约：
+        - 输入：字典
+        - 输出：处理后的字典
+        - 副作用：无
+        - 失败语义：无
+        """
         return {k: self._parse_json_value(v) for k, v in body.items()}
 
     def _process_string_body(self, body: str) -> dict:
-        """Process string body by attempting JSON parse."""
+        """解析字符串请求体
+
+        契约：
+        - 输入：字符串
+        - 输出：字典（解析成功）或包含原始字符串的数据
+        - 副作用：无
+        - 失败语义：解析失败时返回 `{"data": body}`
+        """
         try:
             return self._process_body(json.loads(body))
         except json.JSONDecodeError:
             return {"data": body}
 
     def _process_list_body(self, body: list) -> dict:
-        """Process list body by converting to key-value dictionary."""
+        """将列表请求体转换为键值字典
+
+        契约：
+        - 输入：列表
+        - 输出：字典
+        - 副作用：无
+        - 失败语义：解析失败时返回空字典
+        """
         processed_dict = {}
         try:
             for item in body:
-                # Unwrap Data objects
+                # 注意：解包 `Data` 对象
                 current_item = item
                 if hasattr(item, "data"):
                     unwrapped_data = item.data
-                    # If the unwrapped data is a dict but not key-value format, use it directly
+                    # 注意：解包后为字典且非键值格式时直接使用
                     if isinstance(unwrapped_data, dict) and not self._is_valid_key_value_item(unwrapped_data):
                         return unwrapped_data
                     current_item = unwrapped_data
@@ -239,27 +298,50 @@ class APIRequestComponent(Component):
         return processed_dict
 
     def _is_valid_key_value_item(self, item: Any) -> bool:
-        """Check if an item is a valid key-value dictionary."""
+        """判断条目是否为合法键值结构
+
+        契约：
+        - 输入：任意对象
+        - 输出：`bool`
+        - 副作用：无
+        - 失败语义：无
+        """
         return isinstance(item, dict) and "key" in item and "value" in item
 
     def parse_curl(self, curl: str, build_config: dotdict) -> dotdict:
-        """Parse a cURL command and update build configuration."""
+        """解析 `cURL` 并更新构建配置
+
+        关键路径（三步）：
+        1) 解析 `cURL` 上下文
+        2) 填充请求方法/URL/头与请求体
+        3) 返回更新后的配置
+
+        异常流：解析失败抛 `ValueError`。
+        性能瓶颈：无显著性能瓶颈。
+        排障入口：日志与异常信息。
+        
+        契约：
+        - 输入：`cURL` 字符串与配置对象
+        - 输出：更新后的配置对象
+        - 副作用：无
+        - 失败语义：解析失败时抛 `ValueError`
+        """
         try:
             parsed = parse_context(curl)
 
-            # Update basic configuration
+            # 更新基础配置
             url = parsed.url
-            # Normalize URL before setting it
+            # 注意：写入前先规范化 `URL`
             url = self._normalize_url(url)
 
             build_config["url_input"]["value"] = url
             build_config["method"]["value"] = parsed.method.upper()
 
-            # Process headers
+            # 处理请求头
             headers_list = [{"key": k, "value": v} for k, v in parsed.headers.items()]
             build_config["headers"]["value"] = headers_list
 
-            # Process body data
+            # 处理请求体
             if not parsed.data:
                 build_config["body"]["value"] = []
             elif parsed.data:
@@ -284,7 +366,14 @@ class APIRequestComponent(Component):
         return build_config
 
     def _normalize_url(self, url: str) -> str:
-        """Normalize URL by adding https:// if no protocol is specified."""
+        """规范化 `URL`，缺省协议时添加 `https://`
+
+        契约：
+        - 输入：`URL` 字符串
+        - 输出：规范化后的 `URL`
+        - 副作用：无
+        - 失败语义：空 `URL` 时抛 `ValueError`
+        """
         if not url or not isinstance(url, str):
             msg = "URL cannot be empty"
             raise ValueError(msg)
@@ -307,6 +396,23 @@ class APIRequestComponent(Component):
         save_to_file: bool = False,
         include_httpx_metadata: bool = False,
     ) -> Data:
+        """执行 `HTTP` 请求并返回结构化结果
+
+        关键路径（三步）：
+        1) 校验方法与处理请求体
+        2) 发送请求并收集重定向历史
+        3) 解析响应并生成 `Data`
+
+        异常流：`httpx` 异常时返回包含错误的 `Data`。
+        性能瓶颈：网络请求与响应解析。
+        排障入口：返回数据中的 `error` 字段。
+        
+        契约：
+        - 输入：请求参数与 `httpx` 客户端
+        - 输出：`Data`
+        - 副作用：可能写入临时文件
+        - 失败语义：请求异常时返回错误 `Data`
+        """
         method = method.upper()
         if method not in {"GET", "POST", "PATCH", "PUT", "DELETE"}:
             msg = f"Unsupported method: {method}"
@@ -316,7 +422,7 @@ class APIRequestComponent(Component):
         redirection_history = []
 
         try:
-            # Prepare request parameters
+            # 组装请求参数
             request_params = {
                 "method": method,
                 "url": url,
@@ -338,7 +444,7 @@ class APIRequestComponent(Component):
             is_binary, file_path = await self._response_info(response, with_file_path=save_to_file)
             response_headers = self._headers_to_dict(response.headers)
 
-            # Base metadata
+            # 基础元信息
             metadata = {
                 "source": url,
                 "status_code": response.status_code,
@@ -367,7 +473,7 @@ class APIRequestComponent(Component):
                     metadata.update({"headers": headers})
                 return Data(data=metadata)
 
-            # Handle response content
+            # 处理响应内容
             if is_binary:
                 result = response.content
             else:
@@ -396,7 +502,14 @@ class APIRequestComponent(Component):
             )
 
     def add_query_params(self, url: str, params: dict) -> str:
-        """Add query parameters to URL efficiently."""
+        """追加查询参数到 `URL`
+
+        契约：
+        - 输入：`URL` 与参数字典
+        - 输出：新 `URL`
+        - 副作用：无
+        - 失败语义：无
+        """
         if not params:
             return url
         url_parts = list(urlparse(url))
@@ -406,11 +519,25 @@ class APIRequestComponent(Component):
         return urlunparse(url_parts)
 
     def _headers_to_dict(self, headers: httpx.Headers) -> dict[str, str]:
-        """Convert HTTP headers to a dictionary with lowercased keys."""
+        """将 `HTTP` 请求头转换为字典并统一小写键
+
+        契约：
+        - 输入：`httpx.Headers`
+        - 输出：字典
+        - 副作用：无
+        - 失败语义：无
+        """
         return {k.lower(): v for k, v in headers.items()}
 
     def _process_headers(self, headers: Any) -> dict:
-        """Process the headers input into a valid dictionary."""
+        """处理请求头输入并返回字典
+
+        契约：
+        - 输入：请求头（字典或列表）
+        - 输出：字典
+        - 副作用：无
+        - 失败语义：无法处理时返回空字典
+        """
         if headers is None:
             return {}
         if isinstance(headers, dict):
@@ -420,7 +547,23 @@ class APIRequestComponent(Component):
         return {}
 
     async def make_api_request(self) -> Data:
-        """Make HTTP request with optimized parameter handling."""
+        """执行 `HTTP` 请求并返回 `Data`
+
+        关键路径（三步）：
+        1) 规范化 `URL` 并进行 `SSRF` 校验
+        2) 处理查询参数/请求头/请求体
+        3) 调用 `make_request` 并返回结果
+
+        异常流：`URL` 无效或 `SSRF` 校验失败时抛 `ValueError`。
+        性能瓶颈：网络请求。
+        排障入口：日志与异常信息。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`Data`
+        - 副作用：更新 `self.status`
+        - 失败语义：校验或请求失败时抛 `ValueError`
+        """
         method = self.method
         url = self.url_input.strip() if isinstance(self.url_input, str) else ""
         headers = self.headers or {}
@@ -430,7 +573,7 @@ class APIRequestComponent(Component):
         save_to_file = self.save_to_file
         include_httpx_metadata = self.include_httpx_metadata
 
-        # Security warning when redirects are enabled
+        # 注意：重定向开启时输出安全提示
         if follow_redirects:
             self.log(
                 "Security Warning: HTTP redirects are enabled. This may allow SSRF bypass attacks "
@@ -438,35 +581,32 @@ class APIRequestComponent(Component):
                 "Only enable this if you trust the target server."
             )
 
-        # if self.mode == "cURL" and self.curl_input:
-        #     self._build_config = self.parse_curl(self.curl_input, dotdict())
-        #     # After parsing curl, get the normalized URL
-        #     url = self._build_config["url_input"]["value"]
+        # 注意：如需基于 `cURL` 自动回填字段，可在此处启用解析逻辑
 
-        # Normalize URL before validation
+        # 注意：校验前先规范化 `URL`
         url = self._normalize_url(url)
 
-        # Validate URL
+        # 校验 `URL` 结构
         if not validators.url(url):
             msg = f"Invalid URL provided: {url}"
             raise ValueError(msg)
 
-        # SSRF Protection: Validate URL to prevent access to internal resources
-        # TODO: In next major version (2.0), remove warn_only=True to enforce blocking
+        # `SSRF` 防护：验证 `URL` 是否指向内部资源
+        # 注意：`TODO` 下一主版本移除 `warn_only=True` 以强制拦截
         try:
             validate_url_for_ssrf(url, warn_only=True)
         except SSRFProtectionError as e:
-            # This will only raise if SSRF protection is enabled and warn_only=False
+            # 注意：仅在 `warn_only=False` 时抛出
             msg = f"SSRF Protection: {e}"
             raise ValueError(msg) from e
 
-        # Process query parameters
+        # 处理查询参数
         if isinstance(self.query_params, str):
             query_params = dict(parse_qsl(self.query_params))
         else:
             query_params = self.query_params.data if self.query_params else {}
 
-        # Process headers and body
+        # 处理请求头与请求体
         headers = self._process_headers(headers)
         body = self._process_body(body)
         url = self.add_query_params(url, query_params)
@@ -487,7 +627,14 @@ class APIRequestComponent(Component):
         return result
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None) -> dotdict:
-        """Update the build config based on the selected mode."""
+        """根据模式更新构建配置
+
+        契约：
+        - 输入：构建配置、字段值与字段名
+        - 输出：更新后的配置
+        - 副作用：可能解析 `cURL` 并修改字段
+        - 失败语义：解析失败时记录日志但不抛异常
+        """
         if field_name != "mode":
             if field_name == "curl_input" and self.mode == "cURL" and self.curl_input:
                 return self.parse_curl(self.curl_input, build_config)
@@ -515,15 +662,13 @@ class APIRequestComponent(Component):
     async def _response_info(
         self, response: httpx.Response, *, with_file_path: bool = False
     ) -> tuple[bool, Path | None]:
-        """Determine the file path and whether the response content is binary.
+        """判断响应是否为二进制并生成保存路径
 
-        Args:
-            response (Response): The HTTP response object.
-            with_file_path (bool): Whether to save the response content to a file.
-
-        Returns:
-            Tuple[bool, Path | None]:
-                A tuple containing a boolean indicating if the content is binary and the full file path (if applicable).
+        契约：
+        - 输入：`httpx.Response` 与是否生成文件路径
+        - 输出：`(is_binary, file_path)`
+        - 副作用：可能创建临时目录
+        - 失败语义：无
         """
         content_type = response.headers.get("Content-Type", "")
         is_binary = "application/octet-stream" in content_type or "application/binary" in content_type
@@ -533,7 +678,7 @@ class APIRequestComponent(Component):
 
         component_temp_dir = Path(tempfile.gettempdir()) / self.__class__.__name__
 
-        # Create directory asynchronously
+        # 异步创建目录
         await aiofiles_os.makedirs(component_temp_dir, exist_ok=True)
 
         filename = None
@@ -544,15 +689,15 @@ class APIRequestComponent(Component):
                 extracted_filename = filename_match.group(1)
                 filename = extracted_filename
 
-        # Step 3: Infer file extension or use part of the request URL if no filename
+        # 推断文件名与扩展名
         if not filename:
-            # Extract the last segment of the URL path
+            # 提取 `URL` 路径最后一段
             url_path = urlparse(str(response.request.url) if response.request else "").path
             base_name = Path(url_path).name  # Get the last segment of the path
-            if not base_name:  # If the path ends with a slash or is empty
+            if not base_name:  # 路径为空或以 `/` 结尾
                 base_name = "response"
 
-            # Infer file extension
+            # 推断扩展名
             content_type_to_extension = {
                 "text/plain": ".txt",
                 "application/json": ".json",
@@ -563,16 +708,16 @@ class APIRequestComponent(Component):
             extension = content_type_to_extension.get(content_type, ".bin" if is_binary else ".txt")
             filename = f"{base_name}{extension}"
 
-        # Step 4: Define the full file path
+        # 生成完整文件路径
         file_path = component_temp_dir / filename
 
-        # Step 5: Check if file exists asynchronously and handle accordingly
+        # 异步检查文件是否存在并处理冲突
         try:
-            # Try to create the file exclusively (x mode) to check existence
+            # 使用 `x` 模式创建以检测冲突
             async with aiofiles.open(file_path, "x") as _:
-                pass  # File created successfully, we can use this path
+                pass  # 文件创建成功，可直接使用
         except FileExistsError:
-            # If file exists, append a timestamp to the filename
+            # 文件存在则追加时间戳
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
             file_path = component_temp_dir / f"{timestamp}-{filename}"
 

@@ -1,18 +1,18 @@
-"""FastAPI application factory for serving **multiple** LFX graphs at once.
+"""
+模块名称：多 `flow` 服务 API 工厂
 
-This module is used by the CLI *serve* command when the provided path is a
-folder containing multiple ``*.json`` flow files.  Each flow is exposed under
-its own router prefix::
+本模块提供多 `flow` 的 FastAPI 应用工厂，主要用于将文件夹内的多个 `*.json` flow 统一暴露为 API。主要功能包括：
+- 生成 `/flows/{flow_id}/run` 与 `/flows/{flow_id}/info` 等路由
+- 提供 `/flows` 全局列表与健康检查
+- 支持执行与流式输出的结果返回
 
-    /flows/{flow_id}/run  - POST - execute the flow
-    /flows/{flow_id}/info - GET  - metadata
+关键组件：
+- `create_multi_serve_app`：应用工厂入口
+- `verify_api_key`：请求鉴权
+- `consume_and_yield`：流式事件消费器
 
-A global ``/flows`` endpoint lists all available flows and returns a JSON array
-of metadata objects, allowing API consumers to discover IDs without guessing.
-
-Authentication behaves exactly like the single-flow serving: all execution
-endpoints require the ``x-api-key`` header (or query parameter) validated by
-:func:`lfx.cli.commands.verify_api_key`.
+设计背景：CLI 需要一次性托管多个 flow 并提供统一的发现与调用入口。
+注意事项：所有执行相关路由均要求 `x-api-key`（Header 或 Query），未配置将返回 401。
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from lfx.graph import Graph
 
-# Security - use the same pattern as Langflow main API
+# 注意：鉴权方式与 Langflow 主 API 保持一致
 API_KEY_NAME = "x-api-key"
 api_key_query = APIKeyQuery(name=API_KEY_NAME, scheme_name="API key query", auto_error=False)
 api_key_header = APIKeyHeader(name=API_KEY_NAME, scheme_name="API key header", auto_error=False)
@@ -46,7 +46,12 @@ def verify_api_key(
     query_param: Annotated[str | None, Security(api_key_query)],
     header_param: Annotated[str | None, Security(api_key_header)],
 ) -> str:
-    """Verify API key from query parameter or header."""
+    """校验 API Key。
+
+    契约：从 query/header 读取 `x-api-key` 并与环境变量匹配。
+    失败语义：缺失或不匹配时抛 `HTTPException(401)`；配置缺失抛 `HTTPException(500)`。
+    副作用：读取环境变量。
+    """
     provided_key = query_param or header_param
     if not provided_key:
         raise HTTPException(status_code=401, detail="API key required")
@@ -62,13 +67,16 @@ def verify_api_key(
 
 
 def _analyze_graph_structure(graph: Graph) -> dict[str, Any]:
-    """Analyze the graph structure to extract dynamic documentation information.
+    """分析图结构以生成动态文档信息。
 
-    Args:
-        graph: The LFX graph to analyze
+    契约：返回包含组件列表、输入/输出类型、节点/边数量的字典。
+    失败语义：结构解析异常时返回最小化的默认信息。
+    副作用：无。
 
-    Returns:
-        dict: Graph analysis including components, input/output types, and flow details
+    关键路径（三步）：
+    1) 遍历节点与边，收集组件与入/出度信息
+    2) 基于模板字段推断输入/输出类型
+    3) 将集合转为列表以便序列化
     """
     analysis: dict[str, Any] = {
         "components": [],
@@ -81,7 +89,6 @@ def _analyze_graph_structure(graph: Graph) -> dict[str, Any]:
     }
 
     try:
-        # Analyze nodes
         for node_id, node in graph.nodes.items():
             analysis["node_count"] += 1
             component_info = {
@@ -93,18 +100,14 @@ def _analyze_graph_structure(graph: Graph) -> dict[str, Any]:
             }
             analysis["components"].append(component_info)
 
-            # Identify entry points (nodes with no incoming edges)
             if not any(edge.source == node_id for edge in graph.edges):
                 analysis["entry_points"].append(component_info)
 
-            # Identify exit points (nodes with no outgoing edges)
             if not any(edge.target == node_id for edge in graph.edges):
                 analysis["exit_points"].append(component_info)
 
-        # Analyze edges
         analysis["edge_count"] = len(graph.edges)
 
-        # Try to determine input/output types from entry/exit points
         for entry in analysis["entry_points"]:
             template = entry.get("template", {})
             for field_config in template.values():
@@ -126,12 +129,12 @@ def _analyze_graph_structure(graph: Graph) -> dict[str, Any]:
                     analysis["output_types"].add("file")
 
     except (KeyError, AttributeError):
-        # If analysis fails, provide basic info
+        # 注意：分析失败时返回最小化信息
         analysis["components"] = [{"type": "Unknown", "name": "Graph Component"}]
         analysis["input_types"] = {"text"}
         analysis["output_types"] = {"text"}
 
-    # Convert sets to lists for JSON serialization
+    # 注意：JSON 序列化不支持 set
     analysis["input_types"] = list(analysis["input_types"])
     analysis["output_types"] = list(analysis["output_types"])
 
@@ -139,17 +142,19 @@ def _analyze_graph_structure(graph: Graph) -> dict[str, Any]:
 
 
 def _generate_dynamic_run_description(graph: Graph) -> str:
-    """Generate dynamic description for the /run endpoint based on graph analysis.
+    """生成 `/run` 端点的动态说明文案。
 
-    Args:
-        graph: The LFX graph
+    契约：基于图结构分析生成输入/输出示例与统计信息。
+    失败语义：结构缺失时使用默认示例。
+    副作用：无。
 
-    Returns:
-        str: Dynamic description for the /run endpoint
+    关键路径（三步）：
+    1) 调用结构分析生成统计信息
+    2) 构造输入/输出示例片段
+    3) 拼装最终描述文本
     """
     analysis = _analyze_graph_structure(graph)
 
-    # Determine input examples based on entry points
     input_examples = []
     for entry in analysis["entry_points"]:
         template = entry.get("template", {})
@@ -164,7 +169,6 @@ def _generate_dynamic_run_description(graph: Graph) -> str:
     if not input_examples:
         input_examples = ['"input_value": "Your input text here"']
 
-    # Determine output examples based on exit points
     output_examples = []
     for exit_point in analysis["exit_points"]:
         template = exit_point.get("template", {})
@@ -213,7 +217,12 @@ def _generate_dynamic_run_description(graph: Graph) -> str:
 
 
 class FlowMeta(BaseModel):
-    """Metadata returned by the ``/flows`` endpoint."""
+    """`flow` 元数据模型。
+
+    契约：`id` 为 UUIDv5；`relative_path` 为相对路径；`title` 为展示名称。
+    失败语义：字段缺失时由 Pydantic 抛校验错误。
+    副作用：无。
+    """
 
     id: str = Field(..., description="Deterministic flow identifier (UUIDv5)")
     relative_path: str = Field(..., description="Path of the flow JSON relative to the deployed folder")
@@ -222,13 +231,23 @@ class FlowMeta(BaseModel):
 
 
 class RunRequest(BaseModel):
-    """Request model for executing a LFX flow."""
+    """执行请求模型。
+
+    契约：必须提供 `input_value`。
+    失败语义：字段缺失时由 Pydantic 抛校验错误。
+    副作用：无。
+    """
 
     input_value: str = Field(..., description="Input value passed to the flow")
 
 
 class StreamRequest(BaseModel):
-    """Request model for streaming execution of a LFX flow."""
+    """流式执行请求模型。
+
+    契约：`input_value` 必填，其余字段用于控制输出与会话状态。
+    失败语义：字段缺失或类型错误时由 Pydantic 抛校验错误。
+    副作用：无。
+    """
 
     input_value: str = Field(..., description="Input value passed to the flow")
     input_type: str = Field(default="chat", description="Type of input (chat, text)")
@@ -239,7 +258,12 @@ class StreamRequest(BaseModel):
 
 
 class RunResponse(BaseModel):
-    """Response model mirroring the single-flow server."""
+    """执行响应模型。
+
+    契约：`success` 指示执行是否成功，`result/logs` 提供输出与诊断信息。
+    失败语义：无（响应模型）。
+    副作用：无。
+    """
 
     result: str = Field(..., description="The output result from the flow execution")
     success: bool = Field(..., description="Whether execution was successful")
@@ -249,34 +273,28 @@ class RunResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
+    """错误响应模型。
+
+    契约：`success` 恒为 False，`error` 为可读错误信息。
+    失败语义：无。
+    副作用：无。
+    """
+
     error: str = Field(..., description="Error message")
     success: bool = Field(default=False, description="Always false for errors")
 
 
 # -----------------------------------------------------------------------------
-# Streaming helper functions
+# 流式辅助函数
 # -----------------------------------------------------------------------------
 
 
 async def consume_and_yield(queue: asyncio.Queue, client_consumed_queue: asyncio.Queue) -> AsyncGenerator:
-    """Consumes events from a queue and yields them to the client while tracking timing metrics.
+    """消费事件队列并向客户端流式输出。
 
-    This coroutine continuously pulls events from the input queue and yields them to the client.
-    It tracks timing metrics for how long events spend in the queue and how long the client takes
-    to process them.
-
-    Args:
-        queue (asyncio.Queue): The queue containing events to be consumed and yielded
-        client_consumed_queue (asyncio.Queue): A queue for tracking when the client has consumed events
-
-    Yields:
-        The value from each event in the queue
-
-    Notes:
-        - Events are tuples of (event_id, value, put_time)
-        - Breaks the loop when receiving a None value, signaling completion
-        - Tracks and logs timing metrics for queue time and client processing time
-        - Notifies client consumption via client_consumed_queue
+    契约：队列元素为 `(event_id, value, put_time)`；收到 `value is None` 结束。
+    失败语义：异常直接上抛，由上层 StreamingResponse 处理。
+    副作用：读取队列并写入日志。
     """
     while True:
         event_id, value, put_time = await queue.get()
@@ -300,38 +318,23 @@ async def run_flow_generator_for_serve(
     event_manager,
     client_consumed_queue: asyncio.Queue,
 ) -> None:
-    """Executes a flow asynchronously and manages event streaming to the client.
+    """异步执行 flow 并驱动事件流。
 
-    This coroutine runs a flow with streaming enabled and handles the event lifecycle,
-    including success completion and error scenarios.
+    契约：成功时发送 `end` 事件，失败时发送 `error` 事件，并以 None 事件结束。
+    失败语义：内部异常会记录日志并通过事件返回，不抛出给上层。
+    副作用：执行图、写日志、向事件队列写入数据。
 
-    Args:
-        graph (Graph): The graph to execute
-        input_request (StreamRequest): The input parameters for the flow
-        flow_id (str): The ID of the flow being executed
-        event_manager: Manages the streaming of events to the client
-        client_consumed_queue (asyncio.Queue): Tracks client consumption of events
+    注意：此处使用 `execute_graph_with_capture` 的简化流程，未接入完整流式管线。
 
-    Events Generated:
-        - "add_message": Sent when new messages are added during flow execution
-        - "token": Sent for each token generated during streaming
-        - "end": Sent when flow execution completes, includes final result
-        - "error": Sent if an error occurs during execution
-
-    Notes:
-        - Runs the flow with streaming enabled via execute_graph_with_capture()
-        - On success, sends the final result via event_manager.on_end()
-        - On error, logs the error and sends it via event_manager.on_error()
-        - Always sends a final None event to signal completion
+    关键路径（三步）：
+    1) 执行图并获取结果与日志
+    2) 通过事件管理器发送最终结果或错误
+    3) 推送结束事件并通知客户端消费
     """
     try:
-        # For the serve app, we'll use execute_graph_with_capture with streaming
-        # Note: This is a simplified version. In a full implementation, you might want
-        # to integrate with the full LFX streaming pipeline from endpoints.py
         results, logs = await execute_graph_with_capture(graph, input_request.input_value)
         result_data = extract_result_data(results, logs)
 
-        # Send the final result
         event_manager.on_end(data={"result": result_data})
         await client_consumed_queue.get()
     except Exception as e:  # noqa: BLE001
@@ -342,7 +345,7 @@ async def run_flow_generator_for_serve(
 
 
 # -----------------------------------------------------------------------------
-# Application factory
+# 应用工厂
 # -----------------------------------------------------------------------------
 
 
@@ -353,21 +356,18 @@ def create_multi_serve_app(
     metas: dict[str, FlowMeta],
     verbose_print: Callable[[str], None],  # noqa: ARG001
 ) -> FastAPI:
-    """Create a FastAPI app exposing multiple LFX flows.
+    """创建多 `flow` FastAPI 应用。
 
-    Parameters
-    ----------
-    root_dir
-        Folder originally supplied to the serve command.  All *relative_path*
-        values are relative to this directory.
-    graphs
-        Mapping ``flow_id -> Graph`` containing prepared graph objects.
-    metas
-        Mapping ``flow_id -> FlowMeta`` containing metadata for each flow.
-    verbose_print
-        Diagnostic printer inherited from the CLI (unused, kept for backward compatibility).
+    契约：`graphs` 与 `metas` 必须包含相同的 flow_id 集合。
+    失败语义：键不一致时抛 `ValueError`。
+    副作用：构建并返回 FastAPI 应用对象。
+
+    关键路径（三步）：
+    1) 创建全局列表与健康检查端点
+    2) 为每个 flow 构建专属路由
+    3) 注册路由并返回应用
     """
-    if set(graphs) != set(metas):  # pragma: no cover - sanity check
+    if set(graphs) != set(metas):  # pragma: no cover  # 注意：健壮性检查
         msg = "graphs and metas must contain the same keys"
         raise ValueError(msg)
 
@@ -381,12 +381,12 @@ def create_multi_serve_app(
     )
 
     # ------------------------------------------------------------------
-    # Global endpoints
+    # 全局端点
     # ------------------------------------------------------------------
 
     @app.get("/flows", response_model=list[FlowMeta], tags=["info"], summary="List available flows")
     async def list_flows():
-        """Return metadata for all flows hosted in this server."""
+        """返回全部 flow 的元数据。"""
         return list(metas.values())
 
     @app.get("/health", tags=["info"], summary="Global health check")
@@ -394,18 +394,23 @@ def create_multi_serve_app(
         return {"status": "healthy", "flow_count": len(graphs)}
 
     # ------------------------------------------------------------------
-    # Per-flow routers
+    # `flow` 路由
     # ------------------------------------------------------------------
 
     def create_flow_router(flow_id: str, graph: Graph, meta: FlowMeta) -> APIRouter:
-        """Create a router for a specific flow to avoid loop variable binding issues."""
+        """为单个 flow 创建路由。
+
+        契约：每个 flow 使用独立 Router，避免闭包捕获问题。
+        失败语义：无。
+        副作用：创建路由并注册依赖。
+        """
         analysis = _analyze_graph_structure(graph)
         run_description = _generate_dynamic_run_description(graph)
 
         router = APIRouter(
             prefix=f"/flows/{flow_id}",
             tags=[meta.title or flow_id],
-            dependencies=[Depends(verify_api_key)],  # Auth for all routes inside
+            dependencies=[Depends(verify_api_key)],  # 注意：该 Router 下所有路由均需鉴权
         )
 
         @router.post(
@@ -418,21 +423,28 @@ def create_multi_serve_app(
         async def run_flow(
             request: RunRequest,
         ) -> RunResponse:
+            """执行单个 flow 并返回结果。
+
+            契约：返回 `RunResponse`，失败时 `success=False` 且包含错误信息。
+            失败语义：捕获异常并以错误响应返回，不抛出给客户端。
+            副作用：执行图并生成日志。
+
+            关键路径（三步）：
+            1) 深拷贝图并执行获取结果/日志
+            2) 构造成功响应或错误响应
+            3) 返回统一结构的 `RunResponse`
+            """
             try:
                 graph_copy = deepcopy(graph)
                 results, logs = await execute_graph_with_capture(graph_copy, request.input_value)
                 result_data = extract_result_data(results, logs)
 
-                # Debug logging
                 logger.debug(f"Flow {flow_id} execution completed: {len(results)} results, {len(logs)} log chars")
                 logger.debug(f"Flow {flow_id} result data: {result_data}")
 
-                # Check if the execution was successful
                 if not result_data.get("success", True):
-                    # If the flow execution failed, return error details in the response
                     error_message = result_data.get("result", result_data.get("text", "No response generated"))
 
-                    # Add more context to the logs when there's an error
                     error_logs = logs
                     if not error_logs.strip():
                         error_logs = (
@@ -457,15 +469,12 @@ def create_multi_serve_app(
             except Exception as exc:  # noqa: BLE001
                 import traceback
 
-                # Capture the full traceback for debugging
                 error_traceback = traceback.format_exc()
                 error_message = f"Flow execution failed: {exc!s}"
 
-                # Log to server console for debugging
                 logger.error(f"Error running flow {flow_id}: {exc}")
                 logger.debug(f"Full traceback for flow {flow_id}:\n{error_traceback}")
 
-                # Return error details in the API response instead of raising HTTPException
                 return RunResponse(
                     result=error_message,
                     success=False,
@@ -483,9 +492,19 @@ def create_multi_serve_app(
         async def stream_flow(
             request: StreamRequest,
         ) -> StreamingResponse:
-            """Stream the execution of the flow with real-time events."""
+            """流式执行并返回事件流。
+
+            契约：返回 `text/event-stream`；客户端断开时取消任务。
+            失败语义：初始化失败时返回错误事件流。
+            副作用：创建异步任务与事件队列。
+
+            关键路径（三步）：
+            1) 初始化事件管理器与队列
+            2) 启动执行任务并监听断开
+            3) 返回 StreamingResponse
+            """
             try:
-                # Import here to avoid potential circular imports
+                # 注意：延迟导入避免循环依赖
                 from lfx.events.event_manager import create_stream_tokens_event_manager
 
                 asyncio_queue: asyncio.Queue = asyncio.Queue()
@@ -513,7 +532,6 @@ def create_multi_serve_app(
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"Error setting up streaming for flow {flow_id}: {exc}")
-                # Return a simple error stream
                 error_message = f"Failed to start streaming: {exc!s}"
 
                 async def error_stream():
@@ -526,8 +544,8 @@ def create_multi_serve_app(
 
         @router.get("/info", summary="Flow metadata", response_model=FlowMeta)
         async def flow_info():
-            """Return metadata and basic analysis for this flow."""
-            # Enrich meta with analysis data for convenience
+            """返回 flow 元数据与基础分析。"""
+            # 注意：为便于前端展示，返回中附带分析信息
             return {
                 **meta.model_dump(),
                 "components": analysis["node_count"],

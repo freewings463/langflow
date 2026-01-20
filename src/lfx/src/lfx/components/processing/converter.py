@@ -1,3 +1,14 @@
+"""类型转换组件与辅助函数。
+
+本模块在 Message/Data/DataFrame 之间进行类型转换，并可自动解析 JSON/CSV 文本。
+主要功能包括：
+- 文本结构化解析（JSON/CSV）
+- 统一的类型转换入口
+- 动态输出类型切换
+
+注意事项：`auto_parse` 仅对文本类型生效，解析失败会回退为原始文本。
+"""
+
 import json
 from typing import Any
 
@@ -9,26 +20,20 @@ MIN_CSV_LINES = 2
 
 
 def convert_to_message(v) -> Message:
-    """Convert input to Message type.
+    """转换为 Message。
 
-    Args:
-        v: Input to convert (Message, Data, DataFrame, or dict)
-
-    Returns:
-        Message: Converted Message object
+    契约：输入可为 Message/Data/DataFrame/dict；输出为 Message。
+    失败语义：输入类型不支持时依赖 `to_message` 抛错。
     """
     return v if isinstance(v, Message) else v.to_message()
 
 
 def convert_to_data(v: DataFrame | Data | Message | dict, *, auto_parse: bool) -> Data:
-    """Convert input to Data type.
+    """转换为 Data。
 
-    Args:
-        v: Input to convert (Message, Data, DataFrame, or dict)
-        auto_parse: Enable automatic parsing of structured data (JSON/CSV)
-
-    Returns:
-        Data: Converted Data object
+    契约：输入可为 Message/Data/DataFrame/dict；输出为 Data。
+    副作用：当 `auto_parse=True` 时可能尝试解析 JSON/CSV。
+    失败语义：输入类型不支持时依赖 `to_data` 抛错。
     """
     if isinstance(v, dict):
         return Data(v)
@@ -40,14 +45,10 @@ def convert_to_data(v: DataFrame | Data | Message | dict, *, auto_parse: bool) -
 
 
 def convert_to_dataframe(v: DataFrame | Data | Message | dict, *, auto_parse: bool) -> DataFrame:
-    """Convert input to DataFrame type.
+    """转换为 DataFrame。
 
-    Args:
-        v: Input to convert (Message, Data, DataFrame, or dict)
-        auto_parse: Enable automatic parsing of structured data (JSON/CSV)
-
-    Returns:
-        DataFrame: Converted DataFrame object
+    契约：输入可为 Message/Data/DataFrame/dict；输出为 DataFrame。
+    失败语义：输入类型不支持时依赖 `to_dataframe` 抛错。
     """
     import pandas as pd
 
@@ -55,57 +56,50 @@ def convert_to_dataframe(v: DataFrame | Data | Message | dict, *, auto_parse: bo
         return DataFrame([v])
     if isinstance(v, DataFrame):
         return v
-    # Handle pandas DataFrame
+    # 实现：兼容 pandas.DataFrame
     if isinstance(v, pd.DataFrame):
-        # Convert pandas DataFrame to our DataFrame by creating Data objects
         return DataFrame(data=v)
 
     if isinstance(v, Message):
         data = Data(data={"text": v.data["text"]})
         return parse_structured_data(data).to_dataframe() if auto_parse else data.to_dataframe()
-    # For other types, call to_dataframe method
+    # 实现：其他类型调用自身的 to_dataframe
     return v.to_dataframe()
 
 
 def parse_structured_data(data: Data) -> Data:
-    """Parse structured data (JSON, CSV) from Data's text field.
+    """从 `Data.text` 中解析 JSON/CSV。
 
-    Args:
-        data: Data object with text content to parse
-
-    Returns:
-        Data: Modified Data object with parsed content or original if parsing fails
+    契约：输入为 `Data`；输出为解析后的 `Data` 或原对象。
+    失败语义：解析失败时返回原始 `Data`。
     """
     raw_text = data.get_text() or ""
     text = raw_text.lstrip("\ufeff").strip()
 
-    # Try JSON parsing first
+    # 实现：优先尝试 JSON
     parsed_json = _try_parse_json(text)
     if parsed_json is not None:
         return parsed_json
 
-    # Try CSV parsing
+    # 实现：再尝试 CSV
     if _looks_like_csv(text):
         try:
             return _parse_csv_to_data(text)
         except Exception:  # noqa: BLE001
-            # Heuristic misfire or malformed CSV — keep original data
+            # 注意：启发式误判或格式错误时保留原始数据
             return data
 
-    # Return original data if no parsing succeeded
     return data
 
 
 def _try_parse_json(text: str) -> Data | None:
-    """Try to parse text as JSON and return Data object."""
+    """尝试将文本解析为 JSON。"""
     try:
         parsed = json.loads(text)
 
         if isinstance(parsed, dict):
-            # Single JSON object
             return Data(data=parsed)
         if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
-            # Array of JSON objects - create Data with the list
             return Data(data={"records": parsed})
 
     except (json.JSONDecodeError, ValueError):
@@ -115,7 +109,7 @@ def _try_parse_json(text: str) -> Data | None:
 
 
 def _looks_like_csv(text: str) -> bool:
-    """Simple heuristic to detect CSV content."""
+    """基于简单启发式判断是否像 CSV。"""
     lines = text.strip().split("\n")
     if len(lines) < MIN_CSV_LINES:
         return False
@@ -125,12 +119,11 @@ def _looks_like_csv(text: str) -> bool:
 
 
 def _parse_csv_to_data(text: str) -> Data:
-    """Parse CSV text and return Data object."""
+    """解析 CSV 文本并返回 Data。"""
     from io import StringIO
 
     import pandas as pd
 
-    # Parse CSV to DataFrame, then convert to list of dicts
     parsed_df = pd.read_csv(StringIO(text))
     records = parsed_df.to_dict(orient="records")
 
@@ -138,6 +131,12 @@ def _parse_csv_to_data(text: str) -> Data:
 
 
 class TypeConverterComponent(Component):
+    """类型转换组件封装。
+
+    契约：输入为 `Message`/`Data`/`DataFrame`；输出类型由 `output_type` 决定。
+    副作用：动态更新输出端口并更新 `self.status`。
+    失败语义：输入类型不支持时抛 `ValueError`/`TypeError`。
+    """
     display_name = "Type Convert"
     description = "Convert between different types (Message, Data, DataFrame)"
     documentation: str = "https://docs.langflow.org/type-convert"
@@ -178,12 +177,10 @@ class TypeConverterComponent(Component):
     ]
 
     def update_outputs(self, frontend_node: dict, field_name: str, field_value: Any) -> dict:
-        """Dynamically show only the relevant output based on the selected output type."""
+        """根据输出类型动态刷新节点输出。"""
         if field_name == "output_type":
-            # Start with empty outputs
             frontend_node["outputs"] = []
 
-            # Add only the selected output type
             if field_value == "Message":
                 frontend_node["outputs"].append(
                     Output(
@@ -212,10 +209,10 @@ class TypeConverterComponent(Component):
         return frontend_node
 
     def convert_to_message(self) -> Message:
-        """Convert input to Message type."""
+        """转换为 Message 并更新状态。"""
         input_value = self.input_data[0] if isinstance(self.input_data, list) else self.input_data
 
-        # Handle string input by converting to Message first
+        # 实现：字符串先转为 Message
         if isinstance(input_value, str):
             input_value = Message(text=input_value)
 
@@ -224,10 +221,10 @@ class TypeConverterComponent(Component):
         return result
 
     def convert_to_data(self) -> Data:
-        """Convert input to Data type."""
+        """转换为 Data 并更新状态。"""
         input_value = self.input_data[0] if isinstance(self.input_data, list) else self.input_data
 
-        # Handle string input by converting to Message first
+        # 实现：字符串先转为 Message
         if isinstance(input_value, str):
             input_value = Message(text=input_value)
 
@@ -236,10 +233,10 @@ class TypeConverterComponent(Component):
         return result
 
     def convert_to_dataframe(self) -> DataFrame:
-        """Convert input to DataFrame type."""
+        """转换为 DataFrame 并更新状态。"""
         input_value = self.input_data[0] if isinstance(self.input_data, list) else self.input_data
 
-        # Handle string input by converting to Message first
+        # 实现：字符串先转为 Message
         if isinstance(input_value, str):
             input_value = Message(text=input_value)
 

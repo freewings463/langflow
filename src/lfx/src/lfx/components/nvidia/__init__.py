@@ -1,3 +1,9 @@
+"""NVIDIA 组件导出入口。
+
+本模块通过延迟导入方式暴露 NVIDIA 相关组件，避免在未安装依赖时导入失败。
+注意事项：`system_assist` 仅在 Windows 平台可用。
+"""
+
 from __future__ import annotations
 
 import sys
@@ -40,7 +46,11 @@ else:
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import nvidia components on attribute access."""
+    """按需导入 NVIDIA 组件并缓存到模块命名空间。
+
+    契约：输入为组件名字符串；输出对应组件对象。
+    失败语义：未注册组件名或导入失败时抛 `AttributeError`。
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
@@ -54,4 +64,5 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """返回模块对外暴露的组件列表。"""
     return list(__all__)

@@ -1,9 +1,29 @@
+"""
+模块名称：条件透传组件（已停用）
+
+本模块提供基于条件判断的透传能力，主要用于在旧流程中按规则筛选输出。主要功能包括：
+- 比较输入与目标值
+- 条件满足时输出指定值，否则输出空字符串
+
+关键组件：
+- `SelectivePassThroughComponent`：条件透传组件
+
+设计背景：早期流程缺少条件路由组件的替代方案。
+注意事项：比较逻辑基于字符串操作，类型不匹配时需上游转换。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.field_typing import Text
 from lfx.io import BoolInput, DropdownInput, MessageTextInput, Output
 
 
 class SelectivePassThroughComponent(Component):
+    """条件透传组件。
+
+    契约：输入为字符串，按 `operator` 决定是否输出 `value_to_pass`。
+    失败语义：未匹配时返回空字符串。
+    副作用：更新组件 `status`。
+    """
     display_name = "Selective Pass Through"
     description = "Passes the specified value if a specified condition is met."
     icon = "filter"
@@ -47,6 +67,12 @@ class SelectivePassThroughComponent(Component):
     def evaluate_condition(
         self, input_value: str, comparison_value: str, operator: str, *, case_sensitive: bool
     ) -> bool:
+        """评估比较条件。
+
+        契约：根据 `operator` 执行字符串比较。
+        失败语义：未知 `operator` 返回 False。
+        副作用：无。
+        """
         if not case_sensitive:
             input_value = input_value.lower()
             comparison_value = comparison_value.lower()
@@ -64,6 +90,12 @@ class SelectivePassThroughComponent(Component):
         return False
 
     def pass_through(self) -> Text:
+        """条件成立时透传指定值。
+
+        契约：条件为真返回 `value_to_pass`，否则返回空字符串。
+        失败语义：无。
+        副作用：更新组件 `status`。
+        """
         input_value = self.input_value
         comparison_value = self.comparison_value
         operator = self.operator

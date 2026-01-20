@@ -1,9 +1,32 @@
+"""
+模块名称：JigsawStack 文本翻译组件
+
+本模块封装 JigsawStack `translate.text`，用于多语言文本翻译。
+主要功能包括：
+- 支持单条文本或文本列表
+- 组装翻译请求参数并返回结果
+- 失败语义统一处理
+
+关键组件：
+- JigsawStackTextTranslateComponent：文本翻译组件入口
+
+设计背景：为 Langflow 提供多语言翻译能力。
+注意事项：`target_language` 必须是 ISO 639-1 两字母代码。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import MessageTextInput, Output, SecretStrInput, StrInput
 from lfx.schema.data import Data
 
 
 class JigsawStackTextTranslateComponent(Component):
+    """JigsawStack 文本翻译组件封装。
+
+    契约：输入为 `target_language` 与 `text`；输出 `Data`。
+    副作用：触发外部翻译请求并更新 `self.status`。
+    失败语义：SDK 异常返回失败 `Data`；SDK 缺失抛 `ImportError`。
+    """
+
     display_name = "Text Translate"
     description = "Translate text from one language to another with support for multiple text formats."
     documentation = "https://jigsawstack.com/docs/api-reference/ai/translate"
@@ -40,6 +63,17 @@ class JigsawStackTextTranslateComponent(Component):
     ]
 
     def translation(self) -> Data:
+        """执行文本翻译并返回结果。
+
+        契约：输入为 `target_language` 与 `text`，输出为 `Data`。
+        副作用：触发外部翻译请求并更新 `self.status`。
+        失败语义：SDK 异常返回失败 `Data`；SDK 缺失抛 `ImportError`。
+
+        关键路径（三步）：
+        1) 规范化 `text` 为列表；
+        2) 构建翻译参数并调用 `client.translate.text`；
+        3) 校验 `success` 并返回响应。
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -51,7 +85,7 @@ class JigsawStackTextTranslateComponent(Component):
         try:
             client = JigsawStack(api_key=self.api_key)
 
-            # build request object
+            # 实现：组装翻译请求参数
             params = {}
             if self.target_language:
                 params["target_language"] = self.target_language
@@ -62,7 +96,7 @@ class JigsawStackTextTranslateComponent(Component):
                 else:
                     params["text"] = [self.text]
 
-            # Call web scraping
+            # 实现：调用 JigsawStack 翻译接口
             response = client.translate.text(params)
 
             if not response.get("success", False):

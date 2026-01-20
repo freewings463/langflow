@@ -1,4 +1,17 @@
-"""CLI commands for LFX."""
+"""
+模块名称：LFX CLI 命令实现
+
+本模块提供 LFX 命令行的核心子命令实现，主要用于将单个 flow 以 HTTP API 形式对外提供服务。主要功能包括：
+- 校验输入来源（文件/内联 JSON/STDIN）
+- 加载并准备图对象
+- 启动 FastAPI + Uvicorn 服务并输出使用提示
+
+关键组件：
+- `serve_command`：CLI `lfx serve` 的主入口
+
+设计背景：CLI 需要提供统一的部署入口，并在错误输入/环境不完整时快速失败。
+注意事项：启动服务前必须配置 `LANGFLOW_API_KEY`，否则直接退出。
+"""
 
 from __future__ import annotations
 
@@ -27,10 +40,8 @@ from lfx.cli.common import (
 )
 from lfx.cli.serve_app import FlowMeta, create_multi_serve_app
 
-# Initialize console
 console = Console()
 
-# Constants
 API_KEY_MASK_LENGTH = 8
 
 
@@ -73,29 +84,28 @@ async def serve_command(
         help="Check global variables for environment compatibility",
     ),
 ) -> None:
-    """Serve LFX flows as a web API.
+    """以 HTTP API 形式运行单个 LFX flow。
 
-    Supports single files, inline JSON, and stdin input.
+    契约：`script_path`/`--flow-json`/`--stdin` 三者必须且仅能提供一种；成功后监听 `host:port`。
+    失败语义：输入冲突、JSON 解析失败、API Key 缺失或图准备失败时抛 `typer.Exit(1)`。
+    副作用：读取文件/STDIN、创建临时文件、启动 Uvicorn 进程监听端口。
 
-    Examples:
-        # Serve from file
-        lfx serve my_flow.json
+    关键路径（三步）：
+    1) 校验输入来源与环境变量，并加载 `.env`
+    2) 解析并准备图对象（含可选的全局变量校验）
+    3) 构建 FastAPI 应用并启动 Uvicorn 服务
 
-        # Serve inline JSON
-        lfx serve --flow-json '{"nodes": [...], "edges": [...]}'
-
-        # Serve from stdin
-        cat my_flow.json | lfx serve --stdin
-        echo '{"nodes": [...]}' | lfx serve --stdin
+    异常流：JSON 语法错误、`LANGFLOW_API_KEY` 缺失、图准备失败会直接退出。
+    排障入口：`--verbose` 输出、`lfx.log.logger` 日志与 Uvicorn 日志级别。
     """
-    # Configure logging with the specified level and import logger
+    # 导入时配置日志，避免 CLI 启动时额外依赖
     from lfx.log.logger import configure, logger
 
     configure(log_level=log_level)
 
     verbose_print = create_verbose_printer(verbose=verbose)
 
-    # Validate input sources - exactly one must be provided
+    # 注意：三种输入源必须且仅能选择一种
     input_sources = [script_path is not None, flow_json is not None, stdin]
     if sum(input_sources) != 1:
         if sum(input_sources) == 0:
@@ -104,7 +114,6 @@ async def serve_command(
             verbose_print("Error: Cannot use script_path, --flow-json, and --stdin together. Choose exactly one.")
         raise typer.Exit(1)
 
-    # Load environment variables from .env file if provided
     if env_file:
         if not env_file.exists():
             verbose_print(f"Error: Environment file '{env_file}' does not exist.")
@@ -113,7 +122,6 @@ async def serve_command(
         verbose_print(f"Loading environment variables from: {env_file}")
         load_dotenv(env_file)
 
-    # Validate API key
     try:
         api_key = get_api_key()
         verbose_print("✓ LANGFLOW_API_KEY is configured")
@@ -122,33 +130,28 @@ async def serve_command(
         typer.echo("Set the LANGFLOW_API_KEY environment variable before serving.", err=True)
         raise typer.Exit(1) from e
 
-    # Validate log level
     valid_log_levels = {"debug", "info", "warning", "error", "critical"}
     if log_level.lower() not in valid_log_levels:
         verbose_print(f"Error: Invalid log level '{log_level}'. Must be one of: {', '.join(sorted(valid_log_levels))}")
         raise typer.Exit(1)
 
-    # Configure logging with the specified level
-    # Disable pretty logs for serve command to avoid ANSI codes in API responses
+    # 注意：关闭 pretty logs，避免 API 响应夹带 ANSI 控制符
     os.environ["LANGFLOW_PRETTY_LOGS"] = "false"
     verbose_print(f"Configuring logging with level: {log_level}")
     from lfx.log.logger import configure
 
     configure(log_level=log_level)
 
-    # ------------------------------------------------------------------
-    # Handle inline JSON content or stdin input
-    # ------------------------------------------------------------------
+    # 处理内联 JSON 或 STDIN 输入
     temp_file_to_cleanup = None
 
     if flow_json is not None:
         logger.info("Processing inline JSON content...")
         try:
-            # Validate JSON syntax
             json_data = json.loads(flow_json)
             logger.info("JSON content is valid")
 
-            # Create a temporary file with the JSON content
+            # 注意：为复用后续加载逻辑，内联 JSON 会落盘到临时文件
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as temp_file:
                 json.dump(json_data, temp_file, indent=2)
                 temp_file_to_cleanup = temp_file.name
@@ -166,17 +169,15 @@ async def serve_command(
     elif stdin:
         logger.info("Reading JSON content from stdin...")
         try:
-            # Read all content from stdin
             stdin_content = sys.stdin.read().strip()
             if not stdin_content:
                 logger.error("No content received from stdin")
                 raise typer.Exit(1)
 
-            # Validate JSON syntax
             json_data = json.loads(stdin_content)
             logger.info("JSON content from stdin is valid")
 
-            # Create a temporary file with the JSON content
+            # 注意：STDIN 内容写入临时文件以复用加载路径
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as temp_file:
                 json.dump(json_data, temp_file, indent=2)
                 temp_file_to_cleanup = temp_file.name
@@ -192,7 +193,6 @@ async def serve_command(
             raise typer.Exit(1) from e
 
     try:
-        # Load the graph
         if script_path is None:
             verbose_print("Error: script_path is None after input validation")
             raise typer.Exit(1)
@@ -217,13 +217,11 @@ async def serve_command(
             verbose_print(err_msg)
             raise typer.Exit(1)
 
-        # Prepare the graph
         logger.info("Preparing graph for serving...")
         try:
             graph.prepare()
             logger.info("Graph prepared successfully")
 
-            # Validate global variables for environment compatibility
             if check_variables:
                 from lfx.cli.validation import validate_global_variables_for_env
 
@@ -239,16 +237,14 @@ async def serve_command(
             verbose_print(f"✗ Failed to prepare graph: {e}")
             raise typer.Exit(1) from e
 
-        # Check if port is in use
         if is_port_in_use(port, host):
             available_port = get_free_port(port)
             if verbose:
                 verbose_print(f"Port {port} is in use, using port {available_port} instead")
             port = available_port
 
-        # Create single-flow metadata
         flow_id = flow_id_from_path(resolved_path, resolved_path.parent)
-        graph.flow_id = flow_id  # annotate graph for reference
+        graph.flow_id = flow_id  # 注意：在图对象上标注 flow_id 便于后续日志与追踪
 
         title = resolved_path.stem
         description = None
@@ -266,7 +262,6 @@ async def serve_command(
         source_display = "inline JSON" if flow_json else "stdin" if stdin else str(resolved_path)
         verbose_print(f"✓ Prepared single flow '{title}' from {source_display} (id={flow_id})")
 
-        # Create FastAPI app
         serve_app = create_multi_serve_app(
             root_dir=resolved_path.parent,
             graphs=graphs,
@@ -302,10 +297,11 @@ async def serve_command(
         )
         console.print()
 
-        # Start the server
-        # Use uvicorn.Server to properly handle async context
-        # uvicorn.run() uses asyncio.run() internally which fails when
-        # an event loop is already running (due to syncify decorator)
+        # 决策：使用 `uvicorn.Server` 而非 `uvicorn.run`
+        # 问题：`uvicorn.run` 内部调用 `asyncio.run()`，会在已有事件循环时失败
+        # 方案：直接构造 `uvicorn.Server` 并 `await serve()` 以复用当前循环
+        # 代价：需要显式构建 `Config` 与 `Server`，代码更冗长
+        # 重评：若未来移除 `syncify` 或统一事件循环管理，可评估回退到 `uvicorn.run`
         try:
             config = uvicorn.Config(
                 serve_app,
@@ -323,7 +319,7 @@ async def serve_command(
             raise typer.Exit(1) from e
 
     finally:
-        # Clean up temporary file if created
+        # 注意：仅清理由内联/STDIN 生成的临时文件
         if temp_file_to_cleanup:
             try:
                 Path(temp_file_to_cleanup).unlink()

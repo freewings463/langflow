@@ -1,13 +1,16 @@
-"""This code is adapted from the DVC project.
+"""模块名称：ASCII 图渲染
 
-Original source:
+本模块基于 DVC 的 DAG ASCII 绘制逻辑改造而来，用于渲染图结构的文本视图。
+原始来源：
 https://github.com/iterative/dvc/blob/c5bac1c8cfdb2c0f54d52ac61ff754e6f583822a/dvc/dagascii.py
 
-The original code has been modified to focus on drawing a Directed Acyclic Graph (DAG) in ASCII
-using the `grandalf` library. Non-essential parts have been removed, and the code has been
-refactored to suit this specific use case.
+使用场景：在无图形界面环境输出图的结构概览。
+主要功能包括：
+- 使用 `grandalf` 计算布局
+- 以 ASCII 方式绘制顶点与边
 
-
+设计背景：保留核心绘制逻辑，去除无关功能以适配本项目
+注意事项：仅适用于 DAG；边需要至少两个路由点
 """
 
 import math
@@ -22,13 +25,15 @@ MINIMUM_EDGE_VIEW_POINTS = 2
 
 
 class VertexViewer:
-    """Class to define vertex box boundaries that will be accounted for during graph building by grandalf."""
+    """顶点视图尺寸定义。"""
 
-    HEIGHT = 3  # top and bottom box edges + text
+    HEIGHT = 3  # 上下边框 + 文本行
 
     def __init__(self, name) -> None:
-        self._h = self.HEIGHT  # top and bottom box edges + text
-        self._w = len(name) + 2  # right and left bottom edges + text
+        # 注意：高度固定为文本行+上下边框。
+        self._h = self.HEIGHT
+        # 注意：宽度包含左右边框与文本。
+        self._w = len(name) + 2
 
     @property
     def h(self):
@@ -40,7 +45,7 @@ class VertexViewer:
 
 
 class AsciiCanvas:
-    """Class for drawing in ASCII."""
+    """ASCII 画布，用于绘制线条与文本。"""
 
     def __init__(self, cols, lines) -> None:
         if cols <= 1:
@@ -60,12 +65,12 @@ class AsciiCanvas:
         return "\n".join(self.get_lines())
 
     def draw(self) -> None:
-        """Draws ASCII canvas on the screen."""
+        """打印当前画布内容。"""
         lines = self.get_lines()
         print("\n".join(lines))  # noqa: T201
 
     def point(self, x, y, char) -> None:
-        """Create a point on ASCII canvas."""
+        """在画布上绘制单点。"""
         if len(char) != 1:
             msg = "char must be a single character"
             raise ValueError(msg)
@@ -78,7 +83,7 @@ class AsciiCanvas:
         self.canvas[y][x] = char
 
     def line(self, x0, y0, x1, y1, char) -> None:
-        """Create a line on ASCII canvas."""
+        """在画布上绘制线段。"""
         if x0 > x1:
             x1, x0 = x0, x1
             y1, y0 = y0, y1
@@ -98,12 +103,12 @@ class AsciiCanvas:
                 self.point(x, y, char)
 
     def text(self, x, y, text) -> None:
-        """Print a text on ASCII canvas."""
+        """在画布上绘制文本。"""
         for i, char in enumerate(text):
             self.point(x + i, y, char)
 
     def box(self, x0, y0, width, height) -> None:
-        """Create a box on ASCII canvas."""
+        """在画布上绘制矩形框。"""
         if width <= 1:
             msg = "width must be greater than 1"
             raise ValueError(msg)
@@ -126,6 +131,7 @@ class AsciiCanvas:
 
 
 def build_sugiyama_layout(vertexes, edges):
+    """构建 Sugiyama 布局并返回布局对象。"""
     vertexes = {v: GrandalfVertex(v) for v in vertexes}
     edges = [GrandalfEdge(vertexes[s], vertexes[e]) for s, e in edges]
     graph = GrandalfGraph(vertexes.values(), edges)
@@ -151,7 +157,11 @@ def build_sugiyama_layout(vertexes, edges):
 
 
 def draw_graph(vertexes, edges, *, return_ascii=True):
-    """Build a DAG and draw it in ASCII."""
+    """构建 DAG 并输出 ASCII 图。
+
+    契约：`vertexes` 为顶点名称列表，`edges` 为边二元组列表
+    失败语义：边路由点不足时抛 `ValueError`
+    """
     sug = build_sugiyama_layout(vertexes, edges)
 
     xlist = []

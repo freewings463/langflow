@@ -1,3 +1,18 @@
+"""
+模块名称：`Azure OpenAI` 向量模型组件
+
+本模块提供基于 `Azure OpenAI` 的向量模型组件，用于构建 `AzureOpenAIEmbeddings` 实例。
+主要功能包括：
+- 定义 `Azure OpenAI` Embeddings 参数配置
+- 初始化并返回向量模型实例
+
+关键组件：
+- `AzureOpenAIEmbeddingsComponent`
+
+设计背景：统一 `Azure OpenAI` Embeddings 接入入口。
+注意事项：连接失败会抛 `ValueError`，需检查 `endpoint`/`deployment`/`api_version`。
+"""
+
 from langchain_openai import AzureOpenAIEmbeddings
 
 from lfx.base.models.model import LCModelComponent
@@ -7,6 +22,14 @@ from lfx.io import DropdownInput, IntInput, MessageTextInput, Output, SecretStrI
 
 
 class AzureOpenAIEmbeddingsComponent(LCModelComponent):
+    """`Azure OpenAI` 向量模型组件
+
+    契约：
+    - 输入：模型名、`endpoint`、`deployment`、`api_version`、`api_key` 等配置
+    - 输出：`Embeddings` 实例
+    - 副作用：无
+    - 失败语义：连接失败时抛 `ValueError`
+    """
     display_name: str = "Azure OpenAI Embeddings"
     description: str = "Generate embeddings using Azure OpenAI models."
     documentation: str = "https://python.langchain.com/docs/integrations/text_embedding/azureopenai"
@@ -67,6 +90,14 @@ class AzureOpenAIEmbeddingsComponent(LCModelComponent):
     ]
 
     def build_embeddings(self) -> Embeddings:
+        """构建 `AzureOpenAIEmbeddings` 实例
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`Embeddings` 实例
+        - 副作用：无
+        - 失败语义：构建失败时抛异常
+        """
         try:
             embeddings = AzureOpenAIEmbeddings(
                 model=self.model,

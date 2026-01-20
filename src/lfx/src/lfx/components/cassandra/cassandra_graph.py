@@ -1,3 +1,19 @@
+"""
+模块名称：Cassandra 图向量存储组件
+
+本模块提供 Cassandra 图向量存储的构建与检索能力。
+主要功能包括：
+- 初始化 Cassandra/Astra 连接并构建图向量存储
+- 支持 Traversal/MMR/相似度等检索模式
+- 将检索结果统一转换为 Langflow `Data`
+
+关键组件：
+- CassandraGraphVectorStoreComponent：图向量检索组件
+
+设计背景：为图结构向量检索提供统一的组件接口。
+注意事项：依赖 `cassio` 包；检索参数需与所选搜索类型匹配。
+"""
+
 from uuid import UUID
 
 from langchain_community.graph_vectorstores import CassandraGraphVectorStore
@@ -16,6 +32,13 @@ from lfx.schema.data import Data
 
 
 class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
+    """Cassandra 图向量存储组件。
+
+    契约：必须提供 `embedding`、`database_ref`、`keyspace` 与 `table_name`。
+    副作用：初始化 cassio 连接并可能创建图向量表。
+    失败语义：缺少 `cassio` 时抛 `ImportError`；检索阶段可能抛 `ValueError`。
+    """
+
     display_name = "Cassandra Graph"
     description = "Cassandra Graph Vector Store"
     name = "CassandraGraph"
@@ -113,6 +136,16 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> CassandraGraphVectorStore:
+        """构建图向量存储实例。
+
+        关键路径（三步）：
+        1) 校验依赖并初始化 cassio 连接。
+        2) 规范化输入数据为文档列表。
+        3) 依据是否有文档选择写入或仅构建表。
+
+        异常流：缺少 `cassio` 依赖时抛 `ImportError`；连接初始化失败时异常原样透传。
+        性能瓶颈：文档写入与向量化为主要耗时。
+        """
         try:
             import cassio
             from langchain_community.utilities.cassandra import SetupMode
@@ -128,7 +161,7 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
         except ValueError:
             is_astra = False
             if "," in self.database_ref:
-                # use a copy because we can't change the type of the parameter
+                # 注意：不改变字段类型，拆分后使用局部变量
                 database_ref = self.database_ref.split(",")
 
         if is_astra:
@@ -176,6 +209,11 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
         return store
 
     def _map_search_type(self) -> str:
+        """将界面搜索类型映射为图向量检索枚举值。
+
+        输入：无（读取 `self.search_type`）。
+        输出：字符串枚举（`traversal`/`mmr_traversal`/`similarity` 等）。
+        """
         if self.search_type == "Similarity":
             return "similarity"
         if self.search_type == "Similarity with score threshold":
@@ -187,6 +225,16 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
         return "traversal"
 
     def search_documents(self) -> list[Data]:
+        """执行图向量检索并返回标准化数据。
+
+        关键路径（三步）：
+        1) 构建/获取图向量存储实例。
+        2) 组装检索参数并执行搜索。
+        3) 将检索结果转为 `Data` 并写入 `status`。
+
+        异常流：集合无 `content` 字段时抛 `ValueError`。
+        副作用：写入 `self.status` 并产生日志。
+        """
         vector_store = self.build_vector_store()
 
         self.log(f"Search input: {self.search_query}")
@@ -218,6 +266,11 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
         return []
 
     def _build_search_args(self):
+        """构建图向量检索参数字典。
+
+        输入：无（读取组件配置）。
+        输出：包含 `k/score_threshold/depth` 等参数的字典。
+        """
         args = {
             "k": self.number_of_results,
             "score_threshold": self.search_score_threshold,
@@ -231,6 +284,11 @@ class CassandraGraphVectorStoreComponent(LCVectorStoreComponent):
         return args
 
     def get_retriever_kwargs(self):
+        """提供检索器所需的参数配置。
+
+        输入：无。
+        输出：包含 `search_type` 与 `search_kwargs` 的字典。
+        """
         search_args = self._build_search_args()
         return {
             "search_type": self._map_search_type(),

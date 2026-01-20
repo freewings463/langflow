@@ -13,12 +13,14 @@ from lfx.schema.data import Data
 
 
 class NotionPageUpdate(LCToolComponent):
+    # 更新 Notion 页面属性
     display_name: str = "Update Page Property "
     description: str = "Update the properties of a Notion page."
     documentation: str = "https://docs.langflow.org/bundles-notion"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：页面 ID、属性、密钥
         StrInput(
             name="page_id",
             display_name="Page ID",
@@ -38,12 +40,14 @@ class NotionPageUpdate(LCToolComponent):
     ]
 
     class NotionPageUpdateSchema(BaseModel):
+        # 工具入参 Schema
         page_id: str = Field(..., description="The ID of the Notion page to update.")
         properties: str | dict[str, Any] = Field(
             ..., description="The properties to update on the page (as a JSON string or a dictionary)."
         )
 
     def run_model(self) -> Data:
+        # 执行更新并包装输出
         result = self._update_notion_page(self.page_id, self.properties)
         if isinstance(result, str):
             # An error occurred, return it as text
@@ -55,6 +59,7 @@ class NotionPageUpdate(LCToolComponent):
         return Data(text=output, data=result)
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="update_notion_page",
             description="Update the properties of a Notion page. "
@@ -64,6 +69,7 @@ class NotionPageUpdate(LCToolComponent):
         )
 
     def _update_notion_page(self, page_id: str, properties: str | dict[str, Any]) -> dict[str, Any] | str:
+        # 组装更新请求
         url = f"https://api.notion.com/v1/pages/{page_id}"
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",
@@ -71,7 +77,7 @@ class NotionPageUpdate(LCToolComponent):
             "Notion-Version": "2022-06-28",  # Use the latest supported version
         }
 
-        # Parse properties if it's a string
+        # properties 支持 JSON 字符串或字典
         if isinstance(properties, str):
             try:
                 parsed_properties = json.loads(properties)
@@ -86,6 +92,7 @@ class NotionPageUpdate(LCToolComponent):
         data = {"properties": parsed_properties}
 
         try:
+            # 调用 Notion API 执行更新
             logger.info(f"Sending request to Notion API: URL: {url}, Data: {json.dumps(data)}")
             response = requests.patch(url, headers=headers, json=data, timeout=10)
             response.raise_for_status()

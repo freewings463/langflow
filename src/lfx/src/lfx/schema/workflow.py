@@ -1,4 +1,4 @@
-"""Workflow execution schemas for V2 API."""
+"""工作流执行相关 schema。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobStatus(str, Enum):
-    """Job execution status."""
+    """任务状态枚举。"""
 
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
@@ -19,7 +19,7 @@ class JobStatus(str, Enum):
 
 
 class ErrorDetail(BaseModel):
-    """Error detail schema."""
+    """错误详情结构。"""
 
     error: str
     code: str | None = None
@@ -27,7 +27,7 @@ class ErrorDetail(BaseModel):
 
 
 class ComponentOutput(BaseModel):
-    """Component output schema."""
+    """组件输出结构。"""
 
     type: str = Field(..., description="Type of the component output (e.g., 'message', 'data', 'tool', 'text')")
     component_id: str
@@ -37,7 +37,7 @@ class ComponentOutput(BaseModel):
 
 
 class GlobalInputs(BaseModel):
-    """Global inputs that apply to all input components in the workflow."""
+    """工作流全局输入。"""
 
     input_value: str | None = Field(None, description="The input value to send to input components")
     input_type: str = Field("chat", description="The type of input (chat, text, etc.)")
@@ -45,7 +45,7 @@ class GlobalInputs(BaseModel):
 
 
 class WorkflowExecutionRequest(BaseModel):
-    """Request schema for workflow execution."""
+    """工作流执行请求。"""
 
     background: bool = False
     stream: bool = False
@@ -90,7 +90,7 @@ class WorkflowExecutionRequest(BaseModel):
 
 
 class WorkflowExecutionResponse(BaseModel):
-    """Synchronous workflow execution response."""
+    """同步执行响应。"""
 
     flow_id: str
     job_id: str
@@ -104,7 +104,7 @@ class WorkflowExecutionResponse(BaseModel):
 
 
 class WorkflowJobResponse(BaseModel):
-    """Background job response."""
+    """后台任务响应。"""
 
     job_id: str
     created_timestamp: str
@@ -113,7 +113,7 @@ class WorkflowJobResponse(BaseModel):
 
 
 class WorkflowStreamEvent(BaseModel):
-    """Streaming event response."""
+    """流式事件响应。"""
 
     type: str
     run_id: str
@@ -122,21 +122,21 @@ class WorkflowStreamEvent(BaseModel):
 
 
 class WorkflowStopRequest(BaseModel):
-    """Request schema for stopping workflow."""
+    """停止工作流请求。"""
 
     job_id: str
     force: bool = Field(default=False, description="Force stop the workflow")
 
 
 class WorkflowStopResponse(BaseModel):
-    """Response schema for stopping workflow."""
+    """停止工作流响应。"""
 
     job_id: str
     status: Literal["stopped", "stopping", "not_found", "error"]
     message: str
 
 
-# OpenAPI response definitions
+# OpenAPI 响应定义
 WORKFLOW_EXECUTION_RESPONSES = {
     200: {
         "description": "Workflow execution response",

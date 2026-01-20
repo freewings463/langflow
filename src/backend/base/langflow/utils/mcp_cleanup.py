@@ -1,9 +1,13 @@
-"""MCP subprocess cleanup utilities for graceful shutdown.
+"""
+模块名称：mcp_cleanup
 
-This module provides functions to properly terminate MCP server subprocesses
-spawned by stdio_client during Langflow shutdown.
+本模块提供MCP子进程清理实用工具，主要用于优雅关闭。
+主要功能包括：
+- 在Langflow关闭期间正确终止由stdio_client生成的MCP服务器子进程
+- 提供备用机制强制终止MCP进程
 
-Works on macOS and Linux only.
+设计背景：在应用关闭时需要确保所有MCP会话都被正确清理，防止僵尸进程
+注意事项：仅在macOS和Linux上工作
 """
 
 from __future__ import annotations
@@ -19,10 +23,16 @@ if TYPE_CHECKING:
 
 
 async def cleanup_mcp_sessions() -> None:
-    """Cleanup all MCP sessions to ensure subprocesses are properly terminated.
-
-    This function should be called at the very beginning of the shutdown sequence
-    to ensure MCP subprocesses are killed even if shutdown is interrupted.
+    """清理所有MCP会话以确保子进程被正确终止。
+    
+    关键路径（三步）：
+    1) 尝试从缓存中获取MCP会话管理器并清理所有会话
+    2) 作为备用方案，终止任何仍在运行的MCP进程
+    3) 记录清理操作的结果
+    
+    异常流：所有异常都被抑制，确保关闭流程继续
+    性能瓶颈：进程终止操作
+    排障入口：检查是否有MCP子进程在应用关闭后仍然运行
     """
     with contextlib.suppress(Exception):
         from lfx.base.mcp.util import MCPSessionManager
@@ -42,12 +52,16 @@ async def cleanup_mcp_sessions() -> None:
 
 
 async def _kill_mcp_processes() -> None:
-    """Kill MCP server subprocesses spawned by this Langflow process.
-
-    This is a fallback for when the normal cleanup doesn't properly terminate
-    subprocesses spawned by stdio_client.
-
-    Works on macOS and Linux only.
+    """终止由此Langflow进程生成的MCP服务器子进程。
+    
+    关键路径（三步）：
+    1) 检查平台是否为Windows，如果是则直接返回
+    2) 导入psutil库并终止子MCP进程
+    3) 终止孤儿MCP进程并记录结果
+    
+    异常流：如果psutil无法导入或出现异常，则静默返回
+    性能瓶颈：进程查找和终止操作
+    排障入口：检查是否仍有MCP进程在运行
     """
     if sys.platform == "win32":
         return
@@ -66,7 +80,17 @@ async def _kill_mcp_processes() -> None:
 
 
 async def _terminate_child_mcp_processes(psutil: psutil_type) -> int:
-    """Terminate MCP processes that are children of this process."""
+    """终止此进程的子MCP进程。
+    
+    关键路径（三步）：
+    1) 获取当前进程及其所有子进程
+    2) 遍历子进程并尝试终止MCP进程
+    3) 统计终止的进程数量
+    
+    异常流：如果当前进程不存在，则返回0
+    性能瓶颈：遍历所有子进程
+    排障入口：检查返回的计数是否符合预期
+    """
     killed_count = 0
 
     try:
@@ -83,7 +107,17 @@ async def _terminate_child_mcp_processes(psutil: psutil_type) -> int:
 
 
 async def _terminate_orphaned_mcp_processes(psutil: psutil_type) -> int:
-    """Terminate orphaned MCP processes (ppid=1) on Unix systems."""
+    """在Unix系统上终止孤儿MCP进程(ppid=1)。
+    
+    关键路径（三步）：
+    1) 遍历系统中的所有进程
+    2) 过滤出父进程ID为1的进程（孤儿进程）
+    3) 尝试终止符合条件的MCP进程
+    
+    异常流：跳过无法访问或不存在的进程
+    性能瓶颈：遍历系统中所有进程
+    排障入口：检查返回的计数是否符合预期
+    """
     killed_count = 0
 
     for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
@@ -102,9 +136,16 @@ async def _terminate_orphaned_mcp_processes(psutil: psutil_type) -> int:
 
 
 async def _try_terminate_mcp_process(proc: psutil_type.Process, psutil: psutil_type) -> bool:
-    """Try to terminate a process if it's an MCP server process.
-
-    Returns True if the process was terminated, False otherwise.
+    """尝试终止进程（如果是MCP服务器进程）。
+    
+    关键路径（三步）：
+    1) 检查进程命令行是否包含'mcp-server'或'mcp-proxy'
+    2) 发送终止信号并等待进程结束
+    3) 如果超时则强制杀死进程
+    
+    异常流：无法访问或不存在的进程返回False
+    性能瓶颈：进程终止和等待操作
+    排障入口：检查进程是否被成功终止
     """
     try:
         cmdline = proc.cmdline()

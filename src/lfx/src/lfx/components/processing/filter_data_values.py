@@ -1,3 +1,10 @@
+"""Data 列表按值过滤组件。
+
+本模块根据指定键、值与比较操作符过滤 Data 列表。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：仅支持顶层键比较。
+"""
+
 from typing import Any
 
 from lfx.custom.custom_component.component import Component
@@ -6,6 +13,12 @@ from lfx.schema.data import Data
 
 
 class DataFilterComponent(Component):
+    """值过滤组件封装。
+
+    契约：输入为 Data 列表、过滤键与比较值；输出为过滤后的列表。
+    副作用：更新 `self.status`。
+    失败语义：输入为空时返回空列表并写入状态提示。
+    """
     display_name = "Filter Values"
     description = (
         "Filter a list of data items based on a specified key, filter value,"
@@ -48,6 +61,7 @@ class DataFilterComponent(Component):
     ]
 
     def compare_values(self, item_value: Any, filter_value: str, operator: str) -> bool:
+        """按操作符比较单个值。"""
         if operator == "equals":
             return str(item_value) == filter_value
         if operator == "not equals":
@@ -61,13 +75,12 @@ class DataFilterComponent(Component):
         return False
 
     def filter_data(self) -> list[Data]:
-        # Extract inputs
+        """执行过滤并返回结果列表。"""
         input_data: list[Data] = self.input_data
         filter_key: str = self.filter_key.text
         filter_value: str = self.filter_value.text
         operator: str = self.operator
 
-        # Validate inputs
         if not input_data:
             self.status = "Input data is empty."
             return []
@@ -76,7 +89,6 @@ class DataFilterComponent(Component):
             self.status = "Filter key or value is missing."
             return input_data
 
-        # Filter the data
         filtered_data = []
         for item in input_data:
             if isinstance(item.data, dict) and filter_key in item.data:

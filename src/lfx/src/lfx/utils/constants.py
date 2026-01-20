@@ -1,3 +1,16 @@
+"""模块名称：通用常量集合
+
+模块目的：集中维护跨模块复用的常量与枚举值。
+主要功能：
+- LLM 模型候选列表（用于 UI/配置校验）
+- 文档加载器元数据与文件类型映射
+- 消息发送方标识与扩展名到 MIME 的映射
+使用场景：前端选项渲染、配置校验、内容类型推断。
+关键组件：`OPENAI_MODELS`、`LOADERS_INFO`、`EXTENSION_TO_CONTENT_TYPE`
+设计背景：将分散的硬编码集中管理，降低组件间耦合。
+注意事项：模型列表变化频繁，更新时需同步 UI 选项与兼容性测试。
+"""
+
 from typing import Any
 
 OPENAI_MODELS = [
@@ -30,28 +43,28 @@ REASONING_OPENAI_MODELS = [
 ]
 
 ANTHROPIC_MODELS = [
-    # largest model, ideal for a wide range of more complex tasks.
+    # 最大模型，适合复杂任务的通用场景
     "claude-v1",
-    # An enhanced version of claude-v1 with a 100,000 token (roughly 75,000 word) context window.
+    # `claude-v1` 的扩展版本，提供 100,000 token（约 75,000 词）上下文
     "claude-v1-100k",
-    # A smaller model with far lower latency, sampling at roughly 40 words/sec!
+    # 低延迟小模型，约 40 词/秒采样
     "claude-instant-v1",
-    # Like claude-instant-v1 with a 100,000 token context window but retains its performance.
+    # `claude-instant-v1` 的 100,000 token 上下文版本
     "claude-instant-v1-100k",
-    # Specific sub-versions of the above models:
-    # Vs claude-v1.2: better instruction-following, code, and non-English dialogue and writing.
+    # 具体子版本
+    # 相比 claude-v1.2：更好的指令跟随、代码与非英文对话/写作
     "claude-v1.3",
-    # An enhanced version of claude-v1.3 with a 100,000 token (roughly 75,000 word) context window.
+    # `claude-v1.3` 的 100,000 token 上下文版本
     "claude-v1.3-100k",
-    # Vs claude-v1.1: small adv in general helpfulness, instruction following, coding, and other tasks.
+    # 相比 claude-v1.1：通用帮助性、指令跟随与编码能力小幅提升
     "claude-v1.2",
-    # An earlier version of claude-v1.
+    # `claude-v1` 的更早版本
     "claude-v1.0",
-    # Latest version of claude-instant-v1. Better than claude-instant-v1.0 at most tasks.
+    # `claude-instant-v1` 的最新版本
     "claude-instant-v1.1",
-    # Version of claude-instant-v1.1 with a 100K token context window.
+    # `claude-instant-v1.1` 的 100,000 token 上下文版本
     "claude-instant-v1.1-100k",
-    # An earlier version of claude-instant-v1.
+    # `claude-instant-v1` 的更早版本
     "claude-instant-v1.0",
 ]
 

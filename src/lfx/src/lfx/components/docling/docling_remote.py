@@ -1,3 +1,19 @@
+"""
+模块名称：docling_remote
+
+本模块提供 Docling Serve 远程处理组件，通过 HTTP API 转换文档。
+主要功能包括：
+- 上传文档并轮询异步任务状态
+- 解析返回的 DoclingDocument 并输出结果
+
+关键组件：
+- `DoclingRemoteComponent`：远程 Docling 处理组件
+
+设计背景：云环境或无本地依赖时需要远程文档处理
+使用场景：连接自建 Docling Serve 实例进行转换
+注意事项：需配置可访问的服务 URL 与可选认证头
+"""
+
 import base64
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -16,6 +32,17 @@ from lfx.utils.util import transform_localhost_url
 
 
 class DoclingRemoteComponent(BaseFileComponent):
+    """Docling Serve 远程处理组件。
+
+    契约：`api_url` 指向 Docling Serve 实例；输出与输入文件一一对应。
+    副作用：发起多次 HTTP 请求并轮询任务状态。
+    失败语义：HTTP 错误抛异常，处理失败返回 None。
+    决策：通过远程 Docling Serve 处理文档。
+    问题：云环境无法安装本地 OCR/Docling 依赖。
+    方案：调用远程服务完成解析与转换。
+    代价：受网络与服务可用性影响。
+    重评：当本地依赖可用或服务成本过高时。
+    """
     display_name = "Docling Serve"
     description = "Uses Docling to process input documents connecting to your instance of Docling Serve."
     documentation = "https://docling-project.github.io/docling/"
@@ -25,7 +52,7 @@ class DoclingRemoteComponent(BaseFileComponent):
 
     MAX_500_RETRIES = 5
 
-    # https://docling-project.github.io/docling/usage/supported_formats/
+    # 注意：支持格式列表参考 Docling 官方文档。
     VALID_EXTENSIONS = [
         "adoc",
         "asciidoc",
@@ -105,11 +132,36 @@ class DoclingRemoteComponent(BaseFileComponent):
     ]
 
     def process_files(self, file_list: list[BaseFileComponent.BaseFile]) -> list[BaseFileComponent.BaseFile]:
-        # Transform localhost URLs to container-accessible hosts when running in a container
+        """处理文件并通过 Docling Serve 返回结果。
+
+        契约：`file_list` 中需包含可读路径；输出与输入对齐。
+        副作用：发起远程转换请求并轮询任务状态。
+        失败语义：HTTP 异常会抛出；单个文件失败返回 None。
+        关键路径（三步）：
+        1) 规范化服务 URL 并构造基础地址。
+        2) 并发提交任务并轮询状态。
+        3) 解析 DoclingDocument 并回填结果。
+        异常流：状态轮询 5xx 超限、超时或 JSON 结构异常。
+        性能瓶颈：网络 RTT 与服务端解析耗时。
+        排障入口：日志 `Docling remote processing failed` 与超时信息。
+        决策：使用异步任务 + 轮询方式获取结果。
+        问题：文档解析耗时较长且需要异步处理。
+        方案：提交异步任务并定期查询状态。
+        代价：需要额外轮询请求与等待时间。
+        重评：当服务端支持回调或长连接推送时。
+        """
+        # 注意：容器内访问 localhost 需转换为可达地址。
         transformed_url = transform_localhost_url(self.api_url)
         base_url = f"{transformed_url}/v1"
 
         def _convert_document(client: httpx.Client, file_path: Path, options: dict[str, Any]) -> Data | None:
+            """提交单文件转换并轮询结果。
+
+            契约：返回 `Data` 或 `None`（失败/无结果）。
+            副作用：对 Docling Serve 发起多次 HTTP 请求。
+            失败语义：HTTP 状态异常抛出 `HTTPStatusError`。
+            性能瓶颈：轮询间隔与服务端任务耗时。
+            """
             encoded_doc = base64.b64encode(file_path.read_bytes()).decode()
             payload = {
                 "options": options,
@@ -125,7 +177,6 @@ class DoclingRemoteComponent(BaseFileComponent):
             retry_status_end = 600
             start_wait_time = time.monotonic()
             while task["task_status"] not in ("success", "failure"):
-                # Check if processing exceeds the maximum poll timeout
                 processing_time = time.monotonic() - start_wait_time
                 if processing_time >= self.max_poll_timeout:
                     msg = (
@@ -136,11 +187,9 @@ class DoclingRemoteComponent(BaseFileComponent):
                     self.log(msg)
                     raise RuntimeError(msg)
 
-                # Call for a new status update
                 time.sleep(2)
                 response = client.get(f"{base_url}/status/poll/{task['task_id']}")
 
-                # Check if the status call gets into 5xx errors and retry
                 if retry_status_start <= response.status_code < retry_status_end:
                     http_failures += 1
                     if http_failures > self.MAX_500_RETRIES:
@@ -148,7 +197,6 @@ class DoclingRemoteComponent(BaseFileComponent):
                         return None
                     continue
 
-                # Update task status
                 task = response.json()
 
             result_resp = client.get(f"{base_url}/result/{task['task_id']}")

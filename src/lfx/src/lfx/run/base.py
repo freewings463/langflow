@@ -1,4 +1,23 @@
-"""Core run functionality for executing Langflow graphs."""
+"""
+模块名称：CLI 运行入口（lfx run）
+
+模块目的：作为 Langflow 图的命令行执行入口，负责加载图、校验变量并输出结果。
+使用场景：通过 `lfx run` 执行脚本/JSON/stdin 形式的图并返回结构化输出。
+主要功能包括：
+- 解析输入源并加载 Graph
+- 注入全局变量并执行 `prepare()` 校验
+- 异步执行并按格式输出结果/日志/耗时
+
+关键组件：
+- `RunError`：统一运行异常封装
+- `run_flow`：核心执行流程
+- `output_error`：错误响应构造器
+
+设计背景：CLI 需要稳定的输入协议与可观测输出，降低排障成本。
+注意：verbose 输出统一写入 stderr，避免污染结构化输出。
+"""
+
+# 注意：护照用于迁移追溯/治理的元数据；下文注释聚焦于主体执行逻辑与排障信息。
 
 import json
 import re
@@ -17,13 +36,21 @@ from lfx.cli.validation import validate_global_variables_for_env
 from lfx.log.logger import logger
 from lfx.schema.schema import InputValueRequest
 
-# Verbosity level constants
-VERBOSITY_DETAILED = 2
-VERBOSITY_FULL = 3
+# 详细输出级别常量（与 CLI -v/-vv/-vvv 对齐）
+# 注意：使用常量避免魔法数字，便于维护与排障
+VERBOSITY_DETAILED = 2  # -vv 级别对应详细输出
+VERBOSITY_FULL = 3      # -vvv 级别对应完整输出
 
 
 class RunError(Exception):
-    """Exception raised when run execution fails."""
+    """运行失败时抛出，用于统一包装并保留底层异常。
+
+    契约：
+    - 输入：错误消息字符串和原始异常对象（可选）
+    - 输出：封装后的 RunError 实例
+    - 副作用：无
+    - 失败语义：构造时保存原始异常，便于上层处理
+    """
 
     def __init__(self, message: str, exception: Exception | None = None):
         super().__init__(message)
@@ -31,7 +58,16 @@ class RunError(Exception):
 
 
 def output_error(error_message: str, *, verbose: bool, exception: Exception | None = None) -> dict:
-    """Create error response dict and optionally print to stderr when verbose."""
+    """构造可序列化的错误响应。
+
+    契约：
+    - 输入：错误消息、详细输出标志、异常对象（可选）
+    - 输出：包含错误信息的字典
+    - 副作用：verbose=True 时将错误写入 stderr
+    - 失败语义：始终返回错误响应字典，不抛出异常
+
+    副作用：`verbose=True` 时会将同一错误写入 stderr（用于 CLI 交互排障）。
+    """
     if verbose:
         sys.stderr.write(f"{error_message}\n")
 
@@ -40,7 +76,7 @@ def output_error(error_message: str, *, verbose: bool, exception: Exception | No
         "type": "error",
     }
 
-    # Add clean exception data if available
+    # 如有异常对象，则补充可序列化的异常信息（便于 CLI/调用方展示）
     if exception:
         error_response["exception_type"] = type(exception).__name__
         error_response["exception_message"] = str(exception)
@@ -63,34 +99,21 @@ async def run_flow(
     verbose_detailed: bool = False,
     verbose_full: bool = False,
     timing: bool = False,
+
     global_variables: dict[str, str] | None = None,
 ) -> dict:
-    """Execute a Langflow graph script or JSON flow and return the result.
+    """执行 Langflow 流程并返回结构化结果（面向 `lfx run`）。
 
-    This function analyzes and executes either a Python script containing a Langflow graph,
-    a JSON flow file, inline JSON, or JSON from stdin, returning the result as a dict.
+    关键路径（三步）：
+    1) 解析唯一输入源并加载图（脚本/JSON/stdin）
+    2) 注入全局变量、`prepare()`，并可选执行变量兼容性校验
+    3) 异步执行并按 `output_format` 组装输出（可选 `logs`/`timing`）
 
-    Args:
-        script_path: Path to the Python script (.py) or JSON flow (.json) containing a graph
-        input_value: Input value to pass to the graph (positional argument)
-        input_value_option: Input value to pass to the graph (alternative option)
-        output_format: Format for output (json, text, message, or result)
-        flow_json: Inline JSON flow content as a string
-        stdin: Read JSON flow content from stdin
-        check_variables: Check global variables for environment compatibility
-        verbose: Show basic progress information
-        verbose_detailed: Show detailed progress and debug information
-        verbose_full: Show full debugging output including component logs
-        timing: Include detailed timing information in output
-        global_variables: Dict of global variables to inject into the graph context
-
-    Returns:
-        dict: Result data containing the execution results, logs, and optionally timing info
-
-    Raises:
-        RunError: If execution fails at any stage
+    异常流：输入源不合法、JSON 解析失败、加载/准备/执行异常均抛 `RunError`。
+    性能瓶颈：图执行本身；启用 `timing` 会额外汇总每步耗时。
+    排障入口：stderr 日志关键字 `Failed to load graph` / `Failed to execute graph`；json 输出字段 `logs`/`timing`。
     """
-    # Configure logger based on verbosity level
+    # 按详细级别配置日志（INFO/DEBUG/CRITICAL），并统一写入 stderr 以避免污染结构化输出
     from lfx.log.logger import configure
 
     if verbose_full:
@@ -108,10 +131,10 @@ async def run_flow(
 
     start_time = time.time() if timing else None
 
-    # Use either positional input_value or --input-value option
+    # 注意：同时支持位置参数与 --input-value，位置参数优先以兼容脚本化调用
     final_input_value = input_value or input_value_option
 
-    # Validate input sources - exactly one must be provided
+    # 注意：输入源强制三选一，避免 stdin/文件混用导致结果不可复现
     input_sources = [script_path is not None, flow_json is not None, bool(stdin)]
     if sum(input_sources) != 1:
         if sum(input_sources) == 0:
@@ -124,10 +147,11 @@ async def run_flow(
         output_error(error_msg, verbose=verbose)
         raise RunError(error_msg, None)
 
-    # Store parsed JSON dict for direct loading (avoids temp file round-trip)
     flow_dict: dict | None = None
 
     if flow_json is not None:
+        # 实现：内联 JSON 统一走 json.loads -> dict -> aload_flow_from_json
+        # 注意：避免临时文件 I/O 与清理问题；stdin/内联共享 JSONDecodeError 路径便于排障
         if verbosity > 0:
             sys.stderr.write("Processing inline JSON content...\n")
         try:
@@ -143,6 +167,7 @@ async def run_flow(
             output_error(error_msg, verbose=verbose)
             raise RunError(error_msg, e) from e
     elif stdin:
+        # 注意：stdin 读取到空字符串是常见误用；这里显式报错，避免"静默成功但无结果"
         if verbosity > 0:
             sys.stderr.write("Reading JSON content from stdin...\n")
         try:
@@ -164,14 +189,12 @@ async def run_flow(
             raise RunError(error_msg, e) from e
 
     try:
-        # Handle direct JSON dict (from stdin or --flow-json)
         if flow_dict is not None:
             if verbosity > 0:
                 sys.stderr.write("Loading graph from JSON content...\n")
             from lfx.load import aload_flow_from_json
 
             graph = await aload_flow_from_json(flow_dict, disable_logs=not verbose)
-        # Handle file path
         elif script_path is not None:
             if not script_path.exists():
                 error_msg = f"File '{script_path}' does not exist."
@@ -200,7 +223,7 @@ async def run_flow(
                     sys.stderr.write(f"Source: {graph_info['source_line']}\n")
                     sys.stderr.write("Loading and executing script...\n")
                 graph = await load_graph_from_script(script_path)
-            else:  # .json file
+            else:  # .json 文件
                 if verbosity > 0:
                     sys.stderr.write("Valid JSON flow file detected\n")
                     sys.stderr.write("Loading and executing JSON flow\n")
@@ -211,13 +234,13 @@ async def run_flow(
             error_msg = "No input source provided"
             raise ValueError(error_msg)
 
-        # Inject global variables into graph context
+        # 安全：全局变量可能包含敏感值；仅注入到上下文且只记录 key，不记录 value
         if global_variables:
             if "request_variables" not in graph.context:
                 graph.context["request_variables"] = {}
             graph.context["request_variables"].update(global_variables)
             if verbosity > 0:
-                # Log keys only to avoid leaking sensitive data
+                # 仅记录 key，避免在日志中泄露敏感 value
                 logger.info(f"Injected global variables: {list(global_variables.keys())}")
 
     except Exception as e:
@@ -225,7 +248,7 @@ async def run_flow(
         logger.error(f"Graph loading failed with {error_type}")
 
         if verbosity > 0:
-            # Try to identify common error patterns
+            # 排障：对常见导入/依赖问题给出更可操作的提示（否则用户只能看到一个 ImportError）
             if "ModuleNotFoundError" in str(e) or "No module named" in str(e):
                 logger.info("This appears to be a missing dependency issue")
                 if "langchain" in str(e).lower():
@@ -240,7 +263,7 @@ async def run_flow(
             elif "AttributeError" in str(e):
                 logger.info("This appears to be a component configuration issue")
 
-            # Show full traceback in debug mode
+            # 排障：verbose 模式下输出 traceback，便于定位根因（脚本导入副作用/依赖缺失等）
             logger.exception("Failed to load graph.")
 
         error_msg = f"Failed to load graph. {e}"
@@ -249,18 +272,17 @@ async def run_flow(
 
     inputs = InputValueRequest(input_value=final_input_value) if final_input_value else None
 
-    # Mark end of loading phase if timing
+    # 若启用 timing，记录加载阶段结束时间
     load_end_time = time.time() if timing else None
 
     if verbosity > 0:
         sys.stderr.write("Preparing graph for execution...\n")
     try:
-        # Add detailed preparation steps
+        # 排障：详细模式下输出图结构概览，便于定位"缺组件/连线错误/环境差异"
         if verbosity > 0:
             logger.debug(f"Graph contains {len(graph.vertices)} vertices")
             logger.debug(f"Graph contains {len(graph.edges)} edges")
 
-            # Show component types being used
             component_types = set()
             for vertex in graph.vertices:
                 if hasattr(vertex, "display_name"):
@@ -270,7 +292,7 @@ async def run_flow(
         graph.prepare()
         logger.info("Graph preparation completed")
 
-        # Validate global variables for environment compatibility
+        # 注意：默认在执行前做变量兼容性校验，提前暴露配置问题
         if check_variables:
             logger.info("Validating global variables...")
             validation_errors = validate_global_variables_for_env(graph)
@@ -312,20 +334,22 @@ async def run_flow(
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 
-    # Track component timing if requested
+    # 注意：`timing=True` 会额外记录每步耗时与组件信息；用于粗粒度定位，不保证绝对精度
     component_timings = [] if timing else None
     execution_step_start = execution_start_time if timing else None
     result_count = 0
 
     try:
         sys.stdout = captured_stdout
-        # Don't capture stderr at high verbosity levels to avoid duplication with direct logging
+        # 注意：-vvv 时不捕获 stderr，避免与 logger 直出重复/错序
         if verbosity < VERBOSITY_FULL:
             sys.stderr = captured_stderr
         results = []
 
         logger.info("Starting graph execution...", level="DEBUG")
 
+        # 实现：`graph.async_start(inputs)` 为异步迭代器，会逐步产出执行结果事件。
+        # 注意：收集 `results` 便于输出聚合与异常统计，但长流程会占用更多内存。
         async for result in graph.async_start(inputs):
             result_count += 1
             if verbosity > 0:
@@ -336,7 +360,6 @@ async def run_flow(
                 step_end_time = time.time()
                 step_duration = step_end_time - execution_step_start
 
-                # Extract component information
                 if hasattr(result, "vertex"):
                     component_name = getattr(result.vertex, "display_name", "Unknown")
                     component_id = getattr(result.vertex, "id", "Unknown")
@@ -359,20 +382,16 @@ async def run_flow(
         error_type = type(e).__name__
         logger.info(f"Graph execution failed with {error_type}")
 
-        if verbosity >= VERBOSITY_DETAILED:  # Only show details at -vv and above
+        if verbosity >= VERBOSITY_DETAILED:  # 仅在 -vv 及以上输出更多细节
             logger.debug(f"Failed after processing {result_count} results")
 
-        # Only show component output at maximum verbosity (-vvv)
+        # 排障：仅在 -vvv 回放组件输出，并尽量去重/去时间戳，避免把噪声写入结构化输出
         if verbosity >= VERBOSITY_FULL:
-            # Capture any output that was generated before the error
-            # Only show captured stdout since stderr logging is already shown directly in verbose mode
             captured_content = captured_stdout.getvalue()
             if captured_content.strip():
-                # Check if captured content contains the same error that will be displayed at the end
                 error_text = str(e)
                 captured_lines = captured_content.strip().split("\n")
 
-                # Filter out lines that are duplicates of the final error message
                 unique_lines = [
                     line
                     for line in captured_lines
@@ -384,18 +403,15 @@ async def run_flow(
                 if unique_lines:
                     logger.info("Component output before error:", level="DEBUG")
                     for line in unique_lines:
-                        # Log each line directly using the logger to avoid nested formatting
                         if verbosity > 0:
-                            # Remove any existing timestamp prefix to avoid duplication
                             clean_line = line
                             if "] " in line and line.startswith("2025-"):
-                                # Extract just the log message after the timestamp and level
                                 parts = line.split("] ", 1)
                                 if len(parts) > 1:
                                     clean_line = parts[1]
                             logger.debug(clean_line)
 
-            # Provide context about common execution errors
+            # 排障：针对常见执行错误补充提示（降低排障成本）
             if "list can't be used in 'await' expression" in str(e):
                 logger.info("This appears to be an async/await mismatch in a component")
                 logger.info("Check that async methods are properly awaited")
@@ -421,7 +437,7 @@ async def run_flow(
 
     captured_logs = captured_stdout.getvalue() + captured_stderr.getvalue()
 
-    # Create timing metadata if requested
+    # 排障：`timing` 作为轻量观测点，帮助快速定位"慢在加载/准备/执行/哪个组件"
     timing_metadata = None
     if timing:
         load_duration = load_end_time - start_time
@@ -443,7 +459,8 @@ async def run_flow(
             ],
         }
 
-    # Build result based on output format
+    # 实现：统一通过 `extract_structured_result(results)` 聚合结果，再按 `output_format` 映射输出。
+    # 注意：聚合模式避免分叉实现；流式输出不在当前契约内。
     if output_format == "json":
         result_data = extract_structured_result(results)
         result_data["logs"] = captured_logs
@@ -456,7 +473,7 @@ async def run_flow(
         return {"output": str(output_text), "format": output_format}
     if output_format == "result":
         return {"output": extract_text_from_result(results), "format": "result"}
-    # Default case
+    # 默认兜底：回到结构化输出（兼容未知 output_format）
     result_data = extract_structured_result(results)
     result_data["logs"] = captured_logs
     if timing_metadata:

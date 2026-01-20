@@ -1,4 +1,14 @@
-"""Service interface protocols for lfx package."""
+"""
+模块名称：服务接口协议
+
+本模块定义各服务的协议接口，供类型检查与依赖注入使用。
+主要功能包括：
+- 声明数据库/存储/缓存等服务的最小接口
+- 支持运行时协议检查与静态类型提示
+
+设计背景：解耦服务实现与调用方，提高可替换性。
+注意事项：协议仅约束接口，不提供实现。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +20,7 @@ if TYPE_CHECKING:
 
 
 class DatabaseServiceProtocol(Protocol):
-    """Protocol for database service."""
+    """数据库服务协议。"""
 
     @abstractmethod
     def with_session(self) -> Any:
@@ -19,7 +29,7 @@ class DatabaseServiceProtocol(Protocol):
 
 
 class StorageServiceProtocol(Protocol):
-    """Protocol for storage service."""
+    """存储服务协议。"""
 
     @abstractmethod
     def save(self, data: Any, filename: str) -> str:
@@ -48,7 +58,7 @@ class StorageServiceProtocol(Protocol):
 
 
 class SettingsServiceProtocol(Protocol):
-    """Protocol for settings service."""
+    """设置服务协议。"""
 
     @property
     @abstractmethod
@@ -58,7 +68,7 @@ class SettingsServiceProtocol(Protocol):
 
 
 class VariableServiceProtocol(Protocol):
-    """Protocol for variable service."""
+    """变量服务协议。"""
 
     @abstractmethod
     def get_variable(self, name: str, **kwargs) -> Any:
@@ -72,7 +82,7 @@ class VariableServiceProtocol(Protocol):
 
 
 class CacheServiceProtocol(Protocol):
-    """Protocol for cache service."""
+    """缓存服务协议。"""
 
     @abstractmethod
     def get(self, key: str) -> Any:
@@ -86,7 +96,7 @@ class CacheServiceProtocol(Protocol):
 
 
 class ChatServiceProtocol(Protocol):
-    """Protocol for chat service."""
+    """聊天服务协议。"""
 
     @abstractmethod
     async def get_cache(self, key: str, lock: asyncio.Lock | None = None) -> Any:
@@ -100,7 +110,7 @@ class ChatServiceProtocol(Protocol):
 
 
 class TracingServiceProtocol(Protocol):
-    """Protocol for tracing service."""
+    """链路追踪服务协议。"""
 
     @abstractmethod
     def log(self, message: str, **kwargs) -> None:
@@ -110,10 +120,9 @@ class TracingServiceProtocol(Protocol):
 
 @runtime_checkable
 class TransactionServiceProtocol(Protocol):
-    """Protocol for transaction logging service.
+    """事务日志服务协议。
 
-    This service handles logging of component execution transactions,
-    tracking inputs, outputs, and status of each vertex build.
+    契约：提供交易记录与启用状态查询接口。
     """
 
     @abstractmethod
@@ -127,24 +136,10 @@ class TransactionServiceProtocol(Protocol):
         target_id: str | None = None,
         error: str | None = None,
     ) -> None:
-        """Log a transaction record for a vertex execution.
-
-        Args:
-            flow_id: The flow ID (as string)
-            vertex_id: The vertex/component ID
-            inputs: Input parameters for the component
-            outputs: Output results from the component
-            status: Execution status (success/error)
-            target_id: Optional target vertex ID
-            error: Optional error message
-        """
+        """记录一次组件执行事务。"""
         ...
 
     @abstractmethod
     def is_enabled(self) -> bool:
-        """Check if transaction logging is enabled.
-
-        Returns:
-            True if transaction logging is enabled, False otherwise.
-        """
+        """判断事务日志是否启用。"""
         ...

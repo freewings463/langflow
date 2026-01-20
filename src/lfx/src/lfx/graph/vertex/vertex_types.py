@@ -1,3 +1,22 @@
+"""
+模块名称：Vertex 类型实现
+
+模块目的：提供不同节点类型的具体行为（组件节点、接口节点、状态节点）。
+使用场景：根据节点类型定制构建结果、消息提取与流式输出。
+主要功能包括：
+- 自定义组件节点与普通组件节点
+- 接口节点的消息/流式处理
+- 状态节点的简化构建流程
+
+关键组件：
+- `ComponentVertex` / `CustomComponentVertex`
+- `InterfaceVertex`
+- `StateVertex`
+
+设计背景：不同节点类型需要差异化的结果包装与工件处理逻辑。
+注意：接口节点包含流式处理与持久化副作用，修改需关注兼容性。
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -29,37 +48,47 @@ if TYPE_CHECKING:
 
 
 class CustomComponentVertex(Vertex):
+    """自定义组件节点。"""
+
     def __init__(self, data: NodeData, graph):
+        """初始化自定义组件节点。"""
         super().__init__(data, graph=graph, base_type="custom_components")
 
     def built_object_repr(self):
+        """优先返回工件中的自定义展示文本。"""
         if self.artifacts and "repr" in self.artifacts:
             return self.artifacts["repr"] or super().built_object_repr()
         return None
 
 
 class ComponentVertex(Vertex):
+    """普通组件节点。"""
+
     def __init__(self, data: NodeData, graph):
+        """初始化普通组件节点。"""
         super().__init__(data, graph=graph, base_type="component")
 
     def get_input(self, name: str) -> InputTypes:
+        """获取组件输入定义。"""
         if self.custom_component is None:
             msg = f"Vertex {self.id} does not have a component instance."
             raise ValueError(msg)
         return self.custom_component.get_input(name)
 
     def get_output(self, name: str) -> Output:
+        """获取组件输出定义。"""
         if self.custom_component is None:
             raise NoComponentInstanceError(self.id)
         return self.custom_component.get_output(name)
 
     def built_object_repr(self):
+        """优先返回工件中的自定义展示文本。"""
         if self.artifacts and "repr" in self.artifacts:
             return self.artifacts["repr"] or super().built_object_repr()
         return None
 
     def _update_built_object_and_artifacts(self, result) -> None:
-        """Updates the built object and its artifacts."""
+        """更新构建对象与工件，并写入节点结果。"""
         if isinstance(result, tuple):
             if len(result) == 2:  # noqa: PLR2004
                 self.built_object, self.artifacts = result
@@ -78,30 +107,16 @@ class ComponentVertex(Vertex):
             self.add_result(key, value)
 
     def get_edge_with_target(self, target_id: str) -> Generator[CycleEdge]:
-        """Get the edge with the target id.
-
-        Args:
-            target_id: The target id of the edge.
-
-        Returns:
-            The edge with the target id.
-        """
+        """返回目标节点的边生成器。"""
         for edge in self.edges:
             if edge.target_id == target_id:
                 yield edge
 
     async def _get_result(self, requester: Vertex, target_handle_name: str | None = None) -> Any:
-        """Retrieves the result of the built component.
-
-        If the component has not been built yet, a ValueError is raised.
-
-        Returns:
-            The built result if use_result is True, else the built object.
-        """
+        """获取构建结果（含未构建默认值逻辑）。"""
         if not self.built:
             default_value: Any = UNDEFINED
             for edge in self.get_edge_with_target(requester.id):
-                # We need to check if the edge is a normal edge
                 if edge.is_cycle and edge.target_param:
                     if edge.target_param in requester.output_names:
                         default_value = None
@@ -125,7 +140,6 @@ class ComponentVertex(Vertex):
                 and edge.source_handle.name in self.results
                 and edge.target_handle.field_name == target_handle_name
             ):
-                # Get the result from the output instead of the results dict
                 try:
                     output = self.get_output(edge.source_handle.name)
 
@@ -148,14 +162,7 @@ class ComponentVertex(Vertex):
         return result
 
     def extract_messages_from_artifacts(self, artifacts: dict[str, Any]) -> list[dict]:
-        """Extracts messages from the artifacts.
-
-        Args:
-            artifacts (Dict[str, Any]): The artifacts to extract messages from.
-
-        Returns:
-            List[str]: The extracted messages.
-        """
+        """从工件字典中抽取消息列表。"""
         messages = []
         for key, artifact in artifacts.items():
             if any(
@@ -183,9 +190,8 @@ class ComponentVertex(Vertex):
         return messages
 
     def finalize_build(self) -> None:
+        """封装 ResultData 并写入节点结果。"""
         result_dict = self.get_built_result()
-        # We need to set the artifacts to pass information
-        # to the frontend
         messages = self.extract_messages_from_artifacts(result_dict)
         result_dict = ResultData(
             results=result_dict,
@@ -200,22 +206,26 @@ class ComponentVertex(Vertex):
 
 
 class InterfaceVertex(ComponentVertex):
+    """接口类节点，负责消息与流式输出处理。"""
+
     def __init__(self, data: NodeData, graph):
+        """初始化接口节点并调整构建步骤。"""
         super().__init__(data, graph=graph)
         self.added_message = None
         self.steps = [self._build, self._run]
         self.is_interface_component = True
 
     def build_stream_url(self) -> str:
+        """生成流式输出 URL。"""
         return f"/api/v1/build/{self.graph.flow_id}/{self.id}/stream"
 
     def built_object_repr(self):
+        """返回接口节点的可读展示文本。"""
         if self.task_id and self.is_task:
             if task := self.get_task():
                 return str(task.info)
             return f"Task {self.task_id} is not running"
         if self.artifacts:
-            # dump as a yaml string
             if isinstance(self.artifacts, dict):
                 artifacts_ = [self.artifacts]
             elif hasattr(self.artifacts, "data"):
@@ -224,34 +234,20 @@ class InterfaceVertex(ComponentVertex):
                 artifacts_ = self.artifacts
             artifacts = []
             for artifact in artifacts_:
-                # artifacts = {k.title().replace("_", " "): v for k, v in self.artifacts.items() if v is not None}
                 artifact_ = {k.title().replace("_", " "): v for k, v in artifact.items() if v is not None}
                 artifacts.append(artifact_)
             return yaml.dump(artifacts, default_flow_style=False, allow_unicode=True)
         return super().built_object_repr()
 
     def _process_chat_component(self):
-        """Process the chat component and return the message.
+        """处理聊天组件输出并生成消息工件。
 
-        This method processes the chat component by extracting the necessary parameters
-        such as sender, sender_name, and message from the `params` dictionary. It then
-        performs additional operations based on the type of the `built_object` attribute.
-        If `built_object` is an instance of `AIMessage`, it creates a `ChatOutputResponse`
-        object using the `from_message` method. If `built_object` is not an instance of
-        `UnbuiltObject`, it checks the type of `built_object` and performs specific
-        operations accordingly. If `built_object` is a dictionary, it converts it into a
-        code block. If `built_object` is an instance of `Data`, it assigns the `text`
-        attribute to the `message` variable. If `message` is an instance of `AsyncIterator`
-        or `Iterator`, it builds a stream URL and sets `message` to an empty string. If
-        `built_object` is not a string, it converts it to a string. If `message` is a
-        generator or iterator, it assigns it to the `message` variable. Finally, it creates
-        a `ChatOutputResponse` object using the extracted parameters and assigns it to the
-        `artifacts` attribute. If `artifacts` is not None, it calls the `model_dump` method
-        on it and assigns the result to the `artifacts` attribute. It then returns the
-        `message` variable.
+        关键路径（三步）：
+        1) 从参数中提取 sender/sender_name/消息与文件
+        2) 根据输出类型构建 message 与 artifacts
+        3) 回填 `self.artifacts` 并返回消息文本
 
-        Returns:
-            str: The processed message.
+        注意：当输出为迭代器时启用流式 URL。
         """
         artifacts = None
         sender = self.params.get("sender", None)
@@ -279,8 +275,6 @@ class InterfaceVertex(ComponentVertex):
             )
         elif not isinstance(text_output, UnbuiltObject):
             if isinstance(text_output, dict):
-                # Turn the dict into a pleasing to
-                # read JSON inside a code block
                 message = dict_to_codeblock(text_output)
             elif isinstance(text_output, Data):
                 message = text_output.text
@@ -292,9 +286,6 @@ class InterfaceVertex(ComponentVertex):
                 self.built_object = self.results
             elif not isinstance(text_output, str):
                 message = str(text_output)
-            # if the message is a generator or iterator
-            # it means that it is a stream of messages
-
             else:
                 message = text_output
 
@@ -318,23 +309,10 @@ class InterfaceVertex(ComponentVertex):
         return message
 
     def _process_data_component(self):
-        """Process the record component of the vertex.
+        """处理记录类组件输出并生成数据工件。
 
-        If the built object is an instance of `Data`, it calls the `model_dump` method
-        and assigns the result to the `artifacts` attribute.
-
-        If the built object is a list, it iterates over each element and checks if it is
-        an instance of `Data`. If it is, it calls the `model_dump` method and appends
-        the result to the `artifacts` list. If it is not, it raises a `ValueError` if the
-        `ignore_errors` parameter is set to `False`, or logs an error message if it is set
-        to `True`.
-
-        Returns:
-            The built object.
-
-        Raises:
-            ValueError: If an element in the list is not an instance of `Data` and
-                `ignore_errors` is set to `False`.
+        契约：输出 `Data` 或 `list[Data]`，否则按 `ignore_errors` 处理。
+        异常流：非 Data 且未忽略错误时抛 `ValueError`。
         """
         if isinstance(self.built_object, Data):
             artifacts = [self.built_object.data]
@@ -353,6 +331,7 @@ class InterfaceVertex(ComponentVertex):
         return self.built_object
 
     async def _run(self, *args, **kwargs) -> None:  # noqa: ARG002
+        """接口节点的后处理阶段。"""
         if self.vertex_type in CHAT_COMPONENTS:
             message = self._process_chat_component()
         elif self.vertex_type in RECORDS_COMPONENTS:
@@ -365,6 +344,7 @@ class InterfaceVertex(ComponentVertex):
         self.built_result = self.built_object
 
     async def stream(self):
+        """消费消息流并生成最终 Message 与工件。"""
         iterator = self.params.get(INPUT_FIELD_NAME, None)
         if not isinstance(iterator, AsyncIterator | Iterator):
             msg = "The message must be an iterator or an async iterator."
@@ -419,11 +399,8 @@ class InterfaceVertex(ComponentVertex):
             self.built_object = message
             self.artifacts_type = ArtifactType.MESSAGE
 
-        # Update artifacts with the message
-        # and remove the stream_url
         self.finalize_build()
         await logger.adebug(f"Streamed message: {complete_message}")
-        # Set the result in the vertex of origin
         edges = self.get_edge_with_target(self.id)
         for edge in edges:
             origin_vertex = self.graph.get_vertex(edge.source_id)
@@ -449,36 +426,32 @@ class InterfaceVertex(ComponentVertex):
         self.built = True
 
     async def consume_async_generator(self) -> None:
+        """消费异步生成器，触发流式处理完成。"""
         async for _ in self.stream():
             pass
 
     def _is_chat_input(self):
+        """判断是否为 ChatInput 接口节点。"""
         return self.vertex_type == InterfaceComponentTypes.ChatInput and self.is_input
 
 
 class StateVertex(ComponentVertex):
+    """状态节点，负责保存状态型组件结果。"""
     def __init__(self, data: NodeData, graph):
-        """Initializes a StateVertex with the provided node data and graph.
-
-        Sets up the build steps and marks the vertex as a state vertex.
-        """
+        """初始化状态节点并设置构建步骤。"""
         super().__init__(data, graph=graph)
         self.steps = [self._build]
         self.is_state = True
 
     def built_object_repr(self):
-        """Returns a string representation of the built object from the artifacts if available.
-
-        If the artifacts dictionary contains a non-empty "repr" key, its value is returned.
-        If the "repr" value is falsy, falls back to the superclass representation.
-        Returns None if no representation is available.
-        """
+        """优先返回工件中的展示文本。"""
         if self.artifacts and "repr" in self.artifacts:
             return self.artifacts["repr"] or super().built_object_repr()
         return None
 
 
 def dict_to_codeblock(d: dict) -> str:
+    """将字典序列化为 JSON 代码块字符串。"""
     serialized = {key: serialize(val) for key, val in d.items()}
     json_str = json.dumps(serialized, indent=4)
     return f"```json\n{json_str}\n```"

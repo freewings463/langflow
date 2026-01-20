@@ -1,3 +1,18 @@
+"""
+模块名称：`SQL` 执行组件
+
+本模块提供 `SQLAlchemy` 兼容数据库的查询执行能力，并输出 `Message` 或 `DataFrame`。
+主要功能包括：
+- 连接数据库并复用缓存连接
+- 执行 `SQL` 查询并返回结果
+
+关键组件：
+- `SQLComponent`
+
+设计背景：统一数据库查询入口以便组件化使用。
+注意事项：连接失败或查询错误会抛 `ValueError`，可通过日志排障。
+"""
+
 from typing import TYPE_CHECKING, Any
 
 from langchain_community.utilities import SQLDatabase
@@ -14,7 +29,14 @@ if TYPE_CHECKING:
 
 
 class SQLComponent(ComponentWithCache):
-    """A sql component."""
+    """`SQL` 数据库查询组件
+
+    契约：
+    - 输入：数据库连接串与查询语句
+    - 输出：`Message` 或 `DataFrame`
+    - 副作用：可能建立数据库连接并写入缓存
+    - 失败语义：连接或查询失败时抛 `ValueError`
+    """
 
     display_name = "SQL Database"
     description = "Executes SQL queries on SQLAlchemy-compatible databases."
@@ -28,6 +50,14 @@ class SQLComponent(ComponentWithCache):
         self.db: SQLDatabase = None
 
     def maybe_create_db(self):
+        """按需创建数据库连接并缓存
+
+        契约：
+        - 输入：无
+        - 输出：无
+        - 副作用：初始化 `self.db` 并更新缓存
+        - 失败语义：连接失败时抛 `ValueError`
+        """
         if self.database_url != "":
             if self._shared_component_cache:
                 cached_db = self._shared_component_cache.get(self.database_url)
@@ -64,6 +94,14 @@ class SQLComponent(ComponentWithCache):
     def build_component(
         self,
     ) -> Message:
+        """执行查询并返回文本结果
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`Message`
+        - 副作用：更新 `self.status`
+        - 失败语义：查询失败时返回错误信息
+        """
         error = None
         self.maybe_create_db()
         try:
@@ -79,12 +117,20 @@ class SQLComponent(ComponentWithCache):
         if self.add_error and error is not None:
             result = f"{result}\n\nError: {error}\n\nQuery: {self.query}"
         elif error is not None:
-            # Then we won't add the error to the result
+            # 注意：不追加错误信息时仅返回原查询
             result = self.query
 
         return Message(text=result)
 
     def __execute_query(self) -> list[dict[str, Any]]:
+        """执行查询并返回行字典列表
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：字典列表
+        - 副作用：可能建立数据库连接
+        - 失败语义：查询失败时抛 `ValueError`
+        """
         self.maybe_create_db()
         try:
             cursor: Result[Any] = self.db.run(self.query, fetch="cursor")
@@ -95,6 +141,14 @@ class SQLComponent(ComponentWithCache):
             raise ValueError(msg) from e
 
     def run_sql_query(self) -> DataFrame:
+        """执行查询并返回 `DataFrame`
+
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`DataFrame`
+        - 副作用：更新 `self.status`
+        - 失败语义：查询失败时抛 `ValueError`
+        """
         result = self.__execute_query()
         df_result = DataFrame(result)
         self.status = df_result

@@ -1,9 +1,32 @@
+"""
+模块名称：JigsawStack 图像生成组件
+
+本模块封装 JigsawStack 图像生成能力，基于文本提示词生成图片并返回结果链接。
+主要功能包括：
+- 输入校验（提示词长度、分辨率范围、步数范围、比例枚举）
+- 请求参数组装（包含高级参数）
+- 失败语义统一处理
+
+关键组件：
+- JigsawStackImageGenerationComponent：图像生成组件入口
+
+设计背景：为 Langflow 提供标准化的图片生成能力。
+注意事项：生成结果默认返回 `url`，需要可访问的网络环境。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import DropdownInput, IntInput, MessageTextInput, Output, SecretStrInput
 from lfx.schema.data import Data
 
 
 class JigsawStackImageGenerationComponent(Component):
+    """JigsawStack 图像生成组件封装。
+
+    契约：输入由 `inputs` 定义；输出 `Data`，其中包含生成结果。
+    副作用：触发外部模型生成并产生网络请求。
+    失败语义：参数不合法抛 `ValueError`；SDK 异常返回失败 `Data`。
+    """
+
     display_name = "Image Generation"
     description = "Generate an image based on the given text by employing AI models like Flux, \
         Stable Diffusion, and other top models."
@@ -109,6 +132,18 @@ class JigsawStackImageGenerationComponent(Component):
     ]
 
     def generate_image(self) -> Data:
+        """生成图像并返回响应。
+
+        契约：输入为提示词与可选图像参数，输出为 `Data`。
+        副作用：触发模型生成与网络请求。
+        失败语义：参数非法抛 `ValueError`；SDK 异常返回失败 `Data`。
+
+        关键路径（三步）：
+        1) 校验文本长度、尺寸、步数与比例；
+        2) 组装参数（包含 `advance_config`）；
+        3) 调用 `client.image_generation` 并校验 `url`。
+
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -180,7 +215,7 @@ class JigsawStackImageGenerationComponent(Component):
             if self.steps:
                 params["steps"] = self.steps
 
-            # Initialize advance_config if any advanced parameters are provided
+            # 实现：仅在高级参数存在时创建 `advance_config`
             if self.negative_prompt or self.seed or self.guidance:
                 params["advance_config"] = {}
             if self.negative_prompt:
@@ -190,7 +225,7 @@ class JigsawStackImageGenerationComponent(Component):
             if self.guidance:
                 params["advance_config"]["guidance"] = self.guidance
 
-            # Call image generation
+            # 实现：调用 JigsawStack 图像生成接口
             response = client.image_generation(params)
 
             if response.get("url", None) is None or response.get("url", None).strip() == "":

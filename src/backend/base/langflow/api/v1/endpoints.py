@@ -1,3 +1,15 @@
+"""
+模块名称：通用运行与组件接口
+
+本模块提供简化运行、组件构建与版本信息等通用 API。
+主要功能：
+- 解析请求并运行流程
+- 处理自定义组件构建与更新
+- 返回版本与配置相关信息
+设计背景：集中承载通用运行入口与工具接口。
+注意事项：输入校验与异常统一转为 4xx/5xx。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -101,6 +113,10 @@ async def get_all():
 
 
 def validate_input_and_tweaks(input_request: SimplifiedAPIRequest) -> None:
+    """校验输入值与 `tweaks` 的冲突关系。
+
+    失败语义：冲突时抛 `InvalidChatInputError`。
+    """
     # If the input_value is not None and the input_type is "chat"
     # then we need to check the tweaks if the ChatInput component is present
     # and if its input_value is not None
@@ -142,6 +158,13 @@ async def simple_run_flow(
     context: dict | None = None,
     run_id: str | None = None,
 ):
+    """执行流程并返回简化运行结果。
+
+    契约：
+    - 输入：`flow` 与 `SimplifiedAPIRequest`
+    - 输出：`RunResponse`
+    - 失败语义：SQL 语句异常转换为 `ValueError`
+    """
     validate_input_and_tweaks(input_request)
     try:
         task_result: list[RunOutputs] = []
@@ -864,9 +887,10 @@ async def create_upload_file(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-# get endpoint to return version of langflow
+# 实现：返回 Langflow 版本信息。
 @router.get("/version")
 async def get_version():
+    """获取服务版本信息。"""
     return get_version_info()
 
 
@@ -875,6 +899,7 @@ async def custom_component(
     raw_code: CustomComponentRequest,
     user: CurrentActiveUser,
 ) -> CustomComponentResponse:
+    """创建自定义组件并返回构建结果。"""
     component = Component(_code=raw_code.code)
 
     built_frontend_node, component_instance = build_custom_component_template(component, user_id=user.id)

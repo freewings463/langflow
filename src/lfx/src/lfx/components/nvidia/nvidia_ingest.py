@@ -1,3 +1,14 @@
+"""NVIDIA Retriever Extraction 组件。
+
+本模块对接 NVIDIA NeMo Retriever Extraction（nv-ingest），从文档中抽取文本/表格/图片。
+主要功能包括：
+- 校验输入文件与 Base URL
+- 调用 nv-ingest 进行多模态抽取与可选文本切分
+- 将抽取结果整理为 Langflow `Data` 并回填到文件对象
+
+注意事项：依赖 nv-ingest 可选依赖，且高分辨率模式仅支持 PDF。
+"""
+
 from urllib.parse import urlparse
 
 from pypdf import PdfReader
@@ -8,6 +19,13 @@ from lfx.schema.data import Data
 
 
 class NvidiaIngestComponent(BaseFileComponent):
+    """NVIDIA Retriever Extraction 组件封装。
+
+    契约：输入为文件列表与抽取参数；输出为处理后的文件列表。
+    副作用：调用外部抽取服务并记录日志。
+    失败语义：依赖缺失抛 `ImportError`；参数或文件非法抛 `ValueError`。
+    """
+
     display_name = "NVIDIA Retriever Extraction"
     description = "Multi-modal data extraction from documents using NVIDIA's NeMo API."
     documentation: str = "https://docs.nvidia.com/nemo/retriever/extraction/overview/"
@@ -17,7 +35,7 @@ class NvidiaIngestComponent(BaseFileComponent):
     try:
         from nv_ingest_client.util.file_processing.extract import EXTENSION_TO_DOCUMENT_TYPE
 
-        # Supported file extensions from https://github.com/NVIDIA/nv-ingest/blob/main/README.md
+        # 注意：支持的文件类型以 nv-ingest 文档为准
         VALID_EXTENSIONS = ["pdf", "docx", "pptx", "jpeg", "png", "svg", "tiff", "txt"]
     except ImportError:
         msg = (
@@ -78,7 +96,7 @@ class NvidiaIngestComponent(BaseFileComponent):
                 "Support for 'block', 'line', 'span' varies by document type."
             ),
             options=["document", "page", "block", "line", "span"],
-            value="page",  # Default value
+            value="page",  # 默认值
             advanced=True,
         ),
         BoolInput(
@@ -158,6 +176,17 @@ class NvidiaIngestComponent(BaseFileComponent):
     ]
 
     def process_files(self, file_list: list[BaseFileComponent.BaseFile]) -> list[BaseFileComponent.BaseFile]:
+        """执行多模态抽取并回填数据。
+
+        契约：输入为 `BaseFile` 列表；输出为带 `Data` 的文件列表。
+        副作用：触发外部服务调用并写入日志。
+        失败语义：依赖缺失抛 `ImportError`；无文件/无效 URL/非 PDF 抛 `ValueError`。
+
+        关键路径（三步）：
+        1) 校验文件与 Base URL；
+        2) 构建 `Ingestor` 并按选项链式处理；
+        3) 将抽取结果转换为 `Data` 并合并到文件对象。
+        """
         try:
             from nv_ingest_client.client import Ingestor
         except ImportError as e:
@@ -172,7 +201,7 @@ class NvidiaIngestComponent(BaseFileComponent):
             self.log(err_msg)
             raise ValueError(err_msg)
 
-        # Check if all files are PDFs when high resolution mode is enabled
+        # 注意：高分辨率模式仅支持 PDF
         if self.high_resolution:
             for file in file_list:
                 try:
@@ -259,8 +288,7 @@ class NvidiaIngestComponent(BaseFileComponent):
         document_type_text = "text"
         document_type_structured = "structured"
 
-        # Result is a list of segments as determined by the text_depth option (if "document" then only one segment)
-        # each segment is a list of elements (text, structured, image)
+        # 实现：按 text_depth 组织结果段，每段包含 text/structured/image 元素
         for segment in result:
             if segment:
                 for element in segment:
@@ -277,12 +305,11 @@ class NvidiaIngestComponent(BaseFileComponent):
                                 metadata=metadata,
                             )
                         )
-                    # Both charts and tables are returned as "structured" document type,
-                    # with extracted text in "table_content"
+                    # 注意：图表与表格均以 structured 类型返回，文本位于 `table_content`
                     elif document_type == document_type_structured:
                         table_metadata = metadata.get("table_metadata", {})
 
-                        # reformat chart/table images as binary data
+                        # 实现：图表内容转为二进制字段以保持一致性
                         if "content" in metadata:
                             metadata["content"] = {"$binary": metadata["content"]}
 
@@ -297,7 +324,7 @@ class NvidiaIngestComponent(BaseFileComponent):
                     elif document_type == "image":
                         image_metadata = metadata.get("image_metadata", {})
 
-                        # reformat images as binary data
+                        # 实现：图片内容转为二进制字段以保持一致性
                         if "content" in metadata:
                             metadata["content"] = {"$binary": metadata["content"]}
 
@@ -313,5 +340,5 @@ class NvidiaIngestComponent(BaseFileComponent):
                         self.log(f"Unsupported document type {document_type}")
         self.status = data or "No data"
 
-        # merge processed data with BaseFile objects
+        # 实现：将抽取结果合并回 BaseFile
         return self.rollup_data(file_list, data)

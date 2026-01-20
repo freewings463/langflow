@@ -1,3 +1,19 @@
+"""
+模块名称：`URL` 内容抓取组件
+
+本模块提供基于 `RecursiveUrlLoader` 的网页抓取与解析能力，支持递归抓取与多种输出格式。
+主要功能包括：
+- 递归抓取指定 `URL` 列表
+- 支持输出 `Text`/`HTML`/`Markdown`
+- 将抓取结果封装为 `DataFrame` 或 `Message`
+
+关键组件：
+- `URLComponent`
+
+设计背景：提供可配置的网页抓取入口以支撑数据采集场景。
+注意事项：抓取受网络环境影响，需合理设置深度与超时。
+"""
+
 import importlib
 import io
 import re
@@ -16,7 +32,7 @@ from lfx.schema.dataframe import DataFrame
 from lfx.schema.message import Message
 from lfx.utils.request_utils import get_user_agent
 
-# Constants
+# 常量配置
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_DEPTH = 1
 DEFAULT_FORMAT = "Text"
@@ -28,7 +44,7 @@ URL_REGEX = re.compile(
 )
 
 USER_AGENT = None
-# Check if langflow is installed using importlib.util.find_spec(name))
+# 注意：通过 `importlib.util.find_spec` 判断 `langflow` 是否安装
 if importlib.util.find_spec("langflow"):
     langflow_installed = True
     USER_AGENT = get_user_agent()
@@ -38,14 +54,13 @@ else:
 
 
 class URLComponent(Component):
-    """A component that loads and parses content from web pages recursively.
+    """网页抓取与解析组件
 
-    This component allows fetching content from one or more URLs, with options to:
-    - Control crawl depth
-    - Prevent crawling outside the root domain
-    - Use async loading for better performance
-    - Extract either raw HTML or clean text
-    - Configure request headers and timeouts
+    契约：
+    - 输入：`URL` 列表与抓取参数
+    - 输出：`DataFrame` 或 `Message`
+    - 副作用：发起网络请求并记录日志
+    - 失败语义：无有效 `URL` 或抓取失败时抛 `ValueError`
     """
 
     display_name = "URL"
@@ -82,7 +97,7 @@ class URLComponent(Component):
             max_label=" ",
             min_label_icon="None",
             max_label_icon="None",
-            # slider_input=True
+            # 注意：可选 `slider_input=True`
         ),
         BoolInput(
             name="prevent_outside",
@@ -189,44 +204,62 @@ class URLComponent(Component):
 
     @staticmethod
     def _html_extractor(x: str) -> str:
-        """Extract raw HTML content."""
+        """提取原始 `HTML` 内容
+
+        契约：
+        - 输入：`HTML` 字符串
+        - 输出：原始字符串
+        - 副作用：无
+        - 失败语义：无
+        """
         return x
 
     @staticmethod
     def _text_extractor(x: str) -> str:
-        """Extract clean text from HTML."""
+        """从 `HTML` 提取纯文本
+
+        契约：
+        - 输入：`HTML` 字符串
+        - 输出：纯文本字符串
+        - 副作用：无
+        - 失败语义：无
+        """
         return BeautifulSoup(x, "lxml").get_text()
 
     @staticmethod
     def _markdown_extractor(x: str) -> str:
-        """Convert HTML to Markdown format."""
+        """将 `HTML` 转换为 `Markdown`
+
+        契约：
+        - 输入：`HTML` 字符串
+        - 输出：`Markdown` 字符串
+        - 副作用：无
+        - 失败语义：无
+        """
         stream = io.BytesIO(x.encode("utf-8"))
         result = MarkItDown(enable_plugins=False).convert_stream(stream)
         return result.markdown
 
     @staticmethod
     def validate_url(url: str) -> bool:
-        """Validates if the given string matches URL pattern.
+        """校验字符串是否符合 `URL` 规则
 
-        Args:
-            url: The URL string to validate
-
-        Returns:
-            bool: True if the URL is valid, False otherwise
+        契约：
+        - 输入：`URL` 字符串
+        - 输出：`bool`
+        - 副作用：无
+        - 失败语义：无
         """
         return bool(URL_REGEX.match(url))
 
     def ensure_url(self, url: str) -> str:
-        """Ensures the given string is a valid URL.
+        """规范化并校验 `URL`
 
-        Args:
-            url: The URL string to validate and normalize
-
-        Returns:
-            str: The normalized URL
-
-        Raises:
-            ValueError: If the URL is invalid
+        契约：
+        - 输入：`URL` 字符串
+        - 输出：规范化后的 `URL`
+        - 副作用：无
+        - 失败语义：无效 `URL` 时抛 `ValueError`
         """
         url = url.strip()
         if not url.startswith(("http://", "https://")):
@@ -239,13 +272,13 @@ class URLComponent(Component):
         return url
 
     def _create_loader(self, url: str) -> RecursiveUrlLoader:
-        """Creates a RecursiveUrlLoader instance with the configured settings.
+        """创建 `RecursiveUrlLoader` 实例
 
-        Args:
-            url: The URL to load
-
-        Returns:
-            RecursiveUrlLoader: Configured loader instance
+        契约：
+        - 输入：`URL`
+        - 输出：`RecursiveUrlLoader` 实例
+        - 副作用：无
+        - 失败语义：无
         """
         headers_dict = {header["key"]: header["value"] for header in self.headers if header["value"] is not None}
         extractors = {
@@ -265,20 +298,29 @@ class URLComponent(Component):
             headers=headers_dict,
             check_response_status=self.check_response_status,
             continue_on_failure=self.continue_on_failure,
-            base_url=url,  # Add base_url to ensure consistent domain crawling
-            autoset_encoding=self.autoset_encoding,  # Enable automatic encoding detection
-            exclude_dirs=[],  # Allow customization of excluded directories
-            link_regex=None,  # Allow customization of link filtering
+            base_url=url,  # 注意：设置 `base_url` 确保同域抓取
+            autoset_encoding=self.autoset_encoding,  # 注意：启用自动编码探测
+            exclude_dirs=[],  # 注意：可扩展的排除目录
+            link_regex=None,  # 注意：可扩展的链接过滤
         )
 
     def fetch_url_contents(self) -> list[dict]:
-        """Load documents from the configured URLs.
+        """抓取并解析 `URL` 内容
 
-        Returns:
-            List[Data]: List of Data objects containing the fetched content
+        关键路径（三步）：
+        1) 规范化并去重 `URL` 列表
+        2) 逐个加载并收集文档
+        3) 转换为结构化字典列表
 
-        Raises:
-            ValueError: If no valid URLs are provided or if there's an error loading documents
+        异常流：无有效 `URL` 或全部失败时抛 `ValueError`。
+        性能瓶颈：网络请求与解析。
+        排障入口：日志与异常信息。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：字典列表
+        - 副作用：记录日志
+        - 失败语义：抓取失败时抛 `ValueError`
         """
         try:
             urls = list({self.ensure_url(url) for url in self.urls if url.strip()})
@@ -310,7 +352,7 @@ class URLComponent(Component):
                 msg = "No documents were successfully loaded from any URL"
                 raise ValueError(msg)
 
-            # data = [Data(text=doc.page_content, **doc.metadata) for doc in all_docs]
+            # 注意：将文档转换为结构化数据
             data = [
                 {
                     "text": safe_convert(doc.page_content, clean_data=True),
@@ -330,10 +372,24 @@ class URLComponent(Component):
         return data
 
     def fetch_content(self) -> DataFrame:
-        """Convert the documents to a DataFrame."""
+        """将抓取结果转换为 `DataFrame`
+
+        契约：
+        - 输入：无
+        - 输出：`DataFrame`
+        - 副作用：触发抓取
+        - 失败语义：抓取失败时抛 `ValueError`
+        """
         return DataFrame(data=self.fetch_url_contents())
 
     def fetch_content_as_message(self) -> Message:
-        """Convert the documents to a Message."""
+        """将抓取结果转换为 `Message`
+
+        契约：
+        - 输入：无
+        - 输出：`Message`
+        - 副作用：触发抓取
+        - 失败语义：抓取失败时抛 `ValueError`
+        """
         url_contents = self.fetch_url_contents()
         return Message(text="\n\n".join([x["text"] for x in url_contents]), data={"data": url_contents})

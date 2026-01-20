@@ -1,3 +1,18 @@
+"""
+模块名称：Amazon Bedrock Converse 组件
+
+本模块提供基于 Bedrock Converse API 的 LLM 组件实现，支持常见模型参数与认证配置。主要功能包括：
+- 组装 Bedrock Converse 客户端初始化参数
+- 处理 AWS 认证与区域配置
+
+关键组件：
+- `AmazonBedrockConverseComponent`
+
+设计背景：Converse API 提供更现代的对话接口，需要专用组件封装。
+使用场景：在 LFX 中以组件形式调用 Bedrock Converse LLM。
+注意事项：依赖 `langchain_aws`，缺失将抛 `ImportError`。
+"""
+
 from langflow.field_typing import LanguageModel
 from langflow.inputs.inputs import BoolInput, FloatInput, IntInput, MessageTextInput, SecretStrInput
 from langflow.io import DictInput, DropdownInput
@@ -7,6 +22,17 @@ from lfx.base.models.model import LCModelComponent
 
 
 class AmazonBedrockConverseComponent(LCModelComponent):
+    """Bedrock Converse 组件
+
+    契约：输入包含模型 ID、AWS 凭证、区域与可选参数；输出 `LanguageModel`；
+    副作用：可能创建网络连接；失败语义：依赖缺失抛 `ImportError`，初始化失败抛 `ValueError`。
+    关键路径：1) 组装初始化参数 2) 处理凭证与参数 3) 创建 `ChatBedrockConverse`。
+    决策：仅在用户提供时注入 `additional_model_request_fields`。
+    问题：部分模型对额外字段（如 `inferenceConfig`）校验严格。
+    方案：不自动推断额外字段，避免触发校验错误。
+    代价：用户需手动补充模型特定参数。
+    重评：当模型参数契约稳定且可自动推断时。
+    """
     display_name: str = "Amazon Bedrock Converse"
     description: str = (
         "Generate text using Amazon Bedrock LLMs with the modern Converse API for improved conversation handling."
@@ -71,7 +97,6 @@ class AmazonBedrockConverseComponent(LCModelComponent):
             advanced=True,
             info="The URL of the Bedrock endpoint to use.",
         ),
-        # Model-specific parameters for fine control
         FloatInput(
             name="temperature",
             display_name="Temperature",
@@ -118,19 +143,28 @@ class AmazonBedrockConverseComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 Bedrock Converse 语言模型
+
+        契约：读取组件输入并返回 `ChatBedrockConverse` 实例；副作用：可能创建客户端连接；
+        失败语义：依赖缺失抛 `ImportError`，参数不兼容抛 `ValueError`。
+        关键路径（三步）：1) 组装初始化参数 2) 合并可选模型字段 3) 捕获异常并给出提示。
+        决策：对参数校验错误提供细化提示而非直接透传。
+        问题：Converse API 报错信息对用户不友好。
+        方案：匹配错误类型并给出调整建议。
+        代价：错误分支维护成本增加。
+        重评：当上游错误信息足够清晰或统一化时。
+        """
         try:
             from langchain_aws.chat_models.bedrock_converse import ChatBedrockConverse
         except ImportError as e:
             msg = "langchain_aws is not installed. Please install it with `pip install langchain_aws`."
             raise ImportError(msg) from e
 
-        # Prepare initialization parameters
         init_params = {
             "model": self.model_id,
             "region_name": self.region_name,
         }
 
-        # Add AWS credentials if provided
         if self.aws_access_key_id:
             init_params["aws_access_key_id"] = self.aws_access_key_id
         if self.aws_secret_access_key:
@@ -142,7 +176,6 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         if self.endpoint_url:
             init_params["endpoint_url"] = self.endpoint_url
 
-        # Add model parameters directly as supported by ChatBedrockConverse
         if hasattr(self, "temperature") and self.temperature is not None:
             init_params["temperature"] = self.temperature
         if hasattr(self, "max_tokens") and self.max_tokens is not None:
@@ -150,31 +183,22 @@ class AmazonBedrockConverseComponent(LCModelComponent):
         if hasattr(self, "top_p") and self.top_p is not None:
             init_params["top_p"] = self.top_p
 
-        # Handle streaming - only disable if explicitly requested
         if hasattr(self, "disable_streaming") and self.disable_streaming:
             init_params["disable_streaming"] = True
 
-        # Handle additional model request fields carefully
-        # Based on the error, inferenceConfig should not be passed as additional fields for some models
         additional_model_request_fields = {}
 
-        # Only add top_k if user explicitly provided additional fields or if needed for specific models
         if hasattr(self, "additional_model_fields") and self.additional_model_fields:
             for field in self.additional_model_fields:
                 if isinstance(field, dict):
                     additional_model_request_fields.update(field)
 
-        # For now, don't automatically add inferenceConfig for top_k to avoid validation errors
-        # Users can manually add it via additional_model_fields if their model supports it
-
-        # Only add if we have actual additional fields
         if additional_model_request_fields:
             init_params["additional_model_request_fields"] = additional_model_request_fields
 
         try:
             output = ChatBedrockConverse(**init_params)
         except Exception as e:
-            # Provide helpful error message with fallback suggestions
             error_details = str(e)
             if "validation error" in error_details.lower():
                 msg = (

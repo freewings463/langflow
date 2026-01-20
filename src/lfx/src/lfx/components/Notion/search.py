@@ -11,12 +11,14 @@ from lfx.schema.data import Data
 
 
 class NotionSearch(LCToolComponent):
+    # 搜索 Notion 页面/数据库
     display_name: str = "Search "
     description: str = "Searches all pages and databases that have been shared with an integration."
     documentation: str = "https://docs.langflow.org/bundles-notion"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：密钥、查询文本、过滤类型、排序方向
         SecretStrInput(
             name="notion_secret",
             display_name="Notion Secret",
@@ -45,16 +47,19 @@ class NotionSearch(LCToolComponent):
     ]
 
     class NotionSearchSchema(BaseModel):
+        # 工具入参 Schema
         query: str = Field(..., description="The search query text.")
         filter_value: str = Field(default="page", description="Filter type: 'page' or 'database'.")
         sort_direction: str = Field(default="descending", description="Sort direction: 'ascending' or 'descending'.")
 
     def run_model(self) -> list[Data]:
+        # 执行搜索并格式化输出
         results = self._search_notion(self.query, self.filter_value, self.sort_direction)
         records = []
         combined_text = f"Results found: {len(results)}\n\n"
 
         for result in results:
+            # 结构化结果信息
             result_data = {
                 "id": result["id"],
                 "type": result["object"],
@@ -80,6 +85,7 @@ class NotionSearch(LCToolComponent):
         return records
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="notion_search",
             description="Search Notion pages and databases. "
@@ -91,6 +97,7 @@ class NotionSearch(LCToolComponent):
     def _search_notion(
         self, query: str, filter_value: str = "page", sort_direction: str = "descending"
     ) -> list[dict[str, Any]]:
+        # 组装搜索请求
         url = "https://api.notion.com/v1/search"
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",
@@ -104,6 +111,7 @@ class NotionSearch(LCToolComponent):
             "sort": {"direction": sort_direction, "timestamp": "last_edited_time"},
         }
 
+        # 发送请求并返回结果列表
         response = requests.post(url, headers=headers, json=data, timeout=10)
         response.raise_for_status()
 

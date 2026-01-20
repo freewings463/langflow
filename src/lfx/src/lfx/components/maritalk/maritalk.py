@@ -7,6 +7,7 @@ from lfx.inputs.inputs import DropdownInput, FloatInput, IntInput, SecretStrInpu
 
 
 class MaritalkModelComponent(LCModelComponent):
+    # MariTalk 语言模型组件配置
     display_name = "MariTalk"
     description = "Generates text using MariTalk LLMs."
     icon = "Maritalk"
@@ -37,8 +38,7 @@ class MaritalkModelComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
-        # self.output_schea is a list of dictionarie s
-        # let's convert it to a dictionary
+        # 读取组件配置并构建 ChatMaritalk 实例
         api_key = self.api_key
         temperature = self.temperature
         model_name: str = self.model_name
@@ -48,5 +48,6 @@ class MaritalkModelComponent(LCModelComponent):
             max_tokens=max_tokens,
             model=model_name,
             api_key=api_key,
+            # 保底温度，避免传入空值
             temperature=temperature or 0.1,
         )

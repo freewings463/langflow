@@ -10,12 +10,14 @@ from lfx.schema.data import Data
 
 
 class NotionPageContent(LCToolComponent):
+    # 查看 Notion 页面内容
     display_name = "Page Content Viewer "
     description = "Retrieve the content of a Notion page as plain text."
     documentation = "https://docs.langflow.org/bundles-notion"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：页面 ID 与密钥
         StrInput(
             name="page_id",
             display_name="Page ID",
@@ -30,9 +32,11 @@ class NotionPageContent(LCToolComponent):
     ]
 
     class NotionPageContentSchema(BaseModel):
+        # 工具入参 Schema
         page_id: str = Field(..., description="The ID of the Notion page to retrieve.")
 
     def run_model(self) -> Data:
+        # 拉取内容并包装输出
         result = self._retrieve_page_content(self.page_id)
         if isinstance(result, str) and result.startswith("Error:"):
             # An error occurred, return it as text
@@ -41,6 +45,7 @@ class NotionPageContent(LCToolComponent):
         return Data(text=result, data={"content": result})
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="notion_page_content",
             description="Retrieve the content of a Notion page as plain text.",
@@ -49,12 +54,14 @@ class NotionPageContent(LCToolComponent):
         )
 
     def _retrieve_page_content(self, page_id: str) -> str:
+        # 获取页面 block 列表
         blocks_url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",
             "Notion-Version": "2022-06-28",
         }
         try:
+            # 请求并解析 blocks
             blocks_response = requests.get(blocks_url, headers=headers, timeout=10)
             blocks_response.raise_for_status()
             blocks_data = blocks_response.json()
@@ -69,6 +76,7 @@ class NotionPageContent(LCToolComponent):
             return f"Error: An unexpected error occurred while retrieving Notion page content. {e}"
 
     def parse_blocks(self, blocks: list) -> str:
+        # 将 blocks 转为纯文本
         content = ""
         for block in blocks:
             block_type = block.get("type")
@@ -87,6 +95,7 @@ class NotionPageContent(LCToolComponent):
         return content.strip()
 
     def parse_rich_text(self, rich_text: list) -> str:
+        # 拼接富文本片段
         return "".join(segment.get("plain_text", "") for segment in rich_text)
 
     def __call__(self, *args, **kwargs):

@@ -1,3 +1,21 @@
+"""
+模块名称：OpenRouter 模型组件
+
+本模块提供 OpenRouter 的模型接入与动态模型列表加载，主要用于统一访问多家模型提供商。主要功能包括：
+- 拉取 OpenRouter 模型列表并更新下拉选项
+- 校验参数并构建 `ChatOpenAI` 实例
+- 透传站点与应用信息以完善 OpenRouter 使用统计
+
+关键组件：
+- `OpenRouterComponent`：组件主体
+- `fetch_models`：从 OpenRouter 获取模型清单
+- `build_model`：构建 OpenRouter 语言模型实例
+
+设计背景：通过 OpenRouter 聚合多模型，减少多套 SDK 的配置成本。
+使用场景：在流程中选择 OpenRouter 模型并执行对话推理。
+注意事项：模型列表请求超时为 10 秒；未选择模型或缺少 API Key 将抛 `ValueError`。
+"""
+
 import httpx
 from langchain_openai import ChatOpenAI
 from pydantic.v1 import SecretStr
@@ -9,7 +27,13 @@ from lfx.inputs.inputs import DropdownInput, IntInput, SecretStrInput, SliderInp
 
 
 class OpenRouterComponent(LCModelComponent):
-    """OpenRouter API component for language models."""
+    """OpenRouter 模型组件封装。
+
+    契约：输入 `api_key`/`model_name`/`temperature` 等；输出 `LanguageModel` 实例。
+    副作用：`fetch_models` 会发起网络请求；`build_model` 构建 LangChain 模型实例。
+    失败语义：模型列表请求失败返回空列表并记录日志；缺少关键参数抛 `ValueError`。
+    关键路径：1) 拉取模型列表并更新配置 2) 校验输入 3) 构建 `ChatOpenAI`。
+    """
 
     display_name = "OpenRouter"
     description = (
@@ -42,7 +66,12 @@ class OpenRouterComponent(LCModelComponent):
     ]
 
     def fetch_models(self) -> list[dict]:
-        """Fetch available models from OpenRouter."""
+        """拉取可用模型列表并标准化输出。
+
+        契约：返回包含 `id/name/context` 的列表；失败时返回空列表。
+        副作用：发起 HTTP GET 请求（10 秒超时）。
+        失败语义：网络错误或非 2xx 状态记录日志并返回空列表。
+        """
         try:
             response = httpx.get("https://openrouter.ai/api/v1/models", timeout=10.0)
             response.raise_for_status()
@@ -64,7 +93,12 @@ class OpenRouterComponent(LCModelComponent):
             return []
 
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:  # noqa: ARG002
-        """Update model options."""
+        """更新模型下拉选项与提示信息。
+
+        契约：当模型列表可用时设置选项与 token 上限提示；失败时设置兜底选项。
+        副作用：修改 `build_config` 内容。
+        失败语义：`fetch_models` 失败则写入 "Failed to load models" 占位值。
+        """
         models = self.fetch_models()
         if models:
             build_config["model_name"]["options"] = [m["id"] for m in models]
@@ -75,7 +109,12 @@ class OpenRouterComponent(LCModelComponent):
         return build_config
 
     def build_model(self) -> LanguageModel:
-        """Build the OpenRouter model."""
+        """构建 OpenRouter 的 LangChain 模型实例。
+
+        契约：必须提供 `api_key` 与 `model_name`；返回 `ChatOpenAI` 兼容实例。
+        副作用：无（仅构建对象，不发起模型调用）。
+        失败语义：缺少 API Key 或模型名时抛 `ValueError`。
+        """
         if not self.api_key:
             msg = "API key is required"
             raise ValueError(msg)

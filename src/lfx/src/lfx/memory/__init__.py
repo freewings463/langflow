@@ -1,15 +1,21 @@
-"""Memory management for lfx with dynamic loading.
+"""
+模块名称：Memory 动态加载入口
 
-This module automatically chooses between the full langflow implementation
-(when available) and the lfx implementation (when standalone).
+本模块在运行时选择 Langflow 的完整 memory 实现或 lfx 的 stub 实现。
+主要功能：
+- 根据环境自动切换 memory 实现；
+- 统一导出 memory 相关函数接口。
+
+设计背景：支持独立运行与完整 Langflow 环境的兼容。
+注意事项：若 Langflow 不可用则回退到 stub，实现功能有限。
 """
 
 from lfx.utils.langflow_utils import has_langflow_memory
 
-# Import the appropriate implementation
+# 注意：优先使用 Langflow 完整实现，失败回退到 lfx stub。
 if has_langflow_memory():
     try:
-        # Import full langflow implementation
+        # 实现：加载 Langflow 完整 memory 接口。
         from langflow.memory import (
             aadd_messages,
             aadd_messagetables,
@@ -24,7 +30,7 @@ if has_langflow_memory():
             store_message,
         )
     except ImportError:
-        # Fallback to lfx implementation if langflow import fails
+        # 注意：Langflow 导入失败时回退到 lfx stub。
         from lfx.memory.stubs import (
             aadd_messages,
             aadd_messagetables,
@@ -39,7 +45,7 @@ if has_langflow_memory():
             store_message,
         )
 else:
-    # Use lfx implementation
+    # 注意：独立环境直接使用 lfx stub。
     from lfx.memory.stubs import (
         aadd_messages,
         aadd_messagetables,
@@ -54,7 +60,7 @@ else:
         store_message,
     )
 
-# Export the available functions
+# 注意：统一导出可用的 memory 接口。
 __all__ = [
     "aadd_messages",
     "aadd_messagetables",

@@ -1,3 +1,20 @@
+"""
+模块名称：Vectara RAG 组件
+
+模块目的：封装 Vectara RAG 检索+摘要链路并输出回答消息。
+使用场景：在流程中根据查询返回带摘要的最终答案。
+主要功能包括：
+- 配置 RAG 检索参数（重排、摘要、语言）
+- 构建 Vectara RAG 对象并执行查询
+- 将回答封装为 `Message`
+
+关键组件：
+- `VectaraRagComponent`：RAG 组件入口
+
+设计背景：利用 Vectara 原生 RAG 能力降低链路编排成本。
+注意：依赖 `langchain-community`，缺失会抛 `ImportError`。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.field_typing.range_spec import RangeSpec
 from lfx.io import DropdownInput, FloatInput, IntInput, MessageTextInput, Output, SecretStrInput, StrInput
@@ -5,6 +22,17 @@ from lfx.schema.message import Message
 
 
 class VectaraRagComponent(Component):
+    """Vectara RAG 组件。
+
+    契约：输入 Vectara 账号信息与查询文本，输出 `Message`。
+    关键路径：`generate_response` 构建 RAG 配置并调用 `invoke`。
+
+    决策：通过 Vectara 原生 `as_rag` 能力实现端到端 RAG
+    问题：需要减少检索与摘要的手工编排
+    方案：直接使用 Vectara 提供的 RAG API
+    代价：对 Vectara 专用配置耦合较高
+    重评：当需要自定义检索/摘要策略或切换供应商时
+    """
     display_name = "Vectara RAG"
     description = "Vectara's full end to end RAG"
     documentation = "https://docs.vectara.com/docs"
@@ -136,6 +164,20 @@ class VectaraRagComponent(Component):
     def generate_response(
         self,
     ) -> Message:
+        """执行 RAG 查询并返回回答消息。
+
+        契约：`search_query` 非空时返回回答文本；为空可能返回空结果。
+        副作用：调用外部 Vectara 服务（网络 I/O）。
+
+        关键路径（三步）：
+        1) 载入 Vectara 依赖并构建客户端
+        2) 组装 rerank/summary/query 配置并创建 RAG
+        3) 调用 `invoke` 获取回答并封装 `Message`
+
+        注意：依赖缺失抛 `ImportError`；鉴权失败在调用阶段抛异常。
+        性能：检索与摘要耗时受 `max_results` 与模型负载影响。
+        排障：关注上游异常堆栈与 Vectara API 返回错误信息。
+        """
         text_output = ""
 
         try:

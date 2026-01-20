@@ -1,3 +1,20 @@
+"""
+模块名称：`SerpAPI` 搜索工具组件
+
+本模块封装 SerpAPI 搜索能力，并对结果数量与摘要长度进行限制。
+主要功能包括：
+- 构建 SerpAPI 包装器并执行搜索
+- 截断结果字段以控制上下文长度
+- 提供结构化工具接口
+
+关键组件：
+- `SerpAPIComponent.build_tool`：构建搜索工具
+- `SerpAPIComponent.run_model`：执行搜索并输出结果
+
+设计背景：搜索结果过长会影响上下文预算，需要统一限制。
+注意事项：依赖 SerpAPI 配额与网络可用性。
+"""
+
 from typing import Any
 
 from langchain.tools import StructuredTool
@@ -13,7 +30,7 @@ from lfx.schema.data import Data
 
 
 class SerpAPISchema(BaseModel):
-    """Schema for SerpAPI search parameters."""
+    """SerpAPI 搜索参数结构。"""
 
     query: str = Field(..., description="The search query")
     params: dict[str, Any] | None = Field(
@@ -30,6 +47,15 @@ class SerpAPISchema(BaseModel):
 
 
 class SerpAPIComponent(LCToolComponent):
+    """SerpAPI 搜索工具组件。
+
+    契约：输入查询与限制参数，输出截断后的结果列表。
+    决策：在工具层完成摘要截断。
+    问题：不受控的摘要长度会造成上下文膨胀。
+    方案：统一裁剪 `title`/`snippet` 字段。
+    代价：可能丢失细节信息。
+    重评：当下游具备更细粒度控制时移除裁剪。
+    """
     display_name = "Serp Search API"
     description = "Call Serp Search API with result limiting"
     name = "SerpAPI"
@@ -49,7 +75,7 @@ class SerpAPIComponent(LCToolComponent):
     ]
 
     def _build_wrapper(self, params: dict[str, Any] | None = None) -> SerpAPIWrapper:
-        """Build a SerpAPIWrapper with the provided parameters."""
+        """构建 SerpAPI 包装器。"""
         params = params or {}
         if params:
             return SerpAPIWrapper(
@@ -59,6 +85,13 @@ class SerpAPIComponent(LCToolComponent):
         return SerpAPIWrapper(serpapi_api_key=self.serpapi_api_key)
 
     def build_tool(self) -> Tool:
+        """构建可调用的 SerpAPI 搜索工具。
+
+        关键路径（三步）：
+        1) 初始化或复用 wrapper
+        2) 定义带截断与异常处理的搜索函数
+        3) 构建结构化工具
+        """
         wrapper = self._build_wrapper(self.search_params)
 
         def search_func(
@@ -98,6 +131,7 @@ class SerpAPIComponent(LCToolComponent):
         return tool
 
     def run_model(self) -> list[Data]:
+        """执行搜索并返回结构化结果。"""
         tool = self.build_tool()
         try:
             results = tool.run(

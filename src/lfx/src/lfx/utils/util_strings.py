@@ -1,11 +1,28 @@
+"""模块名称：字符串与连接串校验工具
+
+模块目的：控制输出字符串长度并校验数据库连接 URL。
+主要功能：
+- 递归截断过长字符串
+- 校验 SQLAlchemy 兼容的数据库 URL
+使用场景：日志保护、缓存入库、配置校验。
+关键组件：`truncate_long_strings`、`is_valid_database_url`
+设计背景：输出截断用于日志/存储保护，URL 校验用于早期失败提示。
+注意事项：截断函数会原地修改传入的字典/列表结构。
+"""
+
 from lfx.serialization import constants
 
 
 def truncate_long_strings(data, max_length=None):
-    """Recursively traverse the dictionary or list and truncate strings longer than max_length.
+    """递归截断过长字符串（原地修改）。
 
-    Returns:
-        The data with strings truncated if they exceed the max length.
+    关键路径：
+    1) 解析 `max_length` 默认值
+    2) 递归遍历 dict/list
+    3) 超长字符串截断并追加省略号
+
+    契约：`max_length=None` 时使用 `constants.MAX_TEXT_LENGTH`；
+    `max_length<0` 直接返回原数据。
     """
     if max_length is None:
         max_length = constants.MAX_TEXT_LENGTH
@@ -35,14 +52,7 @@ def truncate_long_strings(data, max_length=None):
 
 
 def is_valid_database_url(url: str) -> bool:
-    """Validate database connection URLs compatible with SQLAlchemy.
-
-    Args:
-        url (str): Database connection URL to validate
-
-    Returns:
-        bool: True if URL is valid, False otherwise
-    """
+    """校验 SQLAlchemy 兼容的数据库连接 URL。"""
     try:
         from sqlalchemy.engine import make_url
 

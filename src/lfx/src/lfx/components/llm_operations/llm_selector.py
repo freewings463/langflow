@@ -1,5 +1,23 @@
+"""
+模块名称：基于 `OpenRouter` 规格的 `LLM` 选择器
+
+本模块使用“判别模型”对候选模型进行评分与选择，并可从 `OpenRouter` 拉取规格辅助决策。
+主要功能包括：
+- 拉取并缓存模型规格，建立名称映射
+- 构造包含规格的判别提示词
+- 失败时按配置回退到第一个模型
+
+关键组件：
+- `_fetch_openrouter_models_data`：规格拉取与缓存
+- `route_to_model`：主路由与回退逻辑
+- `_parse_judge_response`：判别结果解析
+
+设计背景：在多模型场景中需要根据任务与偏好动态选择模型。
+注意事项：外部 `API` 超时/限流会触发降级或回退。
+"""
+
 import asyncio
-import http  # Added for HTTPStatus
+import http  # 引入 `HTTPStatus` 常量
 import json
 from typing import Any
 
@@ -15,12 +33,21 @@ from lfx.template.field.base import Output
 
 
 class LLMSelectorComponent(Component):
+    """模型路由与选择组件。
+
+    契约：输入候选模型、用户问题与判别模型，输出最优模型结果。
+    决策：由“判别模型”选择候选模型而非静态规则。
+    问题：模型能力与成本动态变化，手写规则难以维护。
+    方案：将规格与问题拼装成提示词，让判别模型返回索引。
+    代价：判别模型本身也可能偏差，需提供回退策略。
+    重评：当选择结果稳定且可规则化时引入静态路由。
+    """
     display_name = "LLM Selector"
     description = "Routes the input to the most appropriate LLM based on OpenRouter model specifications"
     documentation: str = "https://docs.langflow.org/llm-selector"
     icon = "git-branch"
 
-    # Constants for magic values
+    # 注意：将魔法数集中，避免分散修改。
     MAX_DESCRIPTION_LENGTH = 500
     QUERY_PREVIEW_MAX_LENGTH = 1000
 
@@ -103,11 +130,14 @@ class LLMSelectorComponent(Component):
         self._model_name_to_api_id: dict[str, str] = {}
 
     def _simplify_model_name(self, name: str) -> str:
-        """Simplify model name for matching by lowercasing and removing non-alphanumerics."""
+        """规范化模型名，提升映射命中率。"""
         return "".join(c.lower() for c in name if c.isalnum())
 
     async def _fetch_openrouter_models_data(self) -> None:
-        """Fetch all models from OpenRouter API and cache them along with name mappings."""
+        """从 `OpenRouter` 拉取模型规格并构建映射缓存。
+
+        失败语义：网络/解析失败时清空缓存并记录日志。
+        """
         if self._models_api_cache and self._model_name_to_api_id:
             return
 
@@ -157,7 +187,7 @@ class LLMSelectorComponent(Component):
                                     simplified_part_id = self._simplify_model_name(model_name_part_of_id)
                                     _model_name_to_api_id_temp[simplified_part_id] = api_model_id
                             except IndexError:
-                                pass  # Should not happen if '/' is present
+                                pass  # 注意：存在 `/` 时理论上不会触发。
 
                     self._models_api_cache = _models_api_cache_temp
                     self._model_name_to_api_id = _model_name_to_api_id_temp
@@ -187,7 +217,7 @@ class LLMSelectorComponent(Component):
             self.status = ""
 
     def _get_api_model_id_for_langflow_model(self, langflow_model_name: str) -> str | None:
-        """Attempt to find the OpenRouter API ID for a given Langflow model name."""
+        """根据 Langflow 模型名映射 `OpenRouter` 的 API ID。"""
         if not langflow_model_name:
             return None
 
@@ -223,7 +253,7 @@ class LLMSelectorComponent(Component):
         return None
 
     def _get_model_specs_dict(self, langflow_model_name: str) -> dict[str, Any]:
-        """Get a dictionary of relevant model specifications for a given Langflow model name."""
+        """获取模型规格字典，供判别模型使用。"""
         if not self.use_openrouter_specs or not self._models_api_cache:
             return {
                 "id": langflow_model_name,
@@ -275,7 +305,7 @@ class LLMSelectorComponent(Component):
         return {k: v for k, v in specs.items() if v is not None}
 
     def _create_system_prompt(self) -> str:
-        """Create system prompt for the judge LLM."""
+        """生成判别模型的系统提示词。"""
         return """\
 You are an expert AI model selection specialist. Your task is to analyze the user's input query,
 their optimization preference, and a list of available models with their specifications,
@@ -296,7 +326,18 @@ If multiple models seem equally suitable according to the preference, you may pi
 If no model seems suitable, pick the first model in the list (index 0) as a fallback."""
 
     async def route_to_model(self) -> Message:
-        """Main routing method."""
+        """主路由逻辑：选择模型并生成结果。
+
+        关键路径（三步）：
+        1) 拉取规格并构造判别提示词
+        2) 解析判别结果确定模型
+        3) 调用目标模型生成输出
+        决策：默认启用 `fallback_to_first` 以保障可用性。
+        问题：外部 API 或判别模型失败会导致流程中断。
+        方案：失败时回退到第一个候选模型。
+        代价：可能牺牲质量/成本目标。
+        重评：当失败率下降且需要严格路由时关闭回退。
+        """
         if not self.models or not self.input_value or not self.judge_llm:
             error_msg = "Missing required inputs: models, input_value, or judge_llm"
             self.status = error_msg
@@ -406,6 +447,7 @@ Return ONLY the index number:"""
             self.status = error_msg
 
             if self.fallback_to_first and self.models:
+                # 注意：路由失败时按配置回退到首个模型。
                 self.log("Activating fallback to first model due to error.", "warning")
                 chosen_model_instance = self.models[0]
                 self._selected_model_name = get_model_name(chosen_model_instance)
@@ -442,7 +484,7 @@ Return ONLY the index number:"""
         return successful_result
 
     def _parse_judge_response(self, response_content: str) -> tuple[int, Any]:
-        """Parse the judge's response to extract model index."""
+        """解析判别模型的索引输出。"""
         try:
             cleaned_response = "".join(filter(str.isdigit, response_content.strip()))
             if not cleaned_response:
@@ -472,7 +514,7 @@ Return ONLY the index number:"""
             return 0, self.models[0]
 
     def get_selected_model_info(self) -> list[Data]:
-        """Return detailed information about the selected model as a list of Data objects."""
+        """返回已选模型的规格信息。"""
         if self._selected_model_name:
             specs_dict = self._get_model_specs_dict(self._selected_model_name)
             if "langflow_name" not in specs_dict:
@@ -488,7 +530,7 @@ Return ONLY the index number:"""
         return data_output
 
     def get_routing_decision(self) -> Message:
-        """Return the comprehensive routing decision explanation."""
+        """返回路由决策明细文本。"""
         if self._routing_decision:
             message_output = Message(text=f"{self._routing_decision}")
             self.status = message_output

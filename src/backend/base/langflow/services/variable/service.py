@@ -1,3 +1,19 @@
+"""
+模块名称：数据库变量服务实现
+
+本模块实现基于数据库的变量服务，提供变量的安全存储和管理。
+主要功能包括：
+- 通过数据库存储和管理变量
+- 支持凭据类型和通用类型变量
+- 提供变量的加密和解密功能
+
+关键组件：
+- `DatabaseVariableService`
+
+设计背景：在非Kubernetes环境中安全存储敏感变量，如API密钥等。
+注意事项：依赖数据库存储，需要加密敏感数据。
+"""
+
 from __future__ import annotations
 
 import os
@@ -23,9 +39,21 @@ if TYPE_CHECKING:
 
 class DatabaseVariableService(VariableService, Service):
     def __init__(self, settings_service: SettingsService):
+        """初始化数据库变量服务。
+
+        契约：设置配置服务并初始化数据库连接。
+        副作用：无。
+        失败语义：配置无效时会抛出异常。
+        """
         self.settings_service = settings_service
 
     async def initialize_user_variables(self, user_id: UUID | str, session: AsyncSession) -> None:
+        """初始化用户变量。
+
+        契约：从环境变量中读取指定变量并存储到数据库中。
+        副作用：可能创建或更新数据库中的变量记录。
+        失败语义：会记录错误但不中断执行。
+        """
         if not self.settings_service.settings.store_environment_variables:
             await logger.adebug("Skipping environment variable storage.")
             return
@@ -148,6 +176,12 @@ class DatabaseVariableService(VariableService, Service):
         name: str,
         session: AsyncSession,
     ) -> Variable:
+        """通过名称获取变量对象。
+
+        契约：根据用户ID和变量名获取变量对象。
+        副作用：无。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         # we get the credential from the database
         stmt = select(Variable).where(Variable.user_id == user_id, Variable.name == name)
         variable = (await session.exec(stmt)).first()
@@ -165,6 +199,12 @@ class DatabaseVariableService(VariableService, Service):
         field: str,
         session: AsyncSession,
     ) -> str:
+        """获取变量值。
+
+        契约：根据用户ID和变量名获取变量值。
+        副作用：解密变量值。
+        失败语义：变量不存在或类型不匹配时抛出异常。
+        """
         # we get the credential from the database
         # credential = session.query(Variable).filter(Variable.user_id == user_id, Variable.name == name).first()
         variable = await self.get_variable_object(user_id, name, session)
@@ -180,6 +220,12 @@ class DatabaseVariableService(VariableService, Service):
         return auth_utils.decrypt_api_key(variable.value, settings_service=self.settings_service)
 
     async def get_all(self, user_id: UUID | str, session: AsyncSession) -> list[VariableRead]:
+        """获取所有变量。
+
+        契约：返回指定用户的所有变量。
+        副作用：对通用类型变量进行解密。
+        失败语义：数据库查询失败时抛出异常。
+        """
         stmt = select(Variable).where(Variable.user_id == user_id)
         variables = list((await session.exec(stmt)).all())
         # For variables of type 'Generic', attempt to decrypt the value.
@@ -206,6 +252,12 @@ class DatabaseVariableService(VariableService, Service):
         variable_id: UUID | str,
         session: AsyncSession,
     ) -> Variable:
+        """通过ID获取变量。
+
+        契约：根据用户ID和变量ID获取变量对象。
+        副作用：无。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         query = select(Variable).where(Variable.id == variable_id, Variable.user_id == user_id)
         variable = (await session.exec(query)).first()
         if not variable:
@@ -214,6 +266,12 @@ class DatabaseVariableService(VariableService, Service):
         return variable
 
     async def list_variables(self, user_id: UUID | str, session: AsyncSession) -> list[str | None]:
+        """列出所有变量。
+
+        契约：返回指定用户的所有变量名列表。
+        副作用：无。
+        失败语义：数据库查询失败时抛出异常。
+        """
         variables = await self.get_all(user_id=user_id, session=session)
         return [variable.name for variable in variables if variable]
 
@@ -224,6 +282,12 @@ class DatabaseVariableService(VariableService, Service):
         value: str,
         session: AsyncSession,
     ):
+        """更新变量。
+
+        契约：更新指定用户的变量值。
+        副作用：修改数据库中的变量记录。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         stmt = select(Variable).where(Variable.user_id == user_id, Variable.name == name)
         variable = (await session.exec(stmt)).first()
         if not variable:
@@ -247,6 +311,12 @@ class DatabaseVariableService(VariableService, Service):
         variable: VariableUpdate,
         session: AsyncSession,
     ):
+        """更新变量的特定字段。
+
+        契约：更新指定变量的特定字段。
+        副作用：修改数据库中的变量记录。
+        失败语义：变量不存在时抛出异常。
+        """
         query = select(Variable).where(Variable.id == variable_id, Variable.user_id == user_id)
         db_variable = (await session.exec(query)).one()
         db_variable.updated_at = datetime.now(timezone.utc)
@@ -277,6 +347,12 @@ class DatabaseVariableService(VariableService, Service):
         name: str,
         session: AsyncSession,
     ) -> None:
+        """删除变量。
+
+        契约：删除指定用户的变量。
+        副作用：从数据库中删除变量记录。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         stmt = select(Variable).where(Variable.user_id == user_id).where(Variable.name == name)
         variable = (await session.exec(stmt)).first()
         if not variable:
@@ -285,6 +361,12 @@ class DatabaseVariableService(VariableService, Service):
         await session.delete(variable)
 
     async def delete_variable_by_id(self, user_id: UUID | str, variable_id: UUID, session: AsyncSession) -> None:
+        """通过ID删除变量。
+
+        契约：根据变量ID删除指定用户的变量。
+        副作用：从数据库中删除变量记录。
+        失败语义：变量不存在时抛出 ValueError。
+        """
         stmt = select(Variable).where(Variable.user_id == user_id, Variable.id == variable_id)
         variable = (await session.exec(stmt)).first()
         if not variable:
@@ -302,6 +384,12 @@ class DatabaseVariableService(VariableService, Service):
         type_: str = CREDENTIAL_TYPE,
         session: AsyncSession,
     ):
+        """创建变量。
+
+        契约：为指定用户创建新变量。
+        副作用：在数据库中插入新的变量记录。
+        失败语义：创建失败时抛出异常。
+        """
         # Only encrypt CREDENTIAL_TYPE variables
         encrypted_value = (
             auth_utils.encrypt_api_key(value, settings_service=self.settings_service)

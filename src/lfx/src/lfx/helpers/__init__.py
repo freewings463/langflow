@@ -1,16 +1,15 @@
-"""Helpers module for the lfx package.
+"""helpers 模块入口。
 
-This module automatically chooses between the full langflow implementation
-(when available) and the lfx implementation (when standalone).
+本模块在完整 Langflow 与独立 lfx 实现之间自动选择导入路径。
+注意事项：当 Langflow 实现不可用时会回退到 lfx 版本。
 """
 
 from lfx.utils.langflow_utils import has_langflow_memory
 
-# Import the appropriate implementation
+# 注意：优先尝试 Langflow，实现不可用时回退到 lfx
 if has_langflow_memory():
     try:
-        # Import full langflow implementation
-        # Base Model
+        # 导入 Langflow 实现
         from langflow.helpers.base_model import (
             BaseModel,
             SchemaField,
@@ -18,12 +17,10 @@ if has_langflow_memory():
             coalesce_bool,
         )
 
-        # Custom
         from langflow.helpers.custom import (
             format_type,
         )
 
-        # Data
         from langflow.helpers.data import (
             clean_string,
             data_to_text,
@@ -32,7 +29,6 @@ if has_langflow_memory():
             safe_convert,
         )
 
-        # Flow
         from langflow.helpers.flow import (
             build_schema_from_inputs,
             get_arg_names,
@@ -45,8 +41,7 @@ if has_langflow_memory():
             run_flow,
         )
     except ImportError:
-        # Fallback to lfx implementation if langflow import fails
-        # Base Model
+        # 兜底到 lfx 实现
         from lfx.helpers.base_model import (
             BaseModel,
             SchemaField,
@@ -54,12 +49,10 @@ if has_langflow_memory():
             coalesce_bool,
         )
 
-        # Custom
         from lfx.helpers.custom import (
             format_type,
         )
 
-        # Data
         from lfx.helpers.data import (
             clean_string,
             data_to_text,
@@ -68,7 +61,6 @@ if has_langflow_memory():
             safe_convert,
         )
 
-        # Flow
         from lfx.helpers.flow import (
             build_schema_from_inputs,
             get_arg_names,
@@ -81,8 +73,7 @@ if has_langflow_memory():
             run_flow,
         )
 else:
-    # Use lfx implementation
-    # Base Model
+    # 使用 lfx 实现
     from lfx.helpers.base_model import (
         BaseModel,
         SchemaField,
@@ -90,12 +81,10 @@ else:
         coalesce_bool,
     )
 
-    # Custom
     from lfx.helpers.custom import (
         format_type,
     )
 
-    # Data
     from lfx.helpers.data import (
         clean_string,
         data_to_text,
@@ -104,7 +93,6 @@ else:
         safe_convert,
     )
 
-    # Flow
     from lfx.helpers.flow import (
         build_schema_from_inputs,
         get_arg_names,
@@ -117,7 +105,7 @@ else:
         run_flow,
     )
 
-# Export the available functions
+# 对外导出列表
 __all__ = [
     "BaseModel",
     "SchemaField",

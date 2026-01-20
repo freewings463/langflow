@@ -1,3 +1,20 @@
+"""
+模块名称：settings.base
+
+本模块定义 Langflow 的核心运行配置与加载流程，集中处理环境变量、默认值与配置文件。
+主要功能包括：
+- Settings：统一的运行时配置模型
+- CustomSource：环境变量解析扩展（支持列表与复杂值）
+- YAML 配置的读写与合并
+
+关键组件：
+- Settings：核心设置模型与校验器
+- load_settings_from_yaml/save_settings_to_yaml：配置持久化入口
+
+设计背景：配置来源多且变动频繁，需要在单点统一解析并兼顾迁移兼容。
+注意事项：部分校验器会执行文件读写与数据库迁移路径推断，启动阶段需关注日志。
+"""
+
 import asyncio
 import contextlib
 import json
@@ -22,13 +39,13 @@ from lfx.utils.util_strings import is_valid_database_url
 
 
 def is_list_of_any(field: FieldInfo) -> bool:
-    """Check if the given field is a list or an optional list of any type.
+    """判断字段类型是否为列表或可选列表。
 
-    Args:
-        field (FieldInfo): The field to be checked.
-
-    Returns:
-        bool: True if the field is a list or a list of any type, False otherwise.
+    契约：
+    - 输入：Pydantic `FieldInfo`
+    - 输出：是否为 `list[...]` 或 `Optional[list[...]]`
+    - 副作用：无
+    - 失败语义：异常类型解析失败时返回 False
     """
     if field.annotation is None:
         return False
@@ -43,11 +60,18 @@ def is_list_of_any(field: FieldInfo) -> bool:
 
 
 class CustomSource(EnvSettingsSource):
+    """环境变量解析扩展。
+
+    契约：
+    - 输入：环境变量字符串
+    - 输出：按字段类型解析后的值
+    - 副作用：无
+    - 失败语义：解析失败时回退到父类实现
+    """
+
     @override
     def prepare_field_value(self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool) -> Any:  # type: ignore[misc]
-        # allow comma-separated list parsing
-
-        # fieldInfo contains the annotation of the field
+        # 注意：允许逗号分隔的列表形式，降低配置门槛
         if is_list_of_any(field):
             if isinstance(value, str):
                 value = value.split(",")
@@ -58,129 +82,118 @@ class CustomSource(EnvSettingsSource):
 
 
 class Settings(BaseSettings):
-    # Define the default LANGFLOW_DIR
+    """Langflow 运行配置集合。
+
+    契约：
+    - 输入：环境变量、配置文件、构造参数
+    - 输出：可读写的配置对象
+    - 副作用：部分校验器会读写磁盘或设置进程环境变量
+    - 失败语义：无效配置会抛出 ValueError/KeyError
+    """
+
+    # 定义默认 LANGFLOW_DIR
     config_dir: str | None = None
-    # Define if langflow db should be saved in config dir or
-    # in the langflow directory
+    # 决策：数据库默认落盘位置随配置项切换
     save_db_in_config_dir: bool = False
-    """Define if langflow database should be saved in LANGFLOW_CONFIG_DIR or in the langflow directory
-    (i.e. in the package directory)."""
+    """Langflow 数据库是否存放于 `LANGFLOW_CONFIG_DIR` 而非包目录。"""
 
     knowledge_bases_dir: str | None = "~/.langflow/knowledge_bases"
-    """The directory to store knowledge bases."""
+    """知识库文件存放目录。"""
 
     dev: bool = False
-    """If True, Langflow will run in development mode."""
+    """是否以开发模式运行。"""
     database_url: str | None = None
-    """Database URL for Langflow. If not provided, Langflow will use a SQLite database.
-    The driver shall be an async one like `sqlite+aiosqlite` (`sqlite` and `postgresql`
-    will be automatically converted to the async drivers `sqlite+aiosqlite` and
-    `postgresql+psycopg` respectively)."""
+    """Langflow 数据库 URL。为空时默认使用 SQLite。
+
+    注意：会自动将 `sqlite` 与 `postgresql` 转换为异步驱动
+    `sqlite+aiosqlite` 与 `postgresql+psycopg`。
+    """
     database_connection_retry: bool = False
-    """If True, Langflow will retry to connect to the database if it fails."""
+    """数据库连接失败时是否自动重试。"""
     pool_size: int = 20
-    """The number of connections to keep open in the connection pool.
-    For high load scenarios, this should be increased based on expected concurrent users."""
+    """连接池常驻连接数；高并发场景需按预期并发调大。"""
     max_overflow: int = 30
-    """The number of connections to allow that can be opened beyond the pool size.
-    Should be 2x the pool_size for optimal performance under load."""
+    """超出连接池的额外连接上限，建议约为 pool_size 的 2 倍。"""
     db_connect_timeout: int = 30
-    """The number of seconds to wait before giving up on a lock to released or establishing a connection to the
-    database."""
+    """获取数据库连接或锁的超时时间（秒）。"""
     migration_lock_namespace: str | None = None
-    """Optional namespace identifier for PostgreSQL advisory lock during migrations.
-    If not provided, a hash of the database URL will be used. Useful when multiple Langflow
-    instances share the same database and need coordinated migration locking."""
+    """迁移期间 PostgreSQL advisory lock 的命名空间。
+
+    为空时使用数据库 URL 哈希；适用于多实例共享数据库的迁移锁协调。
+    """
 
     mcp_server_timeout: int = 20
-    """The number of seconds to wait before giving up on a lock to released or establishing a connection to the
-    database."""
+    """MCP 服务连接/锁等待超时（秒）。"""
 
     # ---------------------------------------------------------------------
-    # MCP Session-manager tuning
+    # MCP 会话管理调优
     # ---------------------------------------------------------------------
     mcp_max_sessions_per_server: int = 10
-    """Maximum number of MCP sessions to keep per unique server (command/url).
-    Mirrors the default constant MAX_SESSIONS_PER_SERVER in util.py. Adjust to
-    control resource usage or concurrency per server."""
+    """每个 MCP 服务器保留的最大会话数（按 command/url 维度）。"""
 
-    mcp_session_idle_timeout: int = 400  # seconds
-    """How long (in seconds) an MCP session can stay idle before the background
-    cleanup task disposes of it. Defaults to 5 minutes."""
+    mcp_session_idle_timeout: int = 400  # 秒
+    """MCP 会话空闲超时（秒），超时后后台回收。"""
 
-    mcp_session_cleanup_interval: int = 120  # seconds
-    """Frequency (in seconds) at which the background cleanup task wakes up to
-    reap idle sessions."""
+    mcp_session_cleanup_interval: int = 120  # 秒
+    """后台清理任务的唤醒频率（秒）。"""
 
-    # sqlite configuration
+    # SQLite 配置
     sqlite_pragmas: dict | None = {"synchronous": "NORMAL", "journal_mode": "WAL", "busy_timeout": 30000}
-    """SQLite pragmas to use when connecting to the database."""
+    """SQLite 连接时使用的 pragma 配置。"""
 
     db_driver_connection_settings: dict | None = None
-    """Database driver connection settings."""
+    """数据库驱动连接设置。"""
 
     db_connection_settings: dict | None = {
-        "pool_size": 20,  # Match the pool_size above
-        "max_overflow": 30,  # Match the max_overflow above
-        "pool_timeout": 30,  # Seconds to wait for a connection from pool
-        "pool_pre_ping": True,  # Check connection validity before using
-        "pool_recycle": 1800,  # Recycle connections after 30 minutes
-        "echo": False,  # Set to True for debugging only
+        "pool_size": 20,  # 与上方 pool_size 保持一致
+        "max_overflow": 30,  # 与上方 max_overflow 保持一致
+        "pool_timeout": 30,  # 等待连接池可用连接的秒数
+        "pool_pre_ping": True,  # 使用前校验连接可用性
+        "pool_recycle": 1800,  # 30 分钟回收连接避免超时
+        "echo": False,  # 仅调试时开启 SQL 日志
     }
-    """Database connection settings optimized for high load scenarios.
-    Note: These settings are most effective with PostgreSQL. For SQLite:
-    - Reduce pool_size and max_overflow if experiencing lock contention
-    - SQLite has limited concurrent write capability even with WAL mode
-    - Best for read-heavy or moderate write workloads
+    """高负载优化的数据库连接配置。
 
-    Settings:
-    - pool_size: Number of connections to maintain (increase for higher concurrency)
-    - max_overflow: Additional connections allowed beyond pool_size
-    - pool_timeout: Seconds to wait for an available connection
-    - pool_pre_ping: Validates connections before use to prevent stale connections
-    - pool_recycle: Seconds before connections are recycled (prevents timeouts)
-    - echo: Enable SQL query logging (development only)
+    注意：以下配置对 PostgreSQL 更有效；SQLite 场景建议降低 pool_size/max_overflow，
+    因其写入并发能力有限（即便开启 WAL）。
     """
 
     use_noop_database: bool = False
-    """If True, disables all database operations and uses a no-op session.
-    Controlled by LANGFLOW_USE_NOOP_DATABASE env variable."""
+    """是否使用空操作数据库会话（禁用所有 DB 操作）。"""
 
-    # cache configuration
+    # 缓存配置
     cache_type: Literal["async", "redis", "memory", "disk"] = "async"
-    """The cache type can be 'async' or 'redis'."""
+    """缓存类型：`async`/`redis`/`memory`/`disk`。"""
     cache_expire: int = 3600
-    """The cache expire in seconds."""
+    """缓存过期时间（秒）。"""
     variable_store: str = "db"
-    """The store can be 'db' or 'kubernetes'."""
+    """变量存储后端，可选 `db` 或 `kubernetes`。"""
 
     prometheus_enabled: bool = False
-    """If set to True, Langflow will expose Prometheus metrics."""
+    """是否暴露 Prometheus 指标。"""
     prometheus_port: int = 9090
-    """The port on which Langflow will expose Prometheus metrics. 9090 is the default port."""
+    """Prometheus 指标端口，默认 9090。"""
 
     disable_track_apikey_usage: bool = False
     remove_api_keys: bool = False
     components_path: list[str] = []
     components_index_path: str | None = None
-    """Path or URL to a prebuilt component index JSON file.
+    """组件索引 JSON 文件路径或 URL。
 
-    If None, uses the built-in index at lfx/_assets/component_index.json.
-    Set to a file path (e.g., '/path/to/index.json') or URL (e.g., 'https://example.com/index.json')
-    to use a custom index.
+    为空时使用内置索引 `lfx/_assets/component_index.json`。
     """
     langchain_cache: str = "InMemoryCache"
     load_flows_path: str | None = None
     bundle_urls: list[str] = []
 
-    # Redis
+    # Redis 配置
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
     redis_url: str | None = None
     redis_cache_expire: int = 3600
 
-    # Sentry
+    # Sentry 配置
     sentry_dsn: str | None = None
     sentry_traces_sample_rate: float | None = 1.0
     sentry_profiles_sample_rate: float | None = 1.0
@@ -191,179 +204,158 @@ class Settings(BaseSettings):
     like_webhook_url: str | None = "https://api.langflow.store/flows/trigger/64275852-ec00-45c1-984e-3bff814732da"
 
     storage_type: str = "local"
-    """Storage type for file storage. Defaults to 'local'. Supports 'local' and 's3'."""
+    """文件存储类型，支持 `local` 与 `s3`。"""
     object_storage_bucket_name: str | None = "langflow-bucket"
-    """Object storage bucket name for file storage. Defaults to 'langflow-bucket'."""
+    """对象存储桶名称。"""
     object_storage_prefix: str | None = "files"
-    """Object storage prefix for file storage. Defaults to 'files'."""
+    """对象存储前缀。"""
     object_storage_tags: dict[str, str] | None = None
-    """Object storage tags for file storage."""
+    """对象存储标签。"""
 
     celery_enabled: bool = False
 
     fallback_to_env_var: bool = True
-    """If set to True, Global Variables set in the UI will fallback to a environment variable
-    with the same name in case Langflow fails to retrieve the variable value."""
+    """UI 全局变量读取失败时是否回退同名环境变量。"""
 
     store_environment_variables: bool = True
-    """Whether to store environment variables as Global Variables in the database."""
+    """是否将环境变量写入全局变量表。"""
     variables_to_get_from_environment: list[str] = VARIABLES_TO_GET_FROM_ENVIRONMENT
-    """List of environment variables to get from the environment and store in the database."""
+    """需要采集并存入数据库的环境变量白名单。"""
     worker_timeout: int = 300
-    """Timeout for the API calls in seconds."""
+    """API 调用超时（秒）。"""
     frontend_timeout: int = 0
-    """Timeout for the frontend API calls in seconds."""
+    """前端 API 调用超时（秒）。"""
     user_agent: str = "langflow"
-    """User agent for the API calls."""
+    """API 调用的 User-Agent。"""
     backend_only: bool = False
-    """If set to True, Langflow will not serve the frontend."""
+    """是否仅启动后端（不提供前端）。"""
 
-    # CORS Settings
+    # CORS 设置
     cors_origins: list[str] | str = "*"
-    """Allowed origins for CORS. Can be a list of origins or '*' for all origins.
-    Default is '*' for backward compatibility. In production, specify exact origins."""
+    """CORS 允许的来源列表或 `*`。生产环境建议显式配置。"""
     cors_allow_credentials: bool = True
-    """Whether to allow credentials in CORS requests.
-    Default is True for backward compatibility. In v2.0, this will be changed to False when using wildcard origins."""
+    """CORS 是否允许凭据；使用 `*` 时默认仍为 True 以兼容历史行为。"""
     cors_allow_methods: list[str] | str = "*"
-    """Allowed HTTP methods for CORS requests."""
+    """CORS 允许的 HTTP 方法。"""
     cors_allow_headers: list[str] | str = "*"
-    """Allowed headers for CORS requests."""
+    """CORS 允许的请求头。"""
 
-    # Telemetry
+    # 遥测
     do_not_track: bool = False
-    """If set to True, Langflow will not track telemetry."""
+    """是否禁用遥测上报。"""
     telemetry_base_url: str = "https://langflow.gateway.scarf.sh"
     transactions_storage_enabled: bool = True
-    """If set to True, Langflow will track transactions between flows."""
+    """是否记录 flow 之间的事务。"""
     vertex_builds_storage_enabled: bool = True
-    """If set to True, Langflow will keep track of each vertex builds (outputs) in the UI for any flow."""
+    """是否记录每个 vertex 的构建产物（UI 展示）。"""
 
-    # Config
+    # 运行配置
     host: str = "localhost"
-    """The host on which Langflow will run."""
+    """运行主机名。"""
     port: int = 7860
-    """The port on which Langflow will run."""
+    """运行端口。"""
     runtime_port: int | None = Field(default=None, exclude=True)
-    """TEMPORARY: The port detected at runtime after checking for conflicts.
-    This field is system-managed only and will be removed in future versions
-    when strict port enforcement is implemented (errors will be raised if port unavailable)."""
+    """临时端口：用于冲突检测后的实际端口（系统管理，后续版本移除）。"""
     workers: int = 1
-    """The number of workers to run."""
+    """运行 worker 数。"""
     log_level: str = "critical"
-    """The log level for Langflow."""
+    """日志级别。"""
     log_file: str | None = "logs/langflow.log"
-    """The path to log file for Langflow."""
+    """Langflow 日志文件路径。"""
     alembic_log_file: str = "alembic/alembic.log"
-    """The path to log file for Alembic for SQLAlchemy."""
+    """Alembic 日志文件路径。"""
     alembic_log_to_stdout: bool = False
-    """If set to True, the log file will be ignored and Alembic will log to stdout."""
+    """是否将 Alembic 日志输出到 stdout。"""
     frontend_path: str | None = None
-    """The path to the frontend directory containing build files. This is for development purposes only.."""
+    """前端构建产物路径（仅开发用）。"""
     open_browser: bool = False
-    """If set to True, Langflow will open the browser on startup."""
+    """启动时是否自动打开浏览器。"""
     auto_saving: bool = True
-    """If set to True, Langflow will auto save flows."""
+    """是否自动保存流程。"""
     auto_saving_interval: int = 1000
-    """The interval in ms at which Langflow will auto save flows."""
+    """自动保存间隔（毫秒）。"""
     health_check_max_retries: int = 5
-    """The maximum number of retries for the health check."""
+    """健康检查最大重试次数。"""
     max_file_size_upload: int = 1024
-    """The maximum file size for the upload in MB."""
+    """上传文件大小上限（MB）。"""
     deactivate_tracing: bool = False
-    """If set to True, tracing will be deactivated."""
+    """是否关闭追踪。"""
     max_transactions_to_keep: int = 3000
-    """The maximum number of transactions to keep in the database."""
+    """数据库中保留的最大事务数。"""
     max_vertex_builds_to_keep: int = 3000
-    """The maximum number of vertex builds to keep in the database."""
+    """数据库中保留的最大 vertex 构建数。"""
     max_vertex_builds_per_vertex: int = 2
-    """The maximum number of builds to keep per vertex. Older builds will be deleted."""
+    """每个 vertex 保留的最大构建数（超出将删除旧记录）。"""
     webhook_polling_interval: int = 5000
-    """The polling interval for the webhook in ms."""
+    """Webhook 轮询间隔（毫秒）。"""
     fs_flows_polling_interval: int = 10000
-    """The polling interval in milliseconds for synchronizing flows from the file system."""
+    """从文件系统同步流程的轮询间隔（毫秒）。"""
     ssl_cert_file: str | None = None
-    """Path to the SSL certificate file on the local system."""
+    """SSL 证书文件路径。"""
     ssl_key_file: str | None = None
-    """Path to the SSL key file on the local system."""
+    """SSL 私钥文件路径。"""
     max_text_length: int = MAX_TEXT_LENGTH
-    """Maximum number of characters to store and display in the UI. Responses longer than this
-    will be truncated when displayed in the UI. Does not truncate responses between components nor outputs."""
+    """UI 展示的最大文本长度，超出将被截断（不影响组件间数据）。"""
     max_items_length: int = MAX_ITEMS_LENGTH
-    """Maximum number of items to store and display in the UI. Lists longer than this
-    will be truncated when displayed in the UI. Does not affect data passed between components nor outputs."""
+    """UI 展示的最大列表长度，超出将被截断（不影响组件间数据）。"""
 
-    # MCP Server
+    # MCP 服务
     mcp_server_enabled: bool = True
-    """If set to False, Langflow will not enable the MCP server."""
+    """是否启用 MCP 服务。"""
     mcp_server_enable_progress_notifications: bool = False
-    """If set to False, Langflow will not send progress notifications in the MCP server."""
+    """是否启用 MCP 进度通知。"""
 
-    # Add projects to MCP servers automatically on creation
+    # 创建项目时自动加入 MCP 服务配置
     add_projects_to_mcp_servers: bool = True
-    """If set to True, newly created projects will be added to the user's MCP servers config automatically."""
+    """新建项目是否自动加入用户 MCP 服务配置。"""
     # MCP Composer
     mcp_composer_enabled: bool = True
-    """If set to False, Langflow will not start the MCP Composer service."""
+    """是否启动 MCP Composer 服务。"""
     mcp_composer_version: str = "==0.1.0.8.10"
-    """Version constraint for mcp-composer when using uvx. Uses PEP 440 syntax."""
+    """mcp-composer 版本约束（PEP 440）。"""
 
-    # Agentic Experience
+    # Agentic 体验
     agentic_experience: bool = False
-    """If set to True, Langflow will start the agentic MCP server that provides tools for
-    flow/component operations, template search, and graph visualization."""
+    """是否启用 Agentic 体验（包含工具、模板搜索与图可视化）。"""
 
-    # Developer API
+    # 开发者 API
     developer_api_enabled: bool = False
-    """If set to True, Langflow will enable developer API endpoints for advanced debugging and introspection."""
+    """是否启用开发者 API（调试/自省）。"""
 
-    # Public Flow Settings
+    # 公开流程设置
     public_flow_cleanup_interval: int = Field(default=3600, gt=600)
-    """The interval in seconds at which public temporary flows will be cleaned up.
-    Default is 1 hour (3600 seconds). Minimum is 600 seconds (10 minutes)."""
+    """公开临时流程清理间隔（秒），默认 3600，最小 600。"""
     public_flow_expiration: int = Field(default=86400, gt=600)
-    """The time in seconds after which a public temporary flow will be considered expired and eligible for cleanup.
-    Default is 24 hours (86400 seconds). Minimum is 600 seconds (10 minutes)."""
+    """公开临时流程过期时间（秒），默认 86400，最小 600。"""
     event_delivery: Literal["polling", "streaming", "direct"] = "streaming"
-    """How to deliver build events to the frontend. Can be 'polling', 'streaming' or 'direct'."""
+    """构建事件投递方式：`polling`/`streaming`/`direct`。"""
     lazy_load_components: bool = False
-    """If set to True, Langflow will only partially load components at startup and fully load them on demand.
-    This significantly reduces startup time but may cause a slight delay when a component is first used."""
+    """是否延迟加载组件（启动更快，但首次使用会有延迟）。"""
 
-    # Starter Projects
+    # Starter 项目
     create_starter_projects: bool = True
-    """If set to True, Langflow will create starter projects. If False, skips all starter project setup.
-    Note that this doesn't check if the starter projects are already loaded in the db;
-    this is intended to be used to skip all startup project logic."""
+    """是否创建 starter 项目（不检查数据库中是否已存在）。"""
     update_starter_projects: bool = True
-    """If set to True, Langflow will update starter projects."""
+    """是否更新 starter 项目。"""
 
-    # SSRF Protection
+    # SSRF 防护
     ssrf_protection_enabled: bool = False
-    """If set to True, Langflow will enable SSRF (Server-Side Request Forgery) protection.
-    When enabled, blocks requests to private IP ranges, localhost, and cloud metadata endpoints.
-    When False (default), no URL validation is performed, allowing requests to any destination
-    including internal services, private networks, and cloud metadata endpoints.
-    Default is False for backward compatibility. In v2.0, this will be changed to True.
+    """是否启用 SSRF 防护（阻止私网/元数据地址）。
 
-    Note: When ssrf_protection_enabled is disabled, the ssrf_allowed_hosts setting is ignored and has no effect."""
+    注意：默认关闭以兼容历史行为；关闭时 `ssrf_allowed_hosts` 不生效。
+    """
     ssrf_allowed_hosts: list[str] = []
-    """Comma-separated list of hosts/IPs/CIDR ranges to allow despite SSRF protection.
-    Examples: 'internal-api.company.local,192.168.1.0/24,10.0.0.5,*.dev.internal'
-    Supports exact hostnames, wildcard domains (*.example.com), exact IPs, and CIDR ranges.
-
-    Note: This setting only takes effect when ssrf_protection_enabled is True.
-    When protection is disabled, all hosts are allowed regardless of this setting."""
+    """SSRF 允许列表（host/IP/CIDR），仅在防护启用时生效。"""
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def validate_cors_origins(cls, value):
-        """Convert comma-separated string to list if needed."""
+        """将逗号分隔的 CORS 配置转换为列表。"""
         if isinstance(value, str) and value != "*":
             if "," in value:
-                # Convert comma-separated string to list
+                # 注意：允许以逗号分隔配置多个来源
                 return [origin.strip() for origin in value.split(",")]
-            # Convert single origin to list for consistency
+            # 注意：单个来源也统一成列表，避免下游分支判断
             return [value]
         return value
 
@@ -377,9 +369,7 @@ class Settings(BaseSettings):
     @field_validator("event_delivery", mode="before")
     @classmethod
     def set_event_delivery(cls, value, info):
-        # If workers > 1, we need to use direct delivery
-        # because polling and streaming are not supported
-        # in multi-worker environments
+        # 注意：多 worker 环境不支持 polling/streaming，需强制 direct
         if info.data.get("workers", 1) > 1:
             logger.warning("Multi-worker environment detected, using direct event delivery")
             return "direct"
@@ -399,29 +389,23 @@ class Settings(BaseSettings):
     @field_validator("mcp_composer_version", mode="before")
     @classmethod
     def validate_mcp_composer_version(cls, value):
-        """Ensure the version string has a version specifier prefix.
-
-        If a bare version like '0.1.0.7' is provided, prepend '~=' to allow patch updates.
-        Supports PEP 440 specifiers: ==, !=, <=, >=, <, >, ~=, ===
-        """
+        """规范化 mcp-composer 版本字符串为带前缀的 PEP 440 规范。"""
         if not value:
-            return "==0.1.0.8.10"  # Default
+            return "==0.1.0.8.10"  # 默认值
 
-        # Check if it already has a version specifier
-        # Order matters: check longer specifiers first to avoid false matches
+        # 注意：先匹配更长的前缀，避免误判
         specifiers = ["===", "==", "!=", "<=", ">=", "~=", "<", ">"]
         if any(value.startswith(spec) for spec in specifiers):
             return value
 
-        # If it's a bare version number, add ~= prefix
-        # This regex matches version numbers like 0.1.0.7, 1.2.3, etc.
+        # 注意：裸版本号补上 ~= 前缀，允许补丁版本更新
         import re
 
         if re.match(r"^\d+(\.\d+)*", value):
             logger.debug(f"Adding ~= prefix to bare version '{value}' -> '~={value}'")
             return f"~={value}"
 
-        # If we can't determine, return as-is and let uvx handle it
+        # 注意：无法判定时保持原样，交由 uvx 处理
         return value
 
     @field_validator("variables_to_get_from_environment", mode="before")
@@ -434,8 +418,7 @@ class Settings(BaseSettings):
 
         result = list(set(VARIABLES_TO_GET_FROM_ENVIRONMENT + value))
 
-        # Add agentic variables if agentic_experience is enabled
-        # Check env var directly since we can't access instance attributes in validator
+        # 注意：校验器无法访问实例属性，直接读取环境变量判断
         if os.getenv("LANGFLOW_AGENTIC_EXPERIENCE", "true").lower() == "true":
             result.extend(AGENTIC_VARIABLES)
 
@@ -454,20 +437,20 @@ class Settings(BaseSettings):
         if not value:
             from platformdirs import user_cache_dir
 
-            # Define the app name and author
+            # 注意：统一应用名称与作者，确保跨平台路径一致
             app_name = "langflow"
             app_author = "langflow"
 
-            # Get the cache directory for the application
+            # 注意：使用缓存目录承载配置，避免污染工作目录
             cache_dir = user_cache_dir(app_name, app_author)
 
-            # Create a .langflow directory inside the cache directory
+            # 注意：确保目录存在
             value = Path(cache_dir)
             value.mkdir(parents=True, exist_ok=True)
 
         if isinstance(value, str):
             value = Path(value)
-        # Resolve to absolute path to handle relative paths correctly
+        # 注意：转为绝对路径，规避相对路径造成的歧义
         value = value.resolve()
         if not value.exists():
             value.mkdir(parents=True, exist_ok=True)
@@ -477,6 +460,16 @@ class Settings(BaseSettings):
     @field_validator("database_url", mode="before")
     @classmethod
     def set_database_url(cls, value, info):
+        """解析并生成最终数据库 URL。
+
+        关键路径：
+        1) 若环境变量 `LANGFLOW_DATABASE_URL` 存在则优先使用
+        2) 根据版本与配置确定数据库落盘路径
+        3) 生成 `sqlite:///` 形式的 URL
+
+        异常流：无效 URL 或 `config_dir` 缺失会抛 ValueError。
+        排障入口：日志关键字 `database`/`LANGFLOW_DATABASE_URL`。
+        """
         if value and not is_valid_database_url(value):
             msg = f"Invalid database_url provided: '{value}'"
             raise ValueError(msg)
@@ -485,9 +478,7 @@ class Settings(BaseSettings):
             value = langflow_database_url
             logger.debug("Using LANGFLOW_DATABASE_URL env variable")
         else:
-            # Originally, we used sqlite:///./langflow.db
-            # so we need to migrate to the new format
-            # if there is a database in that location
+            # 注意：兼容旧路径 sqlite:///./langflow.db 的迁移逻辑
             if not info.data["config_dir"]:
                 msg = "config_dir not set, please set it or provide a database_url"
                 raise ValueError(msg)
@@ -501,7 +492,7 @@ class Settings(BaseSettings):
             if info.data["save_db_in_config_dir"]:
                 database_dir = info.data["config_dir"]
             else:
-                # Use langflow package path, not lfx, for backwards compatibility
+                # 注意：为兼容历史包路径，优先使用 langflow 包目录
                 try:
                     import langflow
 
@@ -518,7 +509,7 @@ class Settings(BaseSettings):
                 if Path(new_pre_path).exists():
                     final_path = new_pre_path
                 elif Path(new_path).exists() and info.data["save_db_in_config_dir"]:
-                    # We need to copy the current db to the new location
+                    # 注意：预发布版本需要复制现有 DB 到新位置
                     logger.debug("Copying existing database to new location")
                     copy2(new_path, new_pre_path)
                     logger.debug(f"Copied existing database to {new_pre_path}")
@@ -552,11 +543,14 @@ class Settings(BaseSettings):
     @field_validator("components_path", mode="before")
     @classmethod
     def set_components_path(cls, value):
-        """Processes and updates the components path list, incorporating environment variable overrides.
+        """合并组件路径列表，并注入环境变量覆盖项。
 
-        If the `LANGFLOW_COMPONENTS_PATH` environment variable is set and points to an existing path, it is
-        appended to the provided list if not already present. If the input list is empty or missing, it is
-        set to an empty list.
+        关键路径：
+        1) 读取 `LANGFLOW_COMPONENTS_PATH` 并去重追加
+        2) 列表为空时回退 `BASE_COMPONENTS_PATH`
+        3) 统一输出为字符串列表
+
+        异常流：环境变量路径不存在时忽略，不抛异常。
         """
         if os.getenv("LANGFLOW_COMPONENTS_PATH"):
             logger.debug("Adding LANGFLOW_COMPONENTS_PATH to components_path")
@@ -582,17 +576,27 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(validate_assignment=True, extra="ignore", env_prefix="LANGFLOW_")
 
     async def update_from_yaml(self, file_path: str, *, dev: bool = False) -> None:
+        """从 YAML 文件加载设置并覆盖当前实例。"""
         new_settings = await load_settings_from_yaml(file_path)
         self.components_path = new_settings.components_path or []
         self.dev = dev
 
     def update_settings(self, **kwargs) -> None:
+        """按键批量更新设置，支持列表合并。
+
+        关键路径：
+        1) 忽略未知键，避免污染配置
+        2) 列表字段支持 JSON 字符串解析与去重追加
+        3) 非列表字段直接覆盖
+
+        异常流：JSON 解析失败会被吞并，不影响其他字段更新。
+        """
         for key, value in kwargs.items():
-            # value may contain sensitive information, so we don't want to log it
+            # 注意：value 可能包含敏感信息，避免日志泄露
             if not hasattr(self, key):
                 continue
             if isinstance(getattr(self, key), list):
-                # value might be a '[something]' string
+                # 注意：支持将字符串形式的列表解析为实际列表
                 value_ = value
                 with contextlib.suppress(json.decoder.JSONDecodeError):
                     value_ = orjson.loads(str(value))
@@ -610,7 +614,7 @@ class Settings(BaseSettings):
 
     @property
     def voice_mode_available(self) -> bool:
-        """Check if voice mode is available by testing webrtcvad import."""
+        """通过尝试导入 `webrtcvad` 判断语音模式是否可用。"""
         try:
             import webrtcvad  # noqa: F401
         except ImportError:
@@ -632,15 +636,26 @@ class Settings(BaseSettings):
 
 
 def save_settings_to_yaml(settings: Settings, file_path: str) -> None:
+    """将 Settings 序列化为 YAML 文件。"""
     with Path(file_path).open("w", encoding="utf-8") as f:
         settings_dict = settings.model_dump()
         yaml.dump(settings_dict, f)
 
 
 async def load_settings_from_yaml(file_path: str) -> Settings:
-    # Check if a string is a valid path or a file name
+    """从 YAML 文件加载 Settings。
+
+    关键路径：
+    1) 解析相对路径到当前目录
+    2) 读取并安全解析 YAML
+    3) 转换为大写键并构建 Settings
+
+    异常流：未知键会抛 KeyError。
+    排障入口：日志关键字 `Loading`。
+    """
+    # 注意：支持仅传文件名，默认与当前模块同目录
     if "/" not in file_path:
-        # Get current path
+        # 获取当前模块路径
         current_path = Path(__file__).resolve().parent
         file_path_ = Path(current_path) / file_path
     else:

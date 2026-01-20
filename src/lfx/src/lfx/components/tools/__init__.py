@@ -1,3 +1,21 @@
+"""
+模块名称：工具组件懒加载入口
+
+本模块提供工具类组件的按需导入，用于降低启动成本并保持导入路径稳定。
+主要功能包括：
+- 组件名到模块名映射
+- 属性访问时延迟导入并缓存
+- 统一导出 `__all__` 与 `__dir__`
+
+关键组件：
+- `_dynamic_imports`：组件名映射表
+- `__getattr__`：懒加载入口
+- `__dir__`：导出成员列表
+
+设计背景：工具组件依赖多、启动慢，需要按需加载以减少开销。
+注意事项：仅支持映射表内的组件名，其他访问会抛 `AttributeError`。
+"""
+
 from __future__ import annotations
 
 import warnings
@@ -47,12 +65,17 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import tool components on attribute access."""
+    """按名称懒加载组件并缓存到模块全局。
+
+    契约：输入组件类名，返回对应类对象。
+    失败语义：名称不存在或导入失败时抛 `AttributeError`。
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
     try:
         with warnings.catch_warnings():
+            # 注意：忽略 LangChain 旧接口警告，避免懒加载噪声。
             warnings.simplefilter("ignore", LangChainDeprecationWarning)
             result = import_mod(attr_name, _dynamic_imports[attr_name], __spec__.parent)
     except (ModuleNotFoundError, ImportError, AttributeError) as e:
@@ -63,4 +86,5 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """返回可见成员列表，保持反射与自动补全一致。"""
     return list(__all__)

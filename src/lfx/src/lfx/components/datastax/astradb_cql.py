@@ -1,3 +1,18 @@
+"""
+模块名称：AstraDB CQL 工具组件
+
+本模块提供基于 Astra DB CQL 表的查询工具封装，将 REST API 查询结果转换为 `Data`。主要功能包括：
+- 根据工具参数生成过滤条件并调用 Astra REST API
+- 构建可供 LLM 调用的结构化工具
+
+关键组件：
+- `AstraDBCQLToolComponent`
+
+设计背景：需要在 LFX 中以工具形式访问 CQL 表数据。
+使用场景：LLM 调用查询事务数据或结构化记录。
+注意事项：依赖网络请求与 REST API，错误会抛 `ValueError`。
+"""
+
 import json
 import urllib
 from datetime import datetime, timezone
@@ -17,6 +32,18 @@ from lfx.schema.table import EditMode
 
 
 class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
+    """AstraDB CQL 工具组件
+
+    契约：输入工具定义与过滤参数；输出 `Tool` 或查询结果 `Data`；
+    副作用：发起 REST 请求并更新 `self.status`；
+    失败语义：HTTP 错误或解析失败抛 `ValueError`。
+    关键路径：1) 构建工具参数模型 2) 生成 REST 查询 3) 转换结果为 `Data`。
+    决策：通过 REST API 而非 CQL 驱动执行查询。
+    问题：避免在组件中引入重量级驱动依赖。
+    方案：调用 Astra REST API 并拼装 `where` 条件。
+    代价：功能受 REST API 限制，复杂查询不支持。
+    重评：当需要复杂查询或更高性能时。
+    """
     display_name: str = "Astra DB CQL"
     description: str = "Create a tool to get transactional data from DataStax Astra DB CQL Table"
     documentation: str = "https://docs.langflow.org/bundles-datastax"
@@ -136,37 +163,33 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
     ]
 
     def parse_timestamp(self, timestamp_str: str) -> str:
-        """Parse a timestamp string into Astra DB REST API format.
+        """解析时间字符串为 Astra REST API 可用格式
 
-        Args:
-            timestamp_str (str): Input timestamp string
-
-        Returns:
-            str: Formatted timestamp string in YYYY-MM-DDTHH:MI:SS.000Z format
-
-        Raises:
-            ValueError: If the timestamp cannot be parsed
+        契约：输入时间字符串，输出 `YYYY-MM-DDTHH:MI:SS.000Z`；副作用：无；
+        失败语义：无法解析时抛 `ValueError`。
+        关键路径：逐个格式尝试 -> 统一转 UTC -> 格式化输出。
+        决策：支持多种常见日期格式而非仅 ISO8601。
+        问题：上游可能提供不同格式时间。
+        方案：遍历常见格式并统一到 UTC。
+        代价：格式覆盖不全时仍会失败。
+        重评：当需要更强的日期解析库时。
         """
-        # Common datetime formats to try
         formats = [
-            "%Y-%m-%d",  # 2024-03-21
-            "%Y-%m-%dT%H:%M:%S",  # 2024-03-21T15:30:00
-            "%Y-%m-%dT%H:%M:%S%z",  # 2024-03-21T15:30:00+0000
-            "%Y-%m-%d %H:%M:%S",  # 2024-03-21 15:30:00
-            "%d/%m/%Y",  # 21/03/2024
-            "%Y/%m/%d",  # 2024/03/21
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
         ]
 
         for fmt in formats:
             try:
-                # Parse the date string
                 date_obj = datetime.strptime(timestamp_str, fmt).astimezone()
 
-                # If the parsed date has no timezone info, assume UTC
                 if date_obj.tzinfo is None:
                     date_obj = date_obj.replace(tzinfo=timezone.utc)
 
-                # Convert to UTC and format
                 utc_date = date_obj.astimezone(timezone.utc)
                 return utc_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             except ValueError:
@@ -177,6 +200,18 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
         raise ValueError(msg)
 
     def astra_rest(self, args):
+        """执行 Astra REST API 查询
+
+        契约：输入工具参数字典，输出 REST 返回的 `data` 列表或状态码；
+        副作用：发起网络请求；
+        失败语义：HTTP >= 400 抛 `ValueError`，JSON 解析失败返回状态码。
+        关键路径：1) 构建 `where` 条件 2) 拼接 URL 3) 发送请求并解析响应。
+        决策：将 timestamp 字段在请求前转换为 API 格式。
+        问题：REST API 对日期字段要求固定格式。
+        方案：统一在请求前调用 `parse_timestamp`。
+        代价：格式不匹配将导致请求失败。
+        重评：当 API 支持更多日期格式或服务端解析时。
+        """
         headers = {"Accept": "application/json", "X-Cassandra-Token": f"{self.token}"}
         astra_url = f"{self.get_api_endpoint()}/api/rest/v2/keyspaces/{self.get_keyspace()}/{self.collection_name}/"
         where = {}
@@ -231,6 +266,17 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
             return res.status_code
 
     def create_args_schema(self) -> dict[str, BaseModel]:
+        """构建工具入参的 Pydantic Schema
+
+        契约：基于 `tools_params` 生成 `ToolInput` 模型；副作用：无；
+        失败语义：参数缺失导致的 KeyError 由调用方处理。
+        关键路径：1) 过滤静态参数 2) 生成字段定义 3) 创建动态模型。
+        决策：静态过滤条件不暴露给 LLM。
+        问题：部分参数应固定以避免被模型覆盖。
+        方案：从 `static_filters` 里剔除字段。
+        代价：降低工具灵活性。
+        重评：当需要动态调整静态过滤条件时。
+        """
         args: dict[str, tuple[Any, Field]] = {}
 
         for param in self.tools_params:
@@ -245,13 +291,16 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
         return {"ToolInput": model}
 
     def build_tool(self) -> Tool:
-        """Builds a Astra DB CQL Table tool.
+        """构建 AstraDB CQL 查询工具
 
-        Args:
-            name (str, optional): The name of the tool.
-
-        Returns:
-            Tool: The built Astra DB tool.
+        契约：返回 `StructuredTool`；副作用：无；
+        失败语义：参数模型构建异常透传。
+        关键路径：1) 生成入参 schema 2) 绑定 `run_model`。
+        决策：使用结构化工具暴露给 LLM。
+        问题：需要为模型提供清晰参数契约。
+        方案：基于 `tools_params` 生成 Pydantic 模型。
+        代价：参数变更需同步更新配置。
+        重评：当采用统一的工具注册机制时。
         """
         schema_dict = self.create_args_schema()
         return StructuredTool.from_function(
@@ -263,6 +312,17 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
         )
 
     def projection_args(self, input_str: str) -> dict:
+        """解析投影字段定义
+
+        契约：输入逗号分隔字段字符串，输出投影字典；
+        副作用：无；失败语义：无。
+        关键路径：拆分字段并生成 include/exclude 映射。
+        决策：以 `!` 前缀表示排除字段。
+        问题：需要在工具层控制返回字段。
+        方案：将字符串解析为 Astra REST API 需要的投影格式。
+        代价：输入格式错误可能导致投影异常。
+        重评：当改用结构化字段输入时。
+        """
         elements = input_str.split(",")
         result = {}
 
@@ -275,6 +335,17 @@ class AstraDBCQLToolComponent(AstraDBBaseComponent, LCToolComponent):
         return result
 
     def run_model(self, **args) -> Data | list[Data]:
+        """执行查询并转换为 `Data`
+
+        契约：输入工具参数，输出 `list[Data]`；副作用：更新 `self.status`；
+        失败语义：查询失败抛异常或返回空结果。
+        关键路径：1) 调用 `astra_rest` 2) 转换结果为 `Data` 3) 写入状态。
+        决策：非列表结果视为异常并返回空列表。
+        问题：REST API 可能返回非 `data` 列表结构。
+        方案：仅在结果为列表时转换。
+        代价：无法返回错误响应体。
+        重评：当需要统一错误结构或更丰富的错误输出时。
+        """
         results = self.astra_rest(args)
         data: list[Data] = []
 

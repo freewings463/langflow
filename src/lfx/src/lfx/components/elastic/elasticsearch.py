@@ -1,3 +1,19 @@
+"""
+模块名称：Elasticsearch 向量检索组件
+
+本模块提供 Elasticsearch 向量存储与检索组件，支持连接配置、文档写入与相似度搜索。
+主要功能包括：
+- 生成并配置 Elasticsearch 向量存储实例
+- 将输入数据转换为 LangChain 文档并写入索引
+- 支持相似度搜索与 MMR 检索
+
+关键组件：
+- `ElasticsearchVectorStoreComponent`：Elasticsearch 向量存储组件入口
+
+设计背景：为基于 Elasticsearch 的向量检索提供统一组件封装。
+注意事项：Cloud 与本地部署参数不可同时使用，配置冲突会抛 `ValueError`。
+"""
+
 from typing import Any
 
 from elasticsearch import Elasticsearch
@@ -18,7 +34,12 @@ from lfx.schema.data import Data
 
 
 class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
-    """Elasticsearch Vector Store with with advanced, customizable search capabilities."""
+    """Elasticsearch 向量存储组件。
+
+    契约：输入连接配置、索引名与嵌入器，输出可用的向量存储实例与检索结果。
+    副作用：可能创建索引、写入文档并发起网络请求。
+    失败语义：配置冲突或连接失败会抛 `ValueError`。
+    """
 
     display_name: str = "Elasticsearch"
     description: str = "Elasticsearch Vector Store with with advanced, customizable search capabilities."
@@ -110,7 +131,16 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> ElasticsearchStore:
-        """Builds the Elasticsearch Vector Store object."""
+        """构建 Elasticsearch 向量存储实例。
+
+        契约：输入为连接参数与嵌入器配置，输出 `ElasticsearchStore`。
+        关键路径（三步）：
+        1) 校验 Cloud/本地连接参数互斥关系。
+        2) 组装连接参数并构建客户端（含 SSL 验证选项）。
+        3) 初始化向量存储并按需写入文档。
+
+        异常流：参数冲突抛 `ValueError`。
+        """
         if self.cloud_id and self.elasticsearch_url:
             msg = (
                 "Both 'cloud_id' and 'elasticsearch_url' provided. "
@@ -133,9 +163,7 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         if self.api_key:
             es_params["api_key"] = self.api_key
 
-        # Check if we need to verify SSL certificates
         if self.verify_certs is False:
-            # Build client parameters for Elasticsearch constructor
             client_params: dict[str, Any] = {}
             client_params["verify_certs"] = False
 
@@ -154,7 +182,6 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
 
         elasticsearch = ElasticsearchStore(**es_params)
 
-        # If documents are provided, add them to the store
         if self.ingest_data:
             documents = self._prepare_documents()
             if documents:
@@ -163,7 +190,12 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         return elasticsearch
 
     def _prepare_documents(self) -> list[Document]:
-        """Prepares documents from the input data to add to the vector store."""
+        """准备写入向量存储的文档列表。
+
+        契约：输入为 `ingest_data`，输出 `Document` 列表。
+        副作用：调用父类数据预处理逻辑。
+        失败语义：输入非 `Data` 时抛 `TypeError`。
+        """
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -177,7 +209,12 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         return documents
 
     def _add_documents_to_vector_store(self, vector_store: "ElasticsearchStore") -> None:
-        """Adds documents to the Vector Store."""
+        """向向量存储写入文档。
+
+        契约：输入向量存储实例，写入当前 `ingest_data`。
+        副作用：执行文档写入操作并记录日志。
+        失败语义：无文档时仅记录日志。
+        """
         documents = self._prepare_documents()
         if documents and self.embedding:
             self.log(f"Adding {len(documents)} documents to the Vector Store.")
@@ -186,7 +223,16 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
             self.log("No documents to add to the Vector Store.")
 
     def search(self, query: str | None = None) -> list[dict[str, Any]]:
-        """Search for similar documents in the vector store or retrieve all documents if no query is provided."""
+        """在向量存储中执行检索。
+
+        契约：输入查询文本（可选），输出结果列表（含内容/元数据/分数）。
+        关键路径（三步）：
+        1) 初始化向量存储与检索参数。
+        2) 根据 `search_type` 执行相似度或 MMR 检索。
+        3) 无查询时返回索引内文档。
+
+        异常流：检索类型非法抛 `ValueError`。
+        """
         vector_store = self.build_vector_store()
         search_kwargs = {
             "k": self.number_of_results,
@@ -218,7 +264,12 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         return [{"page_content": doc.page_content, "metadata": doc.metadata, "score": score} for doc, score in results]
 
     def get_all_documents(self, vector_store: ElasticsearchStore, **kwargs) -> list[tuple[Document, float]]:
-        """Retrieve all documents from the vector store."""
+        """获取索引中的文档列表。
+
+        契约：输入向量存储与限制参数，输出 `(Document, score)` 列表。
+        副作用：发起 Elasticsearch 查询请求。
+        失败语义：异常由底层客户端抛出。
+        """
         client = vector_store.client
         index_name = self.index_name
 
@@ -241,9 +292,11 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         return results
 
     def search_documents(self) -> list[Data]:
-        """Search for documents in the vector store based on the search input.
+        """执行检索并返回 `Data` 列表。
 
-        If no search input is provided, retrieve all documents.
+        契约：使用 `search_query` 执行检索并输出 `Data`。
+        副作用：更新 `self.status`。
+        失败语义：异常由 `search` 抛出。
         """
         results = self.search(self.search_query)
         retrieved_data = [
@@ -257,7 +310,12 @@ class ElasticsearchVectorStoreComponent(LCVectorStoreComponent):
         return retrieved_data
 
     def get_retriever_kwargs(self):
-        """Get the keyword arguments for the retriever."""
+        """返回检索器参数。
+
+        契约：输出包含 `search_type` 与 `search_kwargs` 的字典。
+        副作用：无。
+        失败语义：无。
+        """
         return {
             "search_type": self.search_type.lower(),
             "search_kwargs": {

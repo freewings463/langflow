@@ -1,3 +1,15 @@
+"""
+模块名称：登录与令牌接口
+
+本模块提供登录、自动登录、刷新令牌与注销接口，并负责设置认证 Cookie。
+主要功能：
+- 账号密码登录并下发 access/refresh token
+- 自动登录并创建长期令牌
+- 刷新令牌与清理 Cookie
+设计背景：统一前端认证入口与会话生命周期管理。
+注意事项：Cookie 配置取自 `auth_settings`，异常统一转为 4xx/5xx。
+"""
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -26,6 +38,14 @@ async def login_to_get_access_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: DbSession,
 ):
+    """账号密码登录并设置认证 Cookie。
+
+    契约：
+    - 输入：`form_data`、`db`
+    - 输出：`Token`（access/refresh）
+    - 副作用：写入三种 Cookie 并初始化用户变量
+    - 失败语义：认证失败返回 401；异常转 500
+    """
     auth_settings = get_settings_service().auth_settings
     try:
         user = await authenticate_user(form_data.username, form_data.password, db)
@@ -63,14 +83,14 @@ async def login_to_get_access_token(
             httponly=auth_settings.ACCESS_HTTPONLY,
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
-            expires=None,  # Set to None to make it a session cookie
+            expires=None,  # 注意：`expires=None` 表示会话级 Cookie。
             domain=auth_settings.COOKIE_DOMAIN,
         )
         await get_variable_service().initialize_user_variables(user.id, db)
-        # Initialize agentic variables if agentic experience is enabled
+        # 注意：仅在启用 agentic 体验时初始化变量。
         from langflow.api.utils.mcp.agentic_mcp import initialize_agentic_user_variables
 
-        # Create default project for user if it doesn't exist
+        # 实现：确保用户具备默认项目。
         _ = await get_or_create_default_folder(db, user.id)
 
         if get_settings_service().settings.agentic_experience:
@@ -86,6 +106,13 @@ async def login_to_get_access_token(
 
 @router.get("/auto_login")
 async def auto_login(response: Response, db: DbSession):
+    """自动登录并下发长期令牌。
+
+    契约：
+    - 输入：`db`
+    - 输出：长期 `Token`
+    - 失败语义：AUTO_LOGIN 关闭时返回 400
+    """
     auth_settings = get_settings_service().auth_settings
 
     if auth_settings.AUTO_LOGIN:
@@ -96,7 +123,7 @@ async def auto_login(response: Response, db: DbSession):
             httponly=auth_settings.ACCESS_HTTPONLY,
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
-            expires=None,  # Set to None to make it a session cookie
+            expires=None,  # 注意：`expires=None` 表示会话级 Cookie。
             domain=auth_settings.COOKIE_DOMAIN,
         )
 
@@ -108,11 +135,11 @@ async def auto_login(response: Response, db: DbSession):
 
             response.set_cookie(
                 "apikey_tkn_lflw",
-                str(user.store_api_key),  # Ensure it's a string
+                str(user.store_api_key),  # 注意：强制转为字符串以避免 Cookie 类型异常。
                 httponly=auth_settings.ACCESS_HTTPONLY,
                 samesite=auth_settings.ACCESS_SAME_SITE,
                 secure=auth_settings.ACCESS_SECURE,
-                expires=None,  # Set to None to make it a session cookie
+                expires=None,  # 注意：`expires=None` 表示会话级 Cookie。
                 domain=auth_settings.COOKIE_DOMAIN,
             )
 
@@ -138,6 +165,13 @@ async def refresh_token(
     response: Response,
     db: DbSession,
 ):
+    """使用 refresh token 续签并重新下发 Cookie。
+
+    契约：
+    - 输入：请求 Cookie 中的 `refresh_token_lf`
+    - 输出：新的 access/refresh token
+    - 失败语义：缺失或无效 token 返回 401
+    """
     auth_settings = get_settings_service().auth_settings
 
     token = request.cookies.get("refresh_token_lf")
@@ -172,6 +206,7 @@ async def refresh_token(
 
 @router.post("/logout")
 async def logout(response: Response):
+    """清理认证 Cookie 并结束会话。"""
     auth_settings = get_settings_service().auth_settings
 
     response.delete_cookie(

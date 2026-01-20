@@ -1,3 +1,13 @@
+"""动态创建 Data 组件。
+
+本模块根据用户配置的字段数量动态生成输入，并输出一个 Data。
+主要功能包括：
+- 动态扩展输入字段
+- 可选 `text_key` 及校验
+
+注意事项：字段数量上限为 15，超出会被拒绝。
+"""
+
 from typing import Any
 
 from lfx.custom.custom_component.component import Component
@@ -9,10 +19,16 @@ from lfx.schema.dotdict import dotdict
 
 
 class CreateDataComponent(Component):
+    """动态创建 Data 的组件封装。
+
+    契约：输入为动态字段与可选 `text_key`；输出为 `Data`。
+    副作用：更新 `self.status`。
+    失败语义：字段数超限抛 `ValueError`。
+    """
     display_name: str = "Create Data"
     description: str = "Dynamically create a Data with a specified number of fields."
     name: str = "CreateData"
-    MAX_FIELDS = 15  # Define a constant for maximum number of fields
+    MAX_FIELDS = 15  # 最大字段数
     legacy = True
     replacement = ["processing.DataOperations"]
     icon = "ListFilter"
@@ -45,6 +61,15 @@ class CreateDataComponent(Component):
     ]
 
     def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据字段数量动态调整输入配置。
+
+        契约：输入为 build_config 与字段值；输出更新后的 build_config。
+        失败语义：字段数量超限抛 `ValueError`。
+        关键路径（三步）：
+        1) 解析字段数量并校验上限；
+        2) 备份并重建动态字段；
+        3) 回写 `number_of_fields` 并返回配置。
+        """
         if field_name == "number_of_fields":
             default_keys = ["code", "_type", "number_of_fields", "text_key", "text_key_validator"]
             try:
@@ -60,7 +85,7 @@ class CreateDataComponent(Component):
                 )
                 raise ValueError(msg)
             if len(build_config) > len(default_keys):
-                # back up the existing template fields
+                # 实现：备份已有动态字段
                 for key in build_config.copy():
                     if key not in default_keys:
                         existing_fields[key] = build_config.pop(key)
@@ -83,6 +108,11 @@ class CreateDataComponent(Component):
         return build_config
 
     async def build_data(self) -> Data:
+        """构建 Data 并写入 `text_key`。
+
+        契约：输出为 `Data`。
+        副作用：更新 `self.status`，可选校验 `text_key`。
+        """
         data = self.get_data()
         return_data = Data(data=data, text_key=self.text_key)
         self.status = return_data
@@ -91,11 +121,10 @@ class CreateDataComponent(Component):
         return return_data
 
     def get_data(self):
-        """Function to get the Data from the attributes."""
+        """从动态字段收集数据字典。"""
         data = {}
         for value_dict in self._attributes.values():
             if isinstance(value_dict, dict):
-                # Check if the value of the value_dict is a Data
                 value_dict_ = {
                     key: value.get_text() if isinstance(value, Data) else value for key, value in value_dict.items()
                 }
@@ -103,7 +132,7 @@ class CreateDataComponent(Component):
         return data
 
     def validate_text_key(self) -> None:
-        """This function validates that the Text Key is one of the keys in the Data."""
+        """校验 `text_key` 是否存在于 Data 键集合中。"""
         data_keys = self.get_data().keys()
         if self.text_key not in data_keys and self.text_key != "":
             formatted_data_keys = ", ".join(data_keys)

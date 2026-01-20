@@ -1,3 +1,19 @@
+"""
+模块名称：LangWatch Tracer 适配
+
+本模块实现 LangWatch 的 tracing 适配，基于 OTEL 发送 spans。
+主要功能包括：
+- 初始化 LangWatch 客户端与专用 TracerProvider
+- 记录组件级 span 并关联上下游
+- 将 Langflow 数据类型转换为 LangWatch 兼容格式
+
+关键组件：
+- `LangWatchTracer`
+
+设计背景：与 LangWatch 集成以获得可视化与调试能力。
+注意事项：未配置 `LANGWATCH_API_KEY` 时自动禁用。
+"""
+
 from __future__ import annotations
 
 import os
@@ -29,6 +45,12 @@ class LangWatchTracer(BaseTracer):
     tracer_provider = None
 
     def __init__(self, trace_name: str, trace_type: str, project_name: str, trace_id: UUID):
+        """初始化 LangWatch tracer。
+
+        契约：初始化失败时 `ready=False`。
+        副作用：可能创建全局 TracerProvider 与 OTEL exporter。
+        失败语义：SDK 导入失败或鉴权失败时禁用。
+        """
         self.trace_name = trace_name
         self.trace_type = trace_type
         self.project_name = project_name
@@ -59,9 +81,11 @@ class LangWatchTracer(BaseTracer):
 
     @property
     def ready(self):
+        """指示 tracer 是否可用。"""
         return self._ready
 
     def setup_langwatch(self) -> bool:
+        """配置 LangWatch SDK 与 OTEL exporter。"""
         if "LANGWATCH_API_KEY" not in os.environ:
             return False
         try:
@@ -81,8 +105,7 @@ class LangWatchTracer(BaseTracer):
                 provider.add_span_processor(BatchSpanProcessor(exporter))
                 LangWatchTracer.tracer_provider = provider
 
-                # Initialize LangWatch client but skip OTEL setup to avoid touching the global provider
-                # causing it to not receive traces from FastAPIInstrumentor
+                # 注意：跳过全局 OTEL 设置，避免影响 FastAPIInstrumentor
                 langwatch.setup(
                     api_key=api_key,
                     endpoint_url=endpoint,
@@ -105,10 +128,10 @@ class LangWatchTracer(BaseTracer):
         metadata: dict[str, Any] | None = None,
         vertex: Vertex | None = None,
     ) -> None:
+        """创建组件级 span 并关联上下游节点。"""
         if not self._ready:
             return
-        # If user is not using session_id, then it becomes the same as flow_id, but
-        # we don't want to have an infinite thread with all the flow messages
+        # 注意：session_id 与 flow_id 相同时不创建 thread_id
         if "session_id" in inputs and inputs["session_id"] != self.flow_id:
             self.trace.update(metadata=(self.trace.metadata or {}) | {"thread_id": inputs["session_id"]})
 
@@ -140,6 +163,7 @@ class LangWatchTracer(BaseTracer):
         error: Exception | None = None,
         logs: Sequence[Log | dict] = (),
     ) -> None:
+        """结束组件级 span 并写入输出/错误。"""
         if not self._ready:
             return
         if self.spans.get(trace_id):
@@ -152,6 +176,7 @@ class LangWatchTracer(BaseTracer):
         error: Exception | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """结束根 span 并写入最终输入/输出。"""
         if not self._ready:
             return
         self.trace.root_span.end(
@@ -170,6 +195,7 @@ class LangWatchTracer(BaseTracer):
                 return
 
     def _convert_to_langwatch_types(self, io_dict: dict[str, Any] | None):
+        """批量转换为 LangWatch 兼容类型。"""
         from langwatch.utils import autoconvert_typed_values
 
         if io_dict is None:
@@ -180,6 +206,7 @@ class LangWatchTracer(BaseTracer):
         return autoconvert_typed_values(converted)
 
     def _convert_to_langwatch_type(self, value):
+        """递归转换为 LangWatch 兼容类型。"""
         from langchain_core.messages import BaseMessage
         from langwatch.langchain import langchain_message_to_chat_message, langchain_messages_to_chat_messages
         from lfx.schema.message import Message
@@ -204,6 +231,7 @@ class LangWatchTracer(BaseTracer):
         return value
 
     def get_langchain_callback(self) -> BaseCallbackHandler | None:
+        """返回 LangChain callback（若可用）。"""
         if self.trace is None:
             return None
 

@@ -1,19 +1,29 @@
+"""
+模块名称：CrewAI Agent 组件
+
+本模块提供 CrewAI Agent 的组件封装，支持在 Langflow 中配置角色、目标与工具并输出
+可运行的 Agent 实例。主要功能包括：
+- 将 Langflow 的 LLM/Tool 适配到 CrewAI
+- 构建 Agent 并暴露为组件输出
+
+关键组件：
+- `CrewAIAgentComponent`：Agent 构建组件入口
+
+设计背景：对 CrewAI Agent 做统一的组件封装，便于在流程中复用。
+注意事项：运行依赖 `crewai` 包，未安装将抛 `ImportError`。
+"""
+
 from lfx.base.agents.crewai.crew import convert_llm, convert_tools
 from lfx.custom.custom_component.component import Component
 from lfx.io import BoolInput, DictInput, HandleInput, MultilineInput, Output
 
 
 class CrewAIAgentComponent(Component):
-    """Component for creating a CrewAI agent.
+    """CrewAI Agent 组件。
 
-    This component allows you to create a CrewAI agent with the specified role, goal, backstory, tools,
-    and language model.
-
-    Args:
-        Component (Component): Base class for all components.
-
-    Returns:
-        Agent: CrewAI agent.
+    契约：输入角色/目标/工具/LLM 配置，输出 CrewAI `Agent` 实例。
+    副作用：构建 Agent 时会进行工具与 LLM 适配。
+    失败语义：缺少 `crewai` 依赖时抛 `ImportError`。
     """
 
     display_name = "CrewAI Agent"
@@ -81,6 +91,16 @@ class CrewAIAgentComponent(Component):
     ]
 
     def build_output(self):
+        """构建 CrewAI Agent 实例。
+
+        契约：输出 `Agent`，并将其可读表示写入 `self.status`。
+        关键路径（三步）：
+        1) 校验依赖并读取组件输入。
+        2) 适配 LLM 与工具集合。
+        3) 生成 Agent 并返回。
+
+        异常流：依赖缺失抛 `ImportError`。
+        """
         try:
             from crewai import Agent
         except ImportError as e:
@@ -89,7 +109,6 @@ class CrewAIAgentComponent(Component):
 
         kwargs = self.kwargs or {}
 
-        # Define the Agent
         agent = Agent(
             role=self.role,
             goal=self.goal,

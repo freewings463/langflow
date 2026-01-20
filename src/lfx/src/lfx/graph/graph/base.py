@@ -1,3 +1,19 @@
+"""模块名称：图运行时核心实现
+
+本模块实现图的构建、执行与调度，是 Langflow 运行时的核心。
+使用场景：加载流程、构建顶点/边、执行图并产出运行结果。
+主要功能包括：
+- 图结构的构建与序列化
+- 顶点构建、运行调度与缓存处理
+- 循环检测、分层排序与条件路由
+
+关键组件：
+- Graph：图执行入口与运行时状态容器
+
+设计背景：集中管理图结构与执行逻辑，统一运行时行为
+注意事项：涉及并发与缓存，改动需谨慎评估副作用
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +74,12 @@ if TYPE_CHECKING:
 
 
 class Graph:
-    """A class representing a graph of vertices and edges."""
+    """图执行核心。
+
+    契约：管理顶点/边与运行时状态，提供构建、执行与序列化能力
+    关键路径：1) 构建图结构 2) 调度执行 3) 汇总结果与状态
+    副作用：可能触发缓存、日志与追踪
+    """
 
     def __init__(
         self,
@@ -71,12 +92,14 @@ class Graph:
         log_config: LogConfig | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Initializes a new Graph instance.
+        """初始化 Graph 实例。
 
-        If both start and end components are provided, the graph is initialized and prepared for execution.
-        If only one is provided, a ValueError is raised. The context must be a dictionary if specified,
-        otherwise a TypeError is raised. Internal data structures for vertices, edges, state management,
-        run management, and tracing are set up during initialization.
+        关键路径（三步）：
+        1) 校验 start/end 组合与 context 类型
+        2) 初始化运行时结构与状态容器
+        3) 可选预构建并进入可执行状态
+
+        异常流：仅提供 start 或 end 时抛 `ValueError`；context 非 dict 抛 `TypeError`
         """
         if log_config:
             configure(**log_config)
@@ -105,9 +128,9 @@ class Graph:
         self.vertices_to_run: set[str] = set()
         self.stop_vertex: str | None = None
         self.inactive_vertices: set = set()
-        # Conditional routing system (separate from ACTIVE/INACTIVE cycle management)
-        self.conditionally_excluded_vertices: set = set()  # Vertices excluded by conditional routing
-        self.conditional_exclusion_sources: dict[str, set[str]] = {}  # Maps source vertex -> excluded vertices
+        # 注意：条件路由与 ACTIVE/INACTIVE 循环管理分离。
+        self.conditionally_excluded_vertices: set = set()  # 条件路由排除的顶点
+        self.conditional_exclusion_sources: dict[str, set[str]] = {}  # 来源顶点 -> 被排除顶点
         self.edges: list[CycleEdge] = []
         self.vertices: list[Vertex] = []
         self.run_manager = RunnableVerticesManager()
@@ -135,7 +158,7 @@ class Graph:
             msg = "Context must be a dictionary"
             raise TypeError(msg)
         self._context = dotdict(context or {})
-        # Lazy initialization - only get tracing service when needed
+        # 注意：追踪服务按需初始化，避免启动期开销。
         self._tracing_service: TracingService | None = None
         self._tracing_service_initialized = False
         if start is not None and end is not None:
@@ -147,7 +170,7 @@ class Graph:
 
     @property
     def lock(self):
-        """Lazy initialization of asyncio.Lock to avoid event loop binding issues."""
+        """延迟初始化 asyncio.Lock，避免绑定到错误事件循环。"""
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
@@ -185,10 +208,10 @@ class Graph:
         if not isinstance(other, Graph):
             msg = "Can only add Graph objects"
             raise TypeError(msg)
-        # Add the vertices and edges from the other graph to this graph
+        # 注意：合并另一个图的顶点与边。
         new_instance = copy.deepcopy(self)
         for vertex in other.vertices:
-            # This updates the edges as well
+            # 注意：添加顶点时会同步更新边。
             new_instance.add_vertex(vertex)
         new_instance.build_graph_maps(new_instance.edges)
         new_instance.define_vertices_lists()
@@ -198,9 +221,9 @@ class Graph:
         if not isinstance(other, Graph):
             msg = "Can only add Graph objects"
             raise TypeError(msg)
-        # Add the vertices and edges from the other graph to this graph
+        # 注意：合并另一个图的顶点与边。
         for vertex in other.vertices:
-            # This updates the edges as well
+            # 注意：添加顶点时会同步更新边。
             self.add_vertex(vertex)
         self.build_graph_maps(self.edges)
         self.define_vertices_lists()
@@ -208,7 +231,7 @@ class Graph:
 
     @property
     def tracing_service(self) -> TracingService | None:
-        """Lazily initialize tracing service only when accessed."""
+        """按需初始化追踪服务。"""
         if not self._tracing_service_initialized:
             try:
                 self._tracing_service = get_tracing_service()
@@ -233,7 +256,7 @@ class Graph:
         if self.raw_graph_data != {"nodes": [], "edges": []}:
             data_dict = self.raw_graph_data
         else:
-            # we need to convert the vertices and edges to json
+            # 注意：需将顶点与边转换为可序列化结构。
             nodes = [node.to_data() for node in self.vertices]
             edges = [edge.to_data() for edge in self.edges]
             self.raw_graph_data = {"nodes": nodes, "edges": edges}
@@ -365,12 +388,10 @@ class Graph:
         if reset_output_values:
             self._reset_all_output_values()
 
-        # The idea is for this to return a generator that yields the result of
-        # each step call and raise StopIteration when the graph is done
+        # 注意：该方法作为异步生成器逐步产出结果。
         if config is not None:
             self.__apply_config(config)
-        # I want to keep a counter of how many tyimes result.vertex.id
-        # has been yielded
+        # 注意：记录每个顶点产出次数，支持循环上限判断。
         yielded_counts: dict[str, int] = defaultdict(int)
 
         while should_continue(yielded_counts, max_iterations):
@@ -414,16 +435,12 @@ class Graph:
         config: StartConfigDict | None = None,
         event_manager: EventManager | None = None,
     ) -> Generator:
-        """Starts the graph execution synchronously by creating a new event loop in a separate thread.
+        """同步执行图（通过线程内事件循环）。
 
-        Args:
-            inputs: Optional list of input dictionaries
-            max_iterations: Optional maximum number of iterations
-            config: Optional configuration dictionary
-            event_manager: Optional event manager
-
-        Returns:
-            Generator yielding results from graph execution
+        关键路径（三步）：
+        1) 校验循环图的 max_iterations
+        2) 在线程中驱动 async 生成器
+        3) 从队列转发结果或异常
         """
         if self.is_cyclic and max_iterations is None:
             msg = "You must specify a max_iterations if the graph is cyclic"
@@ -432,22 +449,20 @@ class Graph:
         if config is not None:
             self.__apply_config(config)
 
-        # Create a queue for passing results and errors between threads
+        # 注意：队列用于线程间传递结果/异常。
         result_queue: queue.Queue[VertexBuildResult | Exception | None] = queue.Queue()
 
-        # Function to run async code in separate thread
+        # 注意：在线程内执行异步流程，避免主线程事件循环干扰。
         def run_async_code():
-            # Create new event loop for this thread
+            # 注意：线程内独立事件循环。
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
             try:
-                # Run the async generator
                 async_gen = self.async_start(inputs, max_iterations, event_manager)
 
                 while True:
                     try:
-                        # Get next result from async generator
                         result = loop.run_until_complete(anext(async_gen))
                         result_queue.put(result)
 
@@ -457,28 +472,24 @@ class Graph:
                     except StopAsyncIteration:
                         break
                     except ValueError as e:
-                        # Put the exception in the queue
                         result_queue.put(e)
                         break
 
             finally:
-                # Ensure all pending tasks are completed
+                # 注意：清理未完成任务，避免资源泄露。
                 pending = asyncio.all_tasks(loop)
                 if pending:
-                    # Create a future to gather all pending tasks
                     cleanup_future = asyncio.gather(*pending, return_exceptions=True)
                     loop.run_until_complete(cleanup_future)
 
-                # Close the loop
                 loop.close()
-                # Signal completion
                 result_queue.put(None)
 
-        # Start thread for async execution
+        # 注意：启动后台线程执行。
         thread = threading.Thread(target=run_async_code)
         thread.start()
 
-        # Yield results from queue
+        # 注意：从队列持续产出结果。
         while True:
             result = result_queue.get()
             if result is None:
@@ -487,7 +498,7 @@ class Graph:
                 raise result
             yield result
 
-        # Wait for thread to complete
+        # 注意：等待线程结束。
         thread.join()
 
     def _add_edge(self, edge: EdgeData) -> None:
@@ -503,7 +514,7 @@ class Graph:
         self._vertices.append(node)
 
     def add_edge(self, edge: EdgeData) -> None:
-        # Check if the edge already exists
+        # 注意：避免重复边。
         if edge in self._edges:
             return
         self._edges.append(edge)
@@ -515,21 +526,13 @@ class Graph:
 
     @property
     def is_state_vertices(self) -> list[str]:
-        """Returns a cached list of vertex IDs for vertices marked as state vertices.
-
-        The list is computed on first access by filtering vertices with `is_state` set to True and is
-        cached for future calls.
-        """
+        """返回 state 顶点 ID 列表（惰性缓存）。"""
         if self._is_state_vertices is None:
             self._is_state_vertices = [vertex.id for vertex in self.vertices if vertex.is_state]
         return self._is_state_vertices
 
     def activate_state_vertices(self, name: str, caller: str) -> None:
-        """Activates vertices associated with a given state name.
-
-        Marks vertices with the specified state name, as well as their successors and related
-        predecessors. The state manager is then updated with the new state record.
-        """
+        """激活指定状态相关的顶点与依赖。"""
         vertices_ids = set()
         new_predecessor_map = {}
         activated_vertices = []
@@ -543,12 +546,7 @@ class Graph:
                 activated_vertices.append(vertex_id)
                 vertices_ids.add(vertex_id)
                 successors = self.get_all_successors(vertex, flat=True)
-                # Update run_manager.run_predecessors because we are activating vertices
-                # The run_prdecessors is the predecessor map of the vertices
-                # we remove the vertex_id from the predecessor map whenever we run a vertex
-                # So we need to get all edges of the vertex and successors
-                # and run self.build_adjacency_maps(edges) to get the new predecessor map
-                # that is not complete but we can use to update the run_predecessors
+                # 注意：激活后需重建前驱映射以更新可运行状态。
                 successors_predecessors = set()
                 for sucessor in successors:
                     successors_predecessors.update(self.get_all_predecessors(sucessor))
@@ -575,18 +573,11 @@ class Graph:
         )
 
     def reset_activated_vertices(self) -> None:
-        """Resets the activated vertices in the graph."""
+        """清空已激活顶点集合。"""
         self.activated_vertices = []
 
     def validate_stream(self) -> None:
-        """Validates the stream configuration of the graph.
-
-        If there are two vertices in the same graph (connected by edges)
-        that have `stream=True` or `streaming=True`, raises a `ValueError`.
-
-        Raises:
-            ValueError: If two connected vertices have `stream=True` or `streaming=True`.
-        """
+        """校验流式配置，避免相邻节点同时开启流式。"""
         for vertex in self.vertices:
             if vertex.params.get("stream") or vertex.params.get("streaming"):
                 successors = self.get_all_successors(vertex)
@@ -607,36 +598,21 @@ class Graph:
 
     @property
     def is_cyclic(self):
-        """Check if the graph has any cycles.
-
-        Returns:
-            bool: True if the graph has any cycles, False otherwise.
-        """
+        """判断图是否存在环。"""
         if self._is_cyclic is None:
             self._is_cyclic = bool(self.cycle_vertices)
         return self._is_cyclic
 
     @property
     def run_id(self):
-        """The ID of the current run.
-
-        Returns:
-            str: The run ID.
-
-        Raises:
-            ValueError: If the run ID is not set.
-        """
+        """获取当前 run_id（未设置则报错）。"""
         if not self._run_id:
             msg = "Run ID not set"
             raise ValueError(msg)
         return self._run_id
 
     def set_run_id(self, run_id: uuid.UUID | str | None = None) -> None:
-        """Sets the ID of the current run.
-
-        Args:
-            run_id (str): The run ID.
-        """
+        """设置当前 run_id（缺省则生成）。"""
         if run_id is None:
             run_id = uuid.uuid4()
 
@@ -664,7 +640,7 @@ class Graph:
         outputs: dict[str, Any] | None = None,
         error: Exception | None = None,
     ) -> Callable:
-        # BackgroundTasks run in different context, so we need to copy the context
+        # 注意：BackgroundTasks 运行在不同上下文，需复制 context。
         context = contextvars.copy_context()
 
         async def async_end_traces_func():
@@ -683,21 +659,13 @@ class Graph:
 
     @property
     def sorted_vertices_layers(self) -> list[list[str]]:
-        """Returns the sorted layers of vertex IDs by type.
-
-        Each layer in the returned list contains vertex IDs grouped by their classification,
-        such as input, output, session, or state vertices. Sorting is performed if not already done.
-        """
+        """返回按类型分层后的顶点列表。"""
         if not self._sorted_vertices_layers:
             self.sort_vertices()
         return self._sorted_vertices_layers
 
     def define_vertices_lists(self) -> None:
-        """Populates internal lists of input, output, session ID, and state vertex IDs.
-
-        Iterates over all vertices and appends their IDs to the corresponding internal lists
-        based on their classification.
-        """
+        """填充输入/输出/会话/状态顶点列表。"""
         for vertex in self.vertices:
             if vertex.is_input:
                 self._is_input_vertices.append(vertex.id)
@@ -711,19 +679,13 @@ class Graph:
                 self._is_state_vertices.append(vertex.id)
 
     def _set_inputs(self, input_components: list[str], inputs: dict[str, str], input_type: InputType | None) -> None:
-        """Updates input vertices' parameters with the provided inputs, filtering by component list and input type.
-
-        Only vertices whose IDs or display names match the specified input components and whose IDs contain
-        the input type (unless input type is 'any' or None) are updated. Raises a ValueError if a specified
-        vertex is not found.
-        """
+        """根据组件列表与输入类型更新输入顶点参数。"""
         for vertex_id in self._is_input_vertices:
             vertex = self.get_vertex(vertex_id)
-            # If the vertex is not in the input_components list
+            # 注意：仅更新匹配的输入组件。
             if input_components and (vertex_id not in input_components and vertex.display_name not in input_components):
                 continue
-            # If the input_type is not any and the input_type is not in the vertex id
-            # Example: input_type = "chat" and vertex.id = "OpenAI-19ddn"
+            # 注意：限定输入类型（如 chat/webhook）。
             if input_type is not None and input_type != "any" and input_type not in vertex.id.lower():
                 continue
             if vertex is None:
@@ -744,20 +706,12 @@ class Graph:
         fallback_to_env_vars: bool,
         event_manager: EventManager | None = None,
     ) -> list[ResultData | None]:
-        """Runs the graph with the given inputs.
+        """执行一次图运行并返回结果列表。
 
-        Args:
-            inputs (Dict[str, str]): The input values for the graph.
-            input_components (list[str]): The components to run for the inputs.
-            input_type: (Optional[InputType]): The input type.
-            outputs (list[str]): The outputs to retrieve from the graph.
-            stream (bool): Whether to stream the results or not.
-            session_id (str): The session ID for the graph.
-            fallback_to_env_vars (bool): Whether to fallback to environment variables.
-            event_manager (EventManager | None): The event manager for the graph.
-
-        Returns:
-            List[Optional["ResultData"]]: The outputs of the graph.
+        关键路径（三步）：
+        1) 写入输入参数与会话信息
+        2) 执行图并捕获异常
+        3) 汇总输出结果
         """
         if input_components and not isinstance(input_components, list):
             msg = f"Invalid components value: {input_components}. Expected list"
@@ -770,14 +724,14 @@ class Graph:
             raise TypeError(msg)
         if inputs:
             self._set_inputs(input_components, inputs, input_type)
-        # Update all the vertices with the session_id
+        # 注意：将 session_id 写入需要它的顶点。
         for vertex_id in self.has_session_id_vertices:
             vertex = self.get_vertex(vertex_id)
             if vertex is None:
                 msg = f"Vertex {vertex_id} not found"
                 raise ValueError(msg)
             vertex.update_raw_params({"session_id": session_id})
-        # Process the graph
+        # 注意：执行图的构建与运行流程。
         try:
             cache_service = get_chat_service()
             if cache_service and self.flow_id:
@@ -786,7 +740,7 @@ class Graph:
             logger.exception("Error setting cache")
 
         try:
-            # Prioritize the webhook component if it exists
+            # 注意：若存在 webhook 组件，优先作为起点。
             start_component_id = find_start_component_id(self._is_input_vertices)
             await self.process(
                 start_component_id=start_component_id,
@@ -800,7 +754,7 @@ class Graph:
             raise ValueError(msg) from exc
 
         self._end_all_traces_async()
-        # Get the outputs
+        # 注意：收集已构建顶点的输出结果。
         vertex_outputs = []
         for vertex in self.vertices:
             if not vertex.built:
@@ -828,32 +782,14 @@ class Graph:
         fallback_to_env_vars: bool = False,
         event_manager: EventManager | None = None,
     ) -> list[RunOutputs]:
-        """Runs the graph with the given inputs.
-
-        Args:
-            inputs (list[Dict[str, str]]): The input values for the graph.
-            inputs_components (Optional[list[list[str]]], optional): Components to run for the inputs. Defaults to None.
-            types (Optional[list[Optional[InputType]]], optional): The types of the inputs. Defaults to None.
-            outputs (Optional[list[str]], optional): The outputs to retrieve from the graph. Defaults to None.
-            session_id (Optional[str], optional): The session ID for the graph. Defaults to None.
-            stream (bool, optional): Whether to stream the results or not. Defaults to False.
-            fallback_to_env_vars (bool, optional): Whether to fallback to environment variables. Defaults to False.
-            event_manager (EventManager | None): The event manager for the graph.
-
-        Returns:
-            List[RunOutputs]: The outputs of the graph.
-        """
-        # inputs is {"message": "Hello, world!"}
-        # we need to go through self.inputs and update the self.raw_params
-        # of the vertices that are inputs
-        # if the value is a list, we need to run multiple times
+        """异步运行图并返回输出列表。"""
+        # 注意：输入可能是单个 dict 或多次运行的列表。
         vertex_outputs = []
         if not isinstance(inputs, list):
             inputs = [inputs]
         elif not inputs:
             inputs = [{}]
-        # Length of all should be the as inputs length
-        # just add empty lists to complete the length
+        # 注意：对齐 inputs 与 inputs_components 的长度。
         if inputs_components is None:
             inputs_components = []
         for _ in range(len(inputs) - len(inputs_components)):
@@ -863,7 +799,7 @@ class Graph:
         if session_id:
             self.session_id = session_id
         for _ in range(len(inputs) - len(types)):
-            types.append("chat")  # default to chat
+            types.append("chat")  # 默认输入类型为 chat
         for run_inputs, components, input_type in zip(inputs, inputs_components, types, strict=True):
             run_outputs = await self._run(
                 inputs=run_inputs,
@@ -881,20 +817,12 @@ class Graph:
         return vertex_outputs
 
     def next_vertex_to_build(self):
-        """Returns the next vertex to be built.
-
-        Yields:
-            str: The ID of the next vertex to be built.
-        """
+        """返回待构建顶点的迭代器。"""
         yield from chain.from_iterable(self.vertices_layers)
 
     @property
     def metadata(self):
-        """The metadata of the graph.
-
-        Returns:
-            dict: The metadata of the graph.
-        """
+        """返回运行元数据。"""
         time_format = "%Y-%m-%d %H:%M:%S %Z"
         return {
             "start_time": self._start_time.strftime(time_format),
@@ -905,7 +833,7 @@ class Graph:
         }
 
     def build_graph_maps(self, edges: list[CycleEdge] | None = None, vertices: list[Vertex] | None = None) -> None:
-        """Builds the adjacency maps for the graph."""
+        """构建图的邻接映射与父子映射。"""
         if edges is None:
             edges = self.edges
 
@@ -918,19 +846,19 @@ class Graph:
         self.parent_child_map = self.build_parent_child_map(vertices)
 
     def reset_inactivated_vertices(self) -> None:
-        """Resets the inactivated vertices in the graph."""
+        """恢复所有被标记为 INACTIVE 的顶点。"""
         for vertex_id in self.inactivated_vertices.copy():
             self.mark_vertex(vertex_id, "ACTIVE")
         self.inactivated_vertices = set()
         self.inactivated_vertices = set()
 
     def mark_all_vertices(self, state: str) -> None:
-        """Marks all vertices in the graph."""
+        """批量设置所有顶点状态。"""
         for vertex in self.vertices:
             vertex.set_state(state)
 
     def mark_vertex(self, vertex_id: str, state: str) -> None:
-        """Marks a vertex in the graph."""
+        """设置单个顶点状态。"""
         vertex = self.get_vertex(vertex_id)
         vertex.set_state(state)
         if state == VertexStates.INACTIVE:
@@ -939,7 +867,7 @@ class Graph:
     def _mark_branch(
         self, vertex_id: str, state: str, visited: set | None = None, output_name: str | None = None
     ) -> set:
-        """Marks a branch of the graph."""
+        """标记指定分支（递归）。"""
         if visited is None:
             visited = set()
         else:
@@ -949,8 +877,7 @@ class Graph:
         visited.add(vertex_id)
 
         for child_id in self.parent_child_map[vertex_id]:
-            # Only child_id that have an edge with the vertex_id through the output_name
-            # should be marked
+            # 注意：仅标记通过指定输出名连接的子节点。
             if output_name:
                 edge = self.get_edge(vertex_id, child_id)
                 if edge and edge.source_handle.name != output_name:
@@ -963,7 +890,7 @@ class Graph:
         new_predecessor_map, _ = self.build_adjacency_maps(self.edges)
         new_predecessor_map = {k: v for k, v in new_predecessor_map.items() if k in visited}
         if vertex_id in self.cycle_vertices:
-            # Remove dependencies that are not in the cycle and have run at least once
+            # 注意：仅保留环内且已运行过的依赖。
             new_predecessor_map = {
                 k: [dep for dep in v if dep in self.cycle_vertices and dep in self.run_manager.ran_at_least_once]
                 for k, v in new_predecessor_map.items()
@@ -974,60 +901,46 @@ class Graph:
         )
 
     def exclude_branch_conditionally(self, vertex_id: str, output_name: str | None = None) -> None:
-        """Marks a branch as conditionally excluded (for conditional routing).
-
-        This system is separate from the ACTIVE/INACTIVE state used for cycle management:
-        - ACTIVE/INACTIVE: Reset after each cycle iteration to allow cycles to continue
-        - Conditional exclusion: Persists until explicitly cleared by the same source vertex
-
-        Used by ConditionalRouter to ensure only one branch executes per condition evaluation.
-        If this vertex has previously excluded branches, they are cleared first to allow
-        re-evaluation on subsequent iterations (e.g., in cycles where condition may change).
-
-        Args:
-            vertex_id: The source vertex making the exclusion decision
-            output_name: The output name to follow when excluding downstream vertices
-        """
-        # Clear any previous exclusions from this source vertex
+        """条件路由排除分支（与 ACTIVE/INACTIVE 分离）。"""
+        # 注意：清理该来源顶点之前的排除记录。
         if vertex_id in self.conditional_exclusion_sources:
             previous_exclusions = self.conditional_exclusion_sources[vertex_id]
             self.conditionally_excluded_vertices -= previous_exclusions
             del self.conditional_exclusion_sources[vertex_id]
 
-        # Now exclude the new branch
+        # 注意：记录本次排除的分支。
         visited: set[str] = set()
         excluded: set[str] = set()
         self._exclude_branch_conditionally(vertex_id, visited, excluded, output_name, skip_first=True)
 
-        # Track which vertices this source excluded
+        # 注意：记录来源顶点与排除集合的映射。
         if excluded:
             self.conditional_exclusion_sources[vertex_id] = excluded
 
     def _exclude_branch_conditionally(
         self, vertex_id: str, visited: set, excluded: set, output_name: str | None = None, *, skip_first: bool = False
     ) -> None:
-        """Recursively excludes vertices in a branch for conditional routing."""
+        """递归排除分支顶点。"""
         if vertex_id in visited:
             return
         visited.add(vertex_id)
 
-        # Don't exclude the first vertex (the router itself)
+        # 注意：首节点为路由器自身，不参与排除。
         if not skip_first:
             self.conditionally_excluded_vertices.add(vertex_id)
             excluded.add(vertex_id)
 
         for child_id in self.parent_child_map[vertex_id]:
-            # If we're at the router (skip_first=True) and have an output_name,
-            # only follow edges from that specific output
+            # 注意：在路由器层仅沿指定输出分支前进。
             if skip_first and output_name:
                 edge = self.get_edge(vertex_id, child_id)
                 if edge and edge.source_handle.name != output_name:
                     continue
-            # After the first level, exclude all descendants
+            # 注意：首层之后排除全部后代。
             self._exclude_branch_conditionally(child_id, visited, excluded, output_name=None, skip_first=False)
 
     def get_edge(self, source_id: str, target_id: str) -> CycleEdge | None:
-        """Returns the edge between two vertices."""
+        """获取两顶点之间的边（若存在）。"""
         for edge in self.edges:
             if edge.source_id == source_id and edge.target_id == target_id:
                 return edge
@@ -1046,9 +959,7 @@ class Graph:
         self._updates += 1
 
     def __getstate__(self):
-        # Get all attributes that are useful in runs.
-        # We don't need to save the state_manager because it is
-        # a singleton and it is not necessary to save it
+        # 注意：仅序列化运行必要字段；state_manager 为单例无需保存。
         return {
             "vertices": self.vertices,
             "edges": self.edges,
@@ -1080,12 +991,12 @@ class Graph:
         }
 
     def __deepcopy__(self, memo):
-        # Check if we've already copied this instance
+        # 注意：避免重复拷贝同一实例。
         if id(self) in memo:
             return memo[id(self)]
 
         if self._start is not None and self._end is not None:
-            # Deep copy start and end components
+            # 注意：深拷贝 start/end 组件。
             start_copy = copy.deepcopy(self._start, memo)
             end_copy = copy.deepcopy(self._end, memo)
             new_graph = type(self)(
@@ -1096,7 +1007,7 @@ class Graph:
                 copy.deepcopy(self.user_id, memo),
             )
         else:
-            # Create a new graph without start and end, but copy flow_id, flow_name, and user_id
+            # 注意：新图不带 start/end，但保留 flow 标识信息。
             new_graph = type(self)(
                 None,
                 None,
@@ -1104,10 +1015,10 @@ class Graph:
                 copy.deepcopy(self.flow_name, memo),
                 copy.deepcopy(self.user_id, memo),
             )
-            # Deep copy vertices and edges
+            # 注意：深拷贝顶点与边。
             new_graph.add_nodes_and_edges(copy.deepcopy(self._vertices, memo), copy.deepcopy(self._edges, memo))
 
-        # Store the newly created object in memo
+        # 注意：写入 memo 防止循环拷贝。
         memo[id(self)] = new_graph
 
         return new_graph
@@ -1120,7 +1031,7 @@ class Graph:
             state["run_manager"] = RunnableVerticesManager.from_dict(run_manager)
         self.__dict__.update(state)
         self.vertex_map = {vertex.id: vertex for vertex in self.vertices}
-        # Tracing service will be lazily initialized via property when needed
+        # 注意：追踪服务通过属性惰性初始化。
         self.set_run_id(self._run_id)
 
     @classmethod
@@ -1132,18 +1043,7 @@ class Graph:
         user_id: str | None = None,
         context: dict | None = None,
     ) -> Graph:
-        """Creates a graph from a payload.
-
-        Args:
-            payload: The payload to create the graph from.
-            flow_id: The ID of the flow.
-            flow_name: The flow name.
-            user_id: The user ID.
-            context: Optional context dictionary for request-specific data.
-
-        Returns:
-            Graph: The created graph.
-        """
+        """从 payload 构建图实例。"""
         if "data" in payload:
             payload = payload["data"]
         try:
@@ -1167,14 +1067,10 @@ class Graph:
             return False
         return self.__repr__() == other.__repr__()
 
-    # update this graph with another graph by comparing the __repr__ of each vertex
-    # and if the __repr__ of a vertex is not the same as the other
-    # then update the .data of the vertex to the self
-    # both graphs have the same vertices and edges
-    # but the data of the vertices might be different
+    # 注意：通过比较顶点的 __repr__ 更新本图的数据，保持结构一致。
 
     def update_edges_from_vertex(self, other_vertex: Vertex) -> None:
-        """Updates the edges of a vertex in the Graph."""
+        """用另一个顶点的边更新当前图的边集合。"""
         new_edges = []
         for edge in self.edges:
             if other_vertex.id in {edge.source_id, edge.target_id}:
@@ -1197,45 +1093,41 @@ class Graph:
         return all(edge in other_vertex.edges for edge in vertex.edges)
 
     def update(self, other: Graph) -> Graph:
-        # Existing vertices in self graph
+        # 注意：当前图已有顶点集合。
         existing_vertex_ids = {vertex.id for vertex in self.vertices}
-        # Vertex IDs in the other graph
+        # 注意：目标图顶点集合。
         other_vertex_ids = set(other.vertex_map.keys())
 
-        # Find vertices that are in other but not in self (new vertices)
+        # 注意：新增顶点。
         new_vertex_ids = other_vertex_ids - existing_vertex_ids
 
-        # Find vertices that are in self but not in other (removed vertices)
+        # 注意：被移除的顶点。
         removed_vertex_ids = existing_vertex_ids - other_vertex_ids
 
-        # Remove vertices that are not in the other graph
+        # 注意：移除不再存在的顶点。
         for vertex_id in removed_vertex_ids:
             with contextlib.suppress(ValueError):
                 self.remove_vertex(vertex_id)
 
-        # The order here matters because adding the vertex is required
-        # if any of them have edges that point to any of the new vertices
-        # By adding them first, them adding the edges we ensure that the
-        # edges have valid vertices to point to
+        # 注意：先添加新顶点再更新边，避免边指向不存在的顶点。
 
-        # Add new vertices
+        # 注意：添加新顶点。
         for vertex_id in new_vertex_ids:
             new_vertex = other.get_vertex(vertex_id)
             self._add_vertex(new_vertex)
 
-        # Now update the edges
+        # 注意：更新新顶点关联的边。
         for vertex_id in new_vertex_ids:
             new_vertex = other.get_vertex(vertex_id)
             self._update_edges(new_vertex)
-            # Graph is set at the end because the edges come from the graph
-            # and the other graph is where the new edges and vertices come from
+            # 注意：边来自新图，因此此处回填 graph 引用。
             new_vertex.graph = self
 
-        # Update existing vertices that have changed
+        # 注意：更新发生变化的顶点数据。
         for vertex_id in existing_vertex_ids.intersection(other_vertex_ids):
             self_vertex = self.get_vertex(vertex_id)
             other_vertex = other.get_vertex(vertex_id)
-            # If the vertices are not identical, update the vertex
+            # 注意：顶点不一致时进行更新。
             if not self.vertex_data_is_identical(self_vertex, other_vertex):
                 self.update_vertex_from_another(self_vertex, other_vertex)
 
@@ -1245,21 +1137,15 @@ class Graph:
         return self
 
     def update_vertex_from_another(self, vertex: Vertex, other_vertex: Vertex) -> None:
-        """Updates a vertex from another vertex.
-
-        Args:
-            vertex (Vertex): The vertex to be updated.
-            other_vertex (Vertex): The vertex to update from.
-        """
+        """用另一个顶点的数据覆盖当前顶点。"""
         vertex.full_data = other_vertex.full_data
         vertex.parse_data()
-        # Now we update the edges of the vertex
+        # 注意：同步更新边信息。
         self.update_edges_from_vertex(other_vertex)
         vertex.params = {}
         vertex.build_params()
         vertex.graph = self
-        # If the vertex is frozen, we don't want
-        # to reset the results nor the built attribute
+        # 注意：冻结顶点不重置结果与 built 状态。
         if not vertex.frozen:
             vertex.built = False
             vertex.result = None
@@ -1268,7 +1154,7 @@ class Graph:
         self.reset_all_edges_of_vertex(vertex)
 
     def reset_all_edges_of_vertex(self, vertex: Vertex) -> None:
-        """Resets all the edges of a vertex."""
+        """重建顶点关联边的参数配置。"""
         for edge in vertex.edges:
             for vid in [edge.source_id, edge.target_id]:
                 if vid in self.vertex_map:
@@ -1277,30 +1163,29 @@ class Graph:
                         vertex_.build_params()
 
     def _add_vertex(self, vertex: Vertex) -> None:
-        """Adds a vertex to the graph."""
+        """向图中加入顶点（不更新边）。"""
         self.vertices.append(vertex)
         self.vertex_map[vertex.id] = vertex
 
     def add_vertex(self, vertex: Vertex) -> None:
-        """Adds a new vertex to the graph."""
+        """向图中加入顶点并更新边。"""
         self._add_vertex(vertex)
         self._update_edges(vertex)
 
     def _update_edges(self, vertex: Vertex) -> None:
-        """Updates the edges of a vertex."""
-        # Vertex has edges, so we need to update the edges
+        """根据顶点边信息更新图边集合。"""
+        # 注意：顶点自带边，需同步到图中。
         for edge in vertex.edges:
             if edge not in self.edges and edge.source_id in self.vertex_map and edge.target_id in self.vertex_map:
                 self.edges.append(edge)
 
     def _build_graph(self) -> None:
-        """Builds the graph from the vertices and edges."""
+        """根据节点/边数据构建图结构。"""
         self.vertices = self._build_vertices()
         self.vertex_map = {vertex.id: vertex for vertex in self.vertices}
         self.edges = self._build_edges()
 
-        # This is a hack to make sure that the LLM vertex is sent to
-        # the toolkit vertex
+        # 注意：此处先构建参数与组件，避免 LLM 顶点参数缺失。
         self._build_vertex_params()
         self._instantiate_components_in_vertices()
         self._set_cache_to_vertices_in_cycle()
@@ -1310,22 +1195,11 @@ class Graph:
                 self.run_manager.add_to_cycle_vertices(vertex.id)
 
     def _get_edges_as_list_of_tuples(self) -> list[tuple[str, str]]:
-        """Returns the edges of the graph as a list of tuples.
-
-        Each tuple contains the source and target handle IDs from the edge data.
-
-        Returns:
-            list[tuple[str, str]]: List of (source_id, target_id) tuples representing graph edges.
-        """
+        """将边转换为 (source_id, target_id) 列表。"""
         return [(e["data"]["sourceHandle"]["id"], e["data"]["targetHandle"]["id"]) for e in self._edges]
 
     def _set_cache_if_listen_notify_components(self) -> None:
-        """Disables caching for all vertices if Listen/Notify components are present.
-
-        If the graph contains any Listen or Notify components, caching is disabled for all vertices
-        by setting cache=False on their outputs. This ensures proper handling of real-time
-        communication between components.
-        """
+        """若存在 Listen/Notify 组件，则全局关闭输出缓存。"""
         has_listen_or_notify_component = any(
             vertex.id.split("-")[0] in {"Listen", "Notify"} for vertex in self.vertices
         )
@@ -1334,7 +1208,7 @@ class Graph:
                 vertex.apply_on_outputs(lambda output_object: setattr(output_object, "cache", False))
 
     def _set_cache_to_vertices_in_cycle(self) -> None:
-        """Sets the cache to the vertices in cycle."""
+        """对环内顶点关闭输出缓存。"""
         edges = self._get_edges_as_list_of_tuples()
         cycle_vertices = set(find_cycle_vertices(edges))
         for vertex in self.vertices:
@@ -1342,12 +1216,12 @@ class Graph:
                 vertex.apply_on_outputs(lambda output_object: setattr(output_object, "cache", False))
 
     def _instantiate_components_in_vertices(self) -> None:
-        """Instantiates the components in the vertices."""
+        """实例化所有顶点的组件。"""
         for vertex in self.vertices:
             vertex.instantiate_component(self.user_id)
 
     def remove_vertex(self, vertex_id: str) -> None:
-        """Removes a vertex from the graph."""
+        """从图中移除顶点及其相关边。"""
         vertex = self.get_vertex(vertex_id)
         if vertex is None:
             return
@@ -1356,17 +1230,17 @@ class Graph:
         self.edges = [edge for edge in self.edges if vertex_id not in {edge.source_id, edge.target_id}]
 
     def _build_vertex_params(self) -> None:
-        """Identifies and handles the LLM vertex within the graph."""
+        """构建顶点参数。"""
         for vertex in self.vertices:
             vertex.build_params()
 
     def _validate_vertex(self, vertex: Vertex) -> bool:
-        """Validates a vertex."""
-        # All vertices that do not have edges are invalid
+        """校验顶点是否可参与执行。"""
+        # 注意：无任何边连接的顶点视为无效。
         return len(self.get_vertex_edges(vertex.id)) > 0
 
     def get_vertex(self, vertex_id: str) -> Vertex:
-        """Returns a vertex by id."""
+        """按 ID 获取顶点（不存在则抛错）。"""
         try:
             return self.vertex_map[vertex_id]
         except KeyError as e:
@@ -1374,13 +1248,11 @@ class Graph:
             raise ValueError(msg) from e
 
     def get_root_of_group_node(self, vertex_id: str) -> Vertex:
-        """Returns the root of a group node."""
+        """获取分组节点的根顶点。"""
         if vertex_id in self.top_level_vertices:
-            # Get all vertices with vertex_id as .parent_node_id
-            # then get the one at the top
+            # 注意：找出以该节点为 parent 的子节点。
             vertices = [vertex for vertex in self.vertices if vertex.parent_node_id == vertex_id]
-            # Now go through successors of the vertices
-            # and get the one that none of its successors is in vertices
+            # 注意：选择后继不再落入子集的顶点作为根。
             for vertex in vertices:
                 successors = self.get_all_successors(vertex, recursive=False)
                 if not any(successor in vertices for successor in successors):
@@ -1415,12 +1287,12 @@ class Graph:
             raise ValueError(msg)
         chat_service = get_chat_service()
 
-        # Provide fallback cache functions if chat service is unavailable
+        # 注意：chat 服务不可用时提供空实现缓存函数。
         if chat_service is not None:
             get_cache_func = chat_service.get_cache
             set_cache_func = chat_service.set_cache
         else:
-            # Fallback no-op cache functions for tests or when service unavailable
+            # 注意：测试或服务不可用时的空实现。
             async def get_cache_func(*args, **kwargs):  # noqa: ARG001
                 return None
 
@@ -1474,17 +1346,7 @@ class Graph:
         files: list[str] | None = None,
         user_id: str | None = None,
     ):
-        """Runs the next vertex in the graph.
-
-        Note:
-            This function is a synchronous wrapper around `astep`.
-            It creates an event loop if one does not exist.
-
-        Args:
-            inputs: The inputs for the vertex. Defaults to None.
-            files: The files for the vertex. Defaults to None.
-            user_id: The user ID. Defaults to None.
-        """
+        """同步执行下一顶点（包装 `astep`）。"""
         return run_until_complete(self.astep(inputs, files, user_id))
 
     async def build_vertex(
@@ -1499,37 +1361,24 @@ class Graph:
         fallback_to_env_vars: bool = False,
         event_manager: EventManager | None = None,
     ) -> VertexBuildResult:
-        """Builds a vertex in the graph.
+        """构建单个顶点并返回构建结果。
 
-        Args:
-            vertex_id (str): The ID of the vertex to build.
-            get_cache (GetCache): A coroutine to get the cache.
-            set_cache (SetCache): A coroutine to set the cache.
-            inputs_dict (Optional[Dict[str, str]]): Optional dictionary of inputs for the vertex. Defaults to None.
-            files: (Optional[List[str]]): Optional list of files. Defaults to None.
-            user_id (Optional[str]): Optional user ID. Defaults to None.
-            fallback_to_env_vars (bool): Whether to fallback to environment variables. Defaults to False.
-            event_manager (Optional[EventManager]): Optional event manager. Defaults to None.
-
-        Returns:
-            Tuple: A tuple containing the next runnable vertices, top level vertices, result dictionary,
-            parameters, validity flag, artifacts, and the built vertex.
-
-        Raises:
-            ValueError: If no result is found for the vertex.
+        关键路径（三步）：
+        1) 判断是否需要构建或读取缓存
+        2) 执行顶点构建并更新状态
+        3) 组装结果并返回
         """
         vertex = self.get_vertex(vertex_id)
         self.run_manager.add_to_vertices_being_run(vertex_id)
         try:
             params = ""
             should_build = False
-            # Loop components must always build, even when frozen,
-            # because they need to iterate through their data
+            # 注意：Loop 顶点即使冻结也必须执行，以推进迭代。
             is_loop_component = vertex.display_name == "Loop" or vertex.is_loop
             if not vertex.frozen or is_loop_component:
                 should_build = True
             else:
-                # Check the cache for the vertex
+                # 注意：优先使用缓存结果。
                 if get_cache is not None:
                     cached_result = await get_cache(key=vertex.id)
                 else:
@@ -1539,7 +1388,7 @@ class Graph:
                 else:
                     try:
                         cached_vertex_dict = cached_result["result"]
-                        # Now set update the vertex with the cached vertex
+                        # 注意：用缓存结果恢复顶点状态。
                         vertex.built = cached_vertex_dict["built"]
                         vertex.artifacts = cached_vertex_dict["artifacts"]
                         vertex.built_object = cached_vertex_dict["built_object"]
@@ -1604,9 +1453,8 @@ class Graph:
         is_target: bool | None = None,
         is_source: bool | None = None,
     ) -> list[CycleEdge]:
-        """Returns a list of edges for a given vertex."""
-        # The idea here is to return the edges that have the vertex_id as source or target
-        # or both
+        """返回包含该顶点的边列表。"""
+        # 注意：同时匹配 source/target。
         return [
             edge
             for edge in self.edges
@@ -1615,7 +1463,7 @@ class Graph:
         ]
 
     def get_vertices_with_target(self, vertex_id: str) -> list[Vertex]:
-        """Returns the vertices connected to a vertex."""
+        """返回指向该顶点的上游顶点列表。"""
         vertices: list[Vertex] = []
         for edge in self.edges:
             if edge.target_id == vertex_id:
@@ -1632,7 +1480,13 @@ class Graph:
         start_component_id: str | None = None,
         event_manager: EventManager | None = None,
     ) -> Graph:
-        """Processes the graph with vertices in each layer run in parallel."""
+        """按层并行处理图中的顶点。
+
+        关键路径（三步）：
+        1) 获取首层并初始化缓存函数
+        2) 并行执行当前层任务
+        3) 计算下一层并迭代
+        """
         has_webhook_component = "webhook" in start_component_id.lower() if start_component_id else False
         first_layer = self.sort_vertices(start_component_id=start_component_id)
         vertex_task_run_count: dict[str, int] = {}
@@ -1640,12 +1494,12 @@ class Graph:
         layer_index = 0
         chat_service = get_chat_service()
 
-        # Provide fallback cache functions if chat service is unavailable
+        # 注意：chat 服务不可用时提供空实现缓存函数。
         if chat_service is not None:
             get_cache_func = chat_service.get_cache
             set_cache_func = chat_service.set_cache
         else:
-            # Fallback no-op cache functions for tests or when service unavailable
+            # 注意：测试或服务不可用时的空实现。
             async def get_cache_func(*args, **kwargs):  # noqa: ARG001
                 return None
 
@@ -1655,8 +1509,8 @@ class Graph:
         await self.initialize_run()
         lock = asyncio.Lock()
         while to_process:
-            current_batch = list(to_process)  # Copy current deque items to a list
-            to_process.clear()  # Clear the deque for new items
+            current_batch = list(to_process)  # 注意：复制当前批次。
+            to_process.clear()  # 注意：清空队列等待下一批。
             tasks = []
             for vertex_id in current_batch:
                 vertex = self.get_vertex(vertex_id)
@@ -1692,11 +1546,7 @@ class Graph:
         return self
 
     def find_next_runnable_vertices(self, vertex_successors_ids: list[str]) -> list[str]:
-        """Determines the next set of runnable vertices from a list of successor vertex IDs.
-
-        For each successor, if it is not runnable, recursively finds its runnable
-        predecessors; otherwise, includes the successor itself. Returns a sorted list of all such vertex IDs.
-        """
+        """根据后继列表推导下一批可运行顶点。"""
         next_runnable_vertices = set()
         for v_id in sorted(vertex_successors_ids):
             if not self.is_vertex_runnable(v_id):
@@ -1707,19 +1557,7 @@ class Graph:
         return sorted(next_runnable_vertices)
 
     async def get_next_runnable_vertices(self, lock: asyncio.Lock, vertex: Vertex, *, cache: bool = True) -> list[str]:
-        """Determines the next set of runnable vertex IDs after a vertex completes execution.
-
-        If the completed vertex is a state vertex, any recently activated state vertices are also included.
-        Updates the run manager to reflect the new runnable state and optionally caches the updated graph state.
-
-        Args:
-            lock: An asyncio lock for thread-safe updates.
-            vertex: The vertex that has just finished execution.
-            cache: If True, caches the updated graph state.
-
-        Returns:
-            A list of vertex IDs that are ready to be executed next.
-        """
+        """顶点完成后计算下一批可运行顶点。"""
         v_id = vertex.id
         v_successors_ids = vertex.successors_ids
         self.run_manager.ran_at_least_once.add(v_id)
@@ -1727,7 +1565,7 @@ class Graph:
             self.run_manager.remove_vertex_from_runnables(v_id)
             next_runnable_vertices = self.find_next_runnable_vertices(v_successors_ids)
 
-            for next_v_id in set(next_runnable_vertices):  # Use set to avoid duplicates
+            for next_v_id in set(next_runnable_vertices):  # 注意：去重避免重复。
                 if next_v_id == v_id:
                     next_runnable_vertices.remove(v_id)
                 else:
@@ -1740,11 +1578,7 @@ class Graph:
         return next_runnable_vertices
 
     async def _log_vertex_build_from_exception(self, vertex_id: str, result: Exception) -> None:
-        """Logs detailed information about a vertex build exception.
-
-        Formats the exception message and stack trace, constructs an error output,
-        and records the failure using the vertex build logging system.
-        """
+        """记录顶点构建异常并写入日志事件。"""
         if isinstance(result, ComponentBuildError):
             params = result.message
             tb = result.formatted_traceback
@@ -1782,13 +1616,7 @@ class Graph:
     async def _execute_tasks(
         self, tasks: list[asyncio.Task], lock: asyncio.Lock, *, has_webhook_component: bool = False
     ) -> list[str]:
-        """Executes tasks in parallel, handling exceptions for each task.
-
-        Args:
-            tasks: List of tasks to execute
-            lock: Async lock for synchronization
-            has_webhook_component: Whether the graph has a webhook component
-        """
+        """并行执行任务并处理异常。"""
         results = []
         completed_tasks = await asyncio.gather(*tasks, return_exceptions=True)
         vertices: list[Vertex] = []
@@ -1802,7 +1630,7 @@ class Graph:
                 if has_webhook_component:
                     await self._log_vertex_build_from_exception(vertex_id, result)
 
-                # Cancel all remaining tasks
+                # 注意：出现异常时取消剩余任务。
                 for t in tasks[i + 1 :]:
                     t.cancel()
                 raise result
@@ -1823,9 +1651,7 @@ class Graph:
                 raise TypeError(msg)
 
         for v in vertices:
-            # set all executed vertices as non-runnable to not run them again.
-            # they could be calculated as predecessor or successors of parallel vertices
-            # This could usually happen with input vertices like ChatInput
+            # 注意：执行过的顶点移出可运行集合，避免并行重复调度。
             self.run_manager.remove_vertex_from_runnables(v.id)
 
             await logger.adebug(f"Vertex {v.id}, result: {v.built_result}, object: {v.built_object}")
@@ -1836,21 +1662,14 @@ class Graph:
         return list(set(results))
 
     def topological_sort(self) -> list[Vertex]:
-        """Performs a topological sort of the vertices in the graph.
-
-        Returns:
-            List[Vertex]: A list of vertices in topological order.
-
-        Raises:
-            ValueError: If the graph contains a cycle.
-        """
-        # States: 0 = unvisited, 1 = visiting, 2 = visited
+        """对顶点执行拓扑排序。"""
+        # 注意：状态 0=未访问，1=访问中，2=已访问。
         state = dict.fromkeys(self.vertices, 0)
         sorted_vertices = []
 
         def dfs(vertex) -> None:
             if state[vertex] == 1:
-                # We have a cycle
+                # 注意：回边表示存在环。
                 msg = "Graph contains a cycle, cannot perform topological sort"
                 raise ValueError(msg)
             if state[vertex] == 0:
@@ -1861,7 +1680,7 @@ class Graph:
                 state[vertex] = 2
                 sorted_vertices.append(vertex)
 
-        # Visit each vertex
+        # 注意：逐顶点 DFS。
         for vertex in self.vertices:
             if state[vertex] == 0:
                 dfs(vertex)
@@ -1869,31 +1688,21 @@ class Graph:
         return list(reversed(sorted_vertices))
 
     def generator_build(self) -> Generator[Vertex, None, None]:
-        """Builds each vertex in the graph and yields it."""
+        """按拓扑顺序产出顶点。"""
         sorted_vertices = self.topological_sort()
         logger.debug("There are %s vertices in the graph", len(sorted_vertices))
         yield from sorted_vertices
 
     def get_predecessors(self, vertex):
-        """Returns the predecessors of a vertex."""
+        """返回顶点的直接前驱。"""
         return [self.get_vertex(source_id) for source_id in self.predecessor_map.get(vertex.id, [])]
 
     def get_all_successors(self, vertex: Vertex, *, recursive=True, flat=True, visited=None):
-        """Returns all successors of a given vertex, optionally recursively and as a flat or nested list.
-
-        Args:
-            vertex: The vertex whose successors are to be retrieved.
-            recursive: If True, retrieves successors recursively; otherwise, only immediate successors.
-            flat: If True, returns a flat list of successors; if False, returns a nested list structure.
-            visited: Internal set used to track visited vertices and prevent cycles.
-
-        Returns:
-            A list of successor vertices, either flat or nested depending on the `flat` parameter.
-        """
+        """返回顶点后继（可递归/扁平/嵌套）。"""
         if visited is None:
             visited = set()
 
-        # Prevent revisiting vertices to avoid infinite loops in cyclic graphs
+        # 注意：避免循环图重复访问。
         if vertex in visited:
             return []
 
@@ -1923,22 +1732,11 @@ class Graph:
         return successors_result
 
     def get_successors(self, vertex: Vertex) -> list[Vertex]:
-        """Returns the immediate successor vertices of the given vertex.
-
-        Args:
-            vertex: The vertex whose successors are to be retrieved.
-
-        Returns:
-            A list of vertices that are direct successors of the specified vertex.
-        """
+        """返回顶点的直接后继。"""
         return [self.get_vertex(target_id) for target_id in self.successor_map.get(vertex.id, set())]
 
     def get_all_predecessors(self, vertex: Vertex, *, recursive: bool = True) -> list[Vertex]:
-        """Retrieves all predecessor vertices of a given vertex.
-
-        If `recursive` is True, returns both direct and indirect predecessors by
-        traversing the graph recursively. If False, returns only the immediate predecessors.
-        """
+        """返回顶点的前驱（可递归）。"""
         _predecessors = self.predecessor_map.get(vertex.id, [])
         predecessors = [self.get_vertex(v_id) for v_id in _predecessors]
         if recursive:
@@ -1949,11 +1747,7 @@ class Graph:
         return predecessors
 
     def get_vertex_neighbors(self, vertex: Vertex) -> dict[Vertex, int]:
-        """Returns a dictionary mapping each direct neighbor of a vertex to the count of connecting edges.
-
-        A neighbor is any vertex directly connected to the input vertex, either as a source or target.
-        The count reflects the number of edges between the input vertex and each neighbor.
-        """
+        """返回相邻顶点及连接边数量。"""
         neighbors: dict[Vertex, int] = {}
         for edge in self.edges:
             if edge.source_id == vertex.id:
@@ -1991,10 +1785,8 @@ class Graph:
         return self._cycle_vertices
 
     def _build_edges(self) -> list[CycleEdge]:
-        """Builds the edges of the graph."""
-        # Edge takes two vertices as arguments, so we need to build the vertices first
-        # and then build the edges
-        # if we can't find a vertex, we raise an error
+        """根据边数据构建 Edge/CycleEdge。"""
+        # 注意：先确保顶点存在，再构建边。
         edges: set[CycleEdge | Edge] = set()
         for edge in self._edges:
             new_edge = self.build_edge(edge)
@@ -2021,8 +1813,8 @@ class Graph:
 
     @staticmethod
     def _get_vertex_class(node_type: str, node_base_type: str, node_id: str) -> type[Vertex]:
-        """Returns the node class based on the node type."""
-        # First we check for the node_base_type
+        """根据类型信息选择顶点类。"""
+        # 注意：优先使用 node_base_type。
         node_name = node_id.split("-")[0]
         if node_name in InterfaceComponentTypes or node_type in InterfaceComponentTypes:
             return InterfaceVertex
@@ -2038,7 +1830,7 @@ class Graph:
         return Vertex
 
     def _build_vertices(self) -> list[Vertex]:
-        """Builds the vertices of the graph."""
+        """构建顶点对象列表。"""
         vertices: list[Vertex] = []
         for frontend_data in self._vertices:
             if frontend_data.get("type") == NodeTypeEnum.NoteNode:
@@ -2092,7 +1884,7 @@ class Graph:
 
     @staticmethod
     def get_children_by_vertex_type(vertex: Vertex, vertex_type: str) -> list[Vertex]:
-        """Returns the children of a vertex based on the vertex type."""
+        """按类型筛选子节点。"""
         children = []
         vertex_types = [vertex.data["type"]]
         if "node" in vertex.data:
@@ -2115,38 +1907,31 @@ class Graph:
         )
 
     def __hash__(self) -> int:
-        """Return hash of the graph based on its string representation."""
+        """基于字符串表示生成哈希。"""
         return hash(self.__repr__())
 
     def get_vertex_predecessors_ids(self, vertex_id: str) -> list[str]:
-        """Get the predecessor IDs of a vertex."""
+        """返回顶点前驱 ID。"""
         return [v.id for v in self.get_predecessors(self.get_vertex(vertex_id))]
 
     def get_vertex_successors_ids(self, vertex_id: str) -> list[str]:
-        """Get the successor IDs of a vertex."""
+        """返回顶点后继 ID。"""
         return [v.id for v in self.get_vertex(vertex_id).successors]
 
     def get_vertex_input_status(self, vertex_id: str) -> bool:
-        """Check if a vertex is an input vertex."""
+        """判断顶点是否为输入顶点。"""
         return self.get_vertex(vertex_id).is_input
 
     def get_parent_map(self) -> dict[str, str | None]:
-        """Get the parent node map for all vertices."""
+        """返回所有顶点的 parent 映射。"""
         return {vertex.id: vertex.parent_node_id for vertex in self.vertices}
 
     def get_vertex_ids(self) -> list[str]:
-        """Get all vertex IDs in the graph."""
+        """返回图中所有顶点 ID。"""
         return [vertex.id for vertex in self.vertices]
 
     def get_terminal_nodes(self) -> list[str]:
-        """Returns vertex IDs that are terminal nodes (not source of any edge).
-
-        Terminal nodes are vertices that have no outgoing edges - they are not
-        listed as source_id in any of the graph's edges.
-
-        Returns:
-            list[str]: List of vertex IDs that are terminal nodes.
-        """
+        """返回终端节点（无出边）。"""
         return [vertex.id for vertex in self.vertices if not self.successor_map.get(vertex.id, [])]
 
     def sort_vertices(
@@ -2154,7 +1939,7 @@ class Graph:
         stop_component_id: str | None = None,
         start_component_id: str | None = None,
     ) -> list[str]:
-        """Sorts the vertices in the graph."""
+        """对顶点进行分层排序。"""
         self.mark_all_vertices("ACTIVE")
 
         first_layer, remaining_layers = get_sorted_vertices(
@@ -2182,12 +1967,12 @@ class Graph:
 
     @staticmethod
     def sort_interface_components_first(vertices_layers: list[list[str]]) -> list[list[str]]:
-        """Sorts the vertices in the graph so that vertices containing ChatInput or ChatOutput come first."""
+        """将包含 ChatInput/ChatOutput 的顶点置前。"""
 
         def contains_interface_component(vertex):
             return any(component.value in vertex for component in InterfaceComponentTypes)
 
-        # Sort each inner list so that vertices containing ChatInput or ChatOutput come first
+        # 注意：对每层按接口组件优先排序。
         return [
             sorted(
                 inner_list,
@@ -2197,10 +1982,10 @@ class Graph:
         ]
 
     def sort_by_avg_build_time(self, vertices_layers: list[list[str]]) -> list[list[str]]:
-        """Sorts the vertices in the graph so that vertices with the lowest average build time come first."""
+        """按平均构建耗时升序排序顶点层。"""
 
         def sort_layer_by_avg_build_time(vertices_ids: list[str]) -> list[str]:
-            """Sorts the vertices in the graph so that vertices with the lowest average build time come first."""
+            """对单层按平均构建耗时排序。"""
             if len(vertices_ids) == 1:
                 return vertices_ids
             vertices_ids.sort(key=lambda vertex_id: self.get_vertex(vertex_id).avg_build_time)
@@ -2210,8 +1995,8 @@ class Graph:
         return [sort_layer_by_avg_build_time(layer) for layer in vertices_layers]
 
     def is_vertex_runnable(self, vertex_id: str) -> bool:
-        """Returns whether a vertex is runnable."""
-        # Check if vertex is conditionally excluded (for conditional routing)
+        """判断顶点是否可运行。"""
+        # 注意：条件路由排除的顶点直接不可运行。
         if vertex_id in self.conditionally_excluded_vertices:
             return False
         is_active = self.get_vertex(vertex_id).is_active()
@@ -2219,19 +2004,11 @@ class Graph:
         return self.run_manager.is_vertex_runnable(vertex_id, is_active=is_active, is_loop=is_loop)
 
     def build_run_map(self) -> None:
-        """Builds the run map for the graph.
-
-        This method is responsible for building the run map for the graph,
-        which maps each node in the graph to its corresponding run function.
-        """
+        """构建运行映射（前驱 -> 可解锁后继）。"""
         self.run_manager.build_run_map(predecessor_map=self.predecessor_map, vertices_to_run=self.vertices_to_run)
 
     def find_runnable_predecessors_for_successors(self, vertex_id: str) -> list[str]:
-        """For each successor of the current vertex, find runnable predecessors if any.
-
-        This checks the direct predecessors of each successor to identify any that are
-        immediately runnable, expanding the search to ensure progress can be made.
-        """
+        """为后继顶点寻找可运行的前驱集合。"""
         runnable_vertices = []
         for successor_id in self.run_manager.run_map.get(vertex_id, []):
             runnable_vertices.extend(self.find_runnable_predecessors_for_successor(successor_id))
@@ -2264,15 +2041,7 @@ class Graph:
         self.run_manager.remove_vertex_from_runnables(vertex_id)
 
     def get_top_level_vertices(self, vertices_ids):
-        """Retrieves the top-level vertices from the given graph based on the provided vertex IDs.
-
-        Args:
-            vertices_ids (list): A list of vertex IDs.
-
-        Returns:
-            list: A list of top-level vertex IDs.
-
-        """
+        """根据顶点列表返回对应的顶层顶点 ID。"""
         top_level_vertices = []
         for vertex_id in vertices_ids:
             vertex = self.get_vertex(vertex_id)
@@ -2286,8 +2055,7 @@ class Graph:
         in_degree: dict[str, int] = defaultdict(int)
 
         for edge in edges:
-            # We don't need to count if a Component connects more than one
-            # time to the same vertex.
+            # 注意：同一组件重复连线仍计入入度。
             in_degree[edge.target_id] += 1
         for vertex in self.vertices:
             if vertex.id not in in_degree:
@@ -2296,7 +2064,7 @@ class Graph:
 
     @staticmethod
     def build_adjacency_maps(edges: list[CycleEdge]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-        """Returns the adjacency maps for the graph."""
+        """构建前驱/后继映射。"""
         predecessor_map: dict[str, list[str]] = defaultdict(list)
         successor_map: dict[str, list[str]] = defaultdict(list)
         for edge in edges:
@@ -2305,7 +2073,7 @@ class Graph:
         return predecessor_map, successor_map
 
     def __to_dict(self) -> dict[str, dict[str, list[str]]]:
-        """Converts the graph to a dictionary."""
+        """将图转换为后继/前驱字典。"""
         result: dict = {}
         for vertex in self.vertices:
             vertex_id = vertex.id

@@ -1,4 +1,18 @@
-"""CLI wrapper for the run command."""
+"""
+模块名称：CLI 运行命令包装
+
+本模块提供 `lfx run` 的 CLI 封装，主要用于加载并执行单个 flow/script 并输出结果。主要功能包括：
+- 解析 CLI 选项并调用 `run_flow`
+- 处理输出格式与错误包装
+- 提示 LangChain 版本不兼容原因
+
+关键组件：
+- `run`：CLI 入口
+- `_check_langchain_version_compatibility`：版本兼容性诊断
+
+设计背景：在容器/脚本场景提供最小输出与清晰错误信息。
+注意事项：默认输出偏简洁，开启 `-v/-vv/-vvv` 可获得更多诊断信息。
+"""
 
 import json
 from functools import partial
@@ -9,18 +23,18 @@ from asyncer import syncify
 
 from lfx.run.base import RunError, run_flow
 
-# Verbosity level constants
 VERBOSITY_DETAILED = 2
 VERBOSITY_FULL = 3
 
 
 def _check_langchain_version_compatibility(error_message: str) -> str | None:
-    """Check if error is due to langchain-core version incompatibility.
+    """判断错误是否来自 langchain-core 版本不兼容。
 
-    Returns a helpful error message if incompatibility is detected, None otherwise.
+    契约：若检测到不兼容，返回可执行的修复提示；否则返回 None。
+    失败语义：无法导入版本信息时仍返回诊断提示（版本记为 unknown）。
+    副作用：尝试导入 `langchain_core`。
     """
-    # Check for the specific error that occurs with langchain-core 1.x
-    # The langchain_core.memory module was removed in langchain-core 1.x
+    # 注意：langchain-core 1.x 移除了 `langchain_core.memory`
     if "langchain_core.memory" in error_message or "No module named 'langchain_core.memory'" in error_message:
         try:
             import langchain_core
@@ -103,26 +117,17 @@ async def run(
         help="Include detailed timing information in output",
     ),
 ) -> None:
-    """Execute a Langflow graph script or JSON flow and return the result.
+    """执行脚本或 JSON flow 并输出结果。
 
-    This command analyzes and executes either a Python script containing a Langflow graph,
-    a JSON flow file, inline JSON, or JSON from stdin, returning the result in the specified format.
-    By default, output is minimal for use in containers and serverless environments.
+    契约：支持 `.py`/`.json`/内联 JSON/STDIN；输出格式由 `--format` 控制。
+    失败语义：执行失败抛 `RunError` 并转为 JSON 错误输出，随后 `typer.Exit(1)`。
+    副作用：执行图、可能触发外部调用与日志输出。
 
-    Args:
-        script_path: Path to the Python script (.py) or JSON flow (.json) containing a graph
-        input_value: Input value to pass to the graph (positional argument)
-        input_value_option: Input value to pass to the graph (alternative option)
-        verbose: Show diagnostic output and execution details
-        verbose_detailed: Show detailed progress and debug information (-vv)
-        verbose_full: Show full debugging output including component logs (-vvv)
-        output_format: Format for output (json, text, message, or result)
-        flow_json: Inline JSON flow content as a string
-        stdin: Read JSON flow content from stdin
-        check_variables: Check global variables for environment compatibility
-        timing: Include detailed timing information in output
+    关键路径（三步）：
+    1) 解析输入与输出格式
+    2) 调用 `run_flow` 执行并收集结果
+    3) 根据格式输出结果或错误
     """
-    # Determine verbosity for output formatting
     verbosity = 3 if verbose_full else (2 if verbose_detailed else (1 if verbose else 0))
 
     try:
@@ -141,7 +146,6 @@ async def run(
             global_variables=None,
         )
 
-        # Output based on format
         if output_format in {"text", "message", "result"}:
             typer.echo(result.get("output", ""))
         else:

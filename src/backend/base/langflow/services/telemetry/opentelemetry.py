@@ -1,3 +1,15 @@
+"""
+模块名称：OpenTelemetry 指标封装
+
+本模块封装 OpenTelemetry 指标注册与采集，提供统一的计数器/直方图/观测仪表接口。
+主要功能：
+- 注册并创建自定义指标
+- 校验标签并写入指标数据
+- 支持 Prometheus reader
+设计背景：统一指标采集入口，避免散落式埋点。
+注意事项：指标必须先注册且标签需满足必填约束。
+"""
+
 import threading
 from collections.abc import Mapping
 from enum import Enum
@@ -13,18 +25,20 @@ from opentelemetry.sdk.resources import Resource
 
 # a default OpenTelemetry meter name
 langflow_meter_name = "langflow"
+"""默认 OpenTelemetry meter 名称。"""
 
 """
-If the measurement values are non-additive, use an Asynchronous Gauge.
-    ObservableGauge reports the current absolute value when observed.
-If the measurement values are additive: If the value is monotonically increasing - use an Asynchronous Counter.
-If the value is NOT monotonically increasing - use an Asynchronous UpDownCounter.
-    UpDownCounter reports changes/deltas to the last observed value.
-If the measurement values are additive and you want to observe the distribution of the values - use a Histogram.
+指标选型指引：
+- 非可加：使用异步 Gauge（ObservableGauge）报告绝对值。
+- 可加且单调递增：使用异步 Counter。
+- 可加但非单调：使用异步 UpDownCounter，记录增减变化。
+- 可加且需要分布：使用 Histogram。
 """
 
 
 class MetricType(Enum):
+    """指标类型枚举。"""
+
     COUNTER = "counter"
     OBSERVABLE_GAUGE = "observable_gauge"
     HISTOGRAM = "histogram"
@@ -59,6 +73,8 @@ class ObservableGaugeWrapper:
 
 
 class Metric:
+    """指标注册结构体。"""
+
     def __init__(
         self,
         name: str,
@@ -76,7 +92,7 @@ class Metric:
         self.allowed_labels = list(labels.keys())
 
     def validate_labels(self, labels: Mapping[str, str]) -> None:
-        """Validate if the labels provided are valid."""
+        """校验指标标签是否满足必填约束。"""
         if labels is None or len(labels) == 0:
             msg = "Labels must be provided for the metric"
             raise ValueError(msg)
@@ -106,6 +122,8 @@ class ThreadSafeSingletonMetaUsingWeakref(type):
 
 
 class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
+    """OpenTelemetry 指标注册与写入入口。"""
+
     _metrics_registry: dict[str, Metric] = {}
     _metrics: dict[str, Counter | ObservableGaugeWrapper | Histogram | UpDownCounter] = {}
     _meter_provider: MeterProvider | None = None
@@ -115,6 +133,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
     def _add_metric(
         self, name: str, description: str, unit: str, metric_type: MetricType, labels: dict[str, bool]
     ) -> None:
+        """注册指标元数据并写入注册表。"""
         metric = Metric(name=name, description=description, metric_type=metric_type, unit=unit, labels=labels)
         self._metrics_registry[name] = metric
         if labels is None or len(labels) == 0:
@@ -122,10 +141,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
             raise ValueError(msg)
 
     def _register_metric(self) -> None:
-        """Define any custom metrics here.
-
-        A thread safe singleton class to manage metrics.
-        """
+        """注册自定义指标集合。"""
         self._add_metric(
             name="file_uploads",
             description="The uploaded file size in bytes",
@@ -142,6 +158,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
         )
 
     def __init__(self, *, prometheus_enabled: bool = True):
+        """初始化 OpenTelemetry 并创建指标实例。"""
         # Only initialize once
         self.prometheus_enabled = prometheus_enabled
         if OpenTelemetry._initialized:
@@ -178,6 +195,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
         OpenTelemetry._initialized = True
 
     def _create_metric(self, metric):
+        """按指标类型创建具体 OTEL 实例。"""
         # Remove _created_instruments check
         if metric.name in self._metrics:
             return self._metrics[metric.name]
@@ -210,6 +228,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
         raise ValueError(msg)
 
     def validate_labels(self, metric_name: str, labels: Mapping[str, str]) -> None:
+        """校验指定指标的标签完整性。"""
         reg = self._metrics_registry.get(metric_name)
         if reg is None:
             msg = f"Metric '{metric_name}' is not registered"
@@ -217,6 +236,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
         reg.validate_labels(labels)
 
     def increment_counter(self, metric_name: str, labels: Mapping[str, str], value: float = 1.0) -> None:
+        """累加计数器指标。"""
         self.validate_labels(metric_name, labels)
         counter = self._metrics.get(metric_name)
         if isinstance(counter, Counter):
@@ -226,6 +246,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
             raise TypeError(msg)
 
     def up_down_counter(self, metric_name: str, value: float, labels: Mapping[str, str]) -> None:
+        """更新可增可减计数器指标。"""
         self.validate_labels(metric_name, labels)
         up_down_counter = self._metrics.get(metric_name)
         if isinstance(up_down_counter, UpDownCounter):
@@ -235,6 +256,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
             raise TypeError(msg)
 
     def update_gauge(self, metric_name: str, value: float, labels: Mapping[str, str]) -> None:
+        """更新观察型 Gauge 指标。"""
         self.validate_labels(metric_name, labels)
         gauge = self._metrics.get(metric_name)
         if isinstance(gauge, ObservableGaugeWrapper):
@@ -244,6 +266,7 @@ class OpenTelemetry(metaclass=ThreadSafeSingletonMetaUsingWeakref):
             raise TypeError(msg)
 
     def observe_histogram(self, metric_name: str, value: float, labels: Mapping[str, str]) -> None:
+        """记录直方图指标样本。"""
         self.validate_labels(metric_name, labels)
         histogram = self._metrics.get(metric_name)
         if isinstance(histogram, Histogram):

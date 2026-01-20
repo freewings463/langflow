@@ -1,3 +1,19 @@
+"""模块名称：Mem0 记忆组件适配层
+
+本模块提供基于 `mem0` 的聊天记忆组件，用于 Langflow 组件系统的消息写入与检索。
+使用场景：需要在对话流中持久化用户消息并进行语义检索。
+主要功能包括：
+- 根据 `mem0_config` 与 API Key 构建本地或云端 Mem0 实例
+- 写入单条消息并附加 `metadata`
+- 按 `search_query` 或 `user_id` 拉取相关记忆
+
+关键组件：
+- Mem0MemoryComponent：组件入口，封装构建、写入、查询流程
+
+设计背景：在 Langflow 组件体系中统一记忆存储接口，同时保留本地/云端切换能力
+注意事项：Astra Cloud 环境禁用；缺少 `user_id`/`ingest_message` 时不会写入
+"""
+
 import os
 
 from mem0 import Memory, MemoryClient
@@ -15,6 +31,19 @@ disable_component_in_astra_cloud_msg = (
 
 
 class Mem0MemoryComponent(LCChatMemoryComponent):
+    """Mem0 聊天记忆组件，提供写入与检索。
+
+    契约：输入 `mem0_config`/`mem0_api_key`/`openai_api_key`，输出 `Memory` 或检索结果 `Data`
+    关键路径：1) 构建实例 2) 写入消息 3) 按查询或用户检索
+    副作用：写入 Mem0 存储并记录日志，可能修改进程环境变量
+    异常流：Astra Cloud 禁用抛错；Mem0 未安装抛 `ImportError`
+    排障入口：日志关键字 `Missing 'ingest_message'` / `Failed to add message` / `Failed to retrieve related memories`
+    决策：以 `Memory`/`MemoryClient` 双路径支持本地与云端
+    问题：需要兼容本地存储与 Mem0 Cloud
+    方案：无 `mem0_api_key` 走 `Memory`，有 key 走 `MemoryClient`
+    代价：两套初始化路径增加配置分支
+    重评：当 Mem0 SDK 统一初始化入口或本地/云端差异消失时
+    """
     display_name = "Mem0 Chat Memory"
     description = "Retrieves and stores chat messages using Mem0 memory storage."
     name = "mem0_chat_memory"
@@ -84,10 +113,23 @@ class Mem0MemoryComponent(LCChatMemoryComponent):
     ]
 
     def build_mem0(self) -> Memory:
-        """Initializes a Mem0 memory instance based on provided configuration and API keys."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """构建 Mem0 实例，兼容本地与云端。
+
+        契约：读取组件字段构建 `Memory`/`MemoryClient`；若提供 `openai_api_key` 写入环境变量
+        关键路径：1) Astra Cloud 禁用检查 2) 注入 `OPENAI_API_KEY` 3) 分支初始化
+        副作用：可能设置进程级 `OPENAI_API_KEY`
+        异常流：`mem0` 未安装抛 `ImportError`；其他异常直接上抛
+        排障入口：`ImportError` 提示安装 `mem0ai`
+        决策：通过环境变量注入 `OPENAI_API_KEY`
+        问题：Mem0 SDK 依赖环境变量读取 OpenAI Key
+        方案：若传入 `openai_api_key`，写入 `OPENAI_API_KEY`
+        代价：进程级副作用，可能影响同进程其他调用
+        重评：当 Mem0 支持显式传参或本组件改为隔离进程时
+        """
+        # 注意：构建前阻断 Astra Cloud，避免初始化受限依赖。
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
         if self.openai_api_key:
+            # 注意：`mem0` 读取环境变量，避免在初始化路径中丢失 OpenAI Key。
             os.environ["OPENAI_API_KEY"] = self.openai_api_key
 
         try:
@@ -101,8 +143,20 @@ class Mem0MemoryComponent(LCChatMemoryComponent):
             raise ImportError(msg) from e
 
     def ingest_data(self) -> Memory:
-        """Ingests a new message into Mem0 memory and returns the updated memory instance."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """写入单条消息并返回 Mem0 实例。
+
+        契约：需要 `ingest_message` 与 `user_id`；返回可继续使用的 `Memory`
+        关键路径：1) Astra Cloud 禁用检查 2) 选择已有或新建实例 3) 写入消息
+        副作用：向 Mem0 存储写入消息并记录日志
+        异常流：缺少 `ingest_message`/`user_id` 时仅告警并返回；写入失败抛异常
+        排障入口：日志关键字 `Missing 'ingest_message'` / `Failed to add message`
+        决策：缺失必填字段时不抛错而返回现有实例
+        问题：组件在编排中可能先被预构建，字段后续才补齐
+        方案：记录告警并跳过写入，保持管线可继续
+        代价：可能产生“未写入但无异常”的结果
+        重评：当上游保证字段完备或需要强一致写入时
+        """
+        # 注意：写入前阻断 Astra Cloud，避免产生不可回滚写入。
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
         mem0_memory = self.existing_memory or self.build_mem0()
 
@@ -123,8 +177,20 @@ class Mem0MemoryComponent(LCChatMemoryComponent):
         return mem0_memory
 
     def build_search_results(self) -> Data:
-        """Searches the Mem0 memory for related messages based on the search query and returns the results."""
-        # Check if we're in Astra cloud environment and raise an error if we are.
+        """检索相关记忆并返回结果。
+
+        契约：使用 `search_query` 与 `user_id` 检索，返回 `Data` 结构
+        关键路径：1) 先写入最新消息 2) 有查询则搜索 3) 无查询则按用户拉取
+        副作用：会触发一次写入流程并记录日志
+        异常流：检索失败抛异常并记录日志
+        排障入口：日志关键字 `Failed to retrieve related memories`
+        决策：检索前调用 `ingest_data` 以保证最新消息可被搜索
+        问题：搜索时需要包含本次输入的最新消息
+        方案：统一先写入后检索
+        代价：检索也会触发写入，增加一次外部调用
+        重评：当系统改为显式控制“写入/检索”阶段时
+        """
+        # 注意：检索前阻断 Astra Cloud，避免触发禁用路径。
         raise_error_if_astra_cloud_disable_component(disable_component_in_astra_cloud_msg)
         mem0_memory = self.ingest_data()
         search_query = self.search_query

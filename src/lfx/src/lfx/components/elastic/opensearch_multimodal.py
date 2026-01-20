@@ -1,3 +1,19 @@
+"""
+模块名称：OpenSearch 多模型向量检索组件
+
+本模块提供多模型多嵌入的 OpenSearch 向量存储与检索能力，支持动态向量字段、
+多模型混合检索与高并发嵌入生成。主要功能包括：
+- 根据模型名动态生成向量字段并写入索引
+- 自动识别索引中的嵌入模型并并行检索
+- 支持混合检索（多 KNN + 关键词）与过滤聚合
+
+关键组件：
+- `OpenSearchVectorStoreComponentMultimodalMultiEmbedding`：多模型检索组件入口
+
+设计背景：支持同一索引内多嵌入模型的检索与增量扩展。
+注意事项：依赖 `opensearch-py` 与嵌入组件，多模型匹配失败会抛 `ValueError`。
+"""
+
 from __future__ import annotations
 
 import copy
@@ -18,36 +34,26 @@ from lfx.schema.data import Data
 
 
 def normalize_model_name(model_name: str) -> str:
-    """Normalize embedding model name for use as field suffix.
+    """规范化模型名以作为字段后缀。
 
-    Converts model names to valid OpenSearch field names by replacing
-    special characters and ensuring alphanumeric format.
-
-    Args:
-        model_name: Original embedding model name (e.g., "text-embedding-3-small")
-
-    Returns:
-        Normalized field suffix (e.g., "text_embedding_3_small")
+    契约：输入模型名，输出仅包含字母/数字/下划线的字段后缀。
+    副作用：无。
+    失败语义：无。
     """
     normalized = model_name.lower()
-    # Replace common separators with underscores
     normalized = normalized.replace("-", "_").replace(":", "_").replace("/", "_").replace(".", "_")
-    # Remove any non-alphanumeric characters except underscores
     normalized = "".join(c if c.isalnum() or c == "_" else "_" for c in normalized)
-    # Remove duplicate underscores
     while "__" in normalized:
         normalized = normalized.replace("__", "_")
     return normalized.strip("_")
 
 
 def get_embedding_field_name(model_name: str) -> str:
-    """Get the dynamic embedding field name for a model.
+    """生成模型对应的动态向量字段名。
 
-    Args:
-        model_name: Embedding model name
-
-    Returns:
-        Field name in format: chunk_embedding_{normalized_model_name}
+    契约：输入模型名，输出形如 `chunk_embedding_{model}` 的字段名。
+    副作用：记录日志。
+    失败语义：无。
     """
     logger.info(f"chunk_embedding_{normalize_model_name(model_name)}")
     return f"chunk_embedding_{normalize_model_name(model_name)}"
@@ -55,30 +61,11 @@ def get_embedding_field_name(model_name: str) -> str:
 
 @vector_store_connection
 class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreComponent):
-    """OpenSearch Vector Store Component with Multi-Model Hybrid Search Capabilities.
+    """OpenSearch 多模型混合检索组件。
 
-    This component provides vector storage and retrieval using OpenSearch, combining semantic
-    similarity search (KNN) with keyword-based search for optimal results. It supports:
-    - Multiple embedding models per index with dynamic field names
-    - Automatic detection and querying of all available embedding models
-    - Parallel embedding generation for multi-model search
-    - Document ingestion with model tracking
-    - Advanced filtering and aggregations
-    - Flexible authentication options
-
-    Features:
-    - Multi-model vector storage with dynamic fields (chunk_embedding_{model_name})
-    - Hybrid search combining multiple KNN queries (dis_max) + keyword matching
-    - Auto-detection of available models in the index
-    - Parallel query embedding generation for all detected models
-    - Vector storage with configurable engines (jvector, nmslib, faiss, lucene)
-    - Flexible authentication (Basic auth, JWT tokens)
-
-    Model Name Resolution:
-    - Priority: deployment > model > model_name attributes
-    - This ensures correct matching between embedding objects and index fields
-    - When multiple embeddings are provided, specify embedding_model_name to select which one to use
-    - During search, each detected model in the index is matched to its corresponding embedding object
+    契约：输入多嵌入器与索引配置，输出可执行多模型检索的客户端与结果。
+    副作用：可能创建索引、写入文档并执行检索。
+    失败语义：模型匹配失败或认证配置异常抛 `ValueError`。
     """
 
     display_name: str = "OpenSearch (Multi-Model Multi-Embedding)"
@@ -87,11 +74,10 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         "Store and search documents using OpenSearch with multi-model hybrid semantic and keyword search."
     )
 
-    # Keys we consider baseline
     default_keys: list[str] = [
         "opensearch_url",
         "index_name",
-        *[i.name for i in LCVectorStoreComponent.inputs],  # search_query, add_documents, etc.
+        *[i.name for i in LCVectorStoreComponent.inputs],
         "embedding",
         "embedding_model_name",
         "vector_field",
@@ -208,7 +194,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             ),
             advanced=True,
         ),
-        *LCVectorStoreComponent.inputs,  # includes search_query, add_documents, etc.
+        *LCVectorStoreComponent.inputs,
         HandleInput(name="embedding", display_name="Embedding", input_types=["Embeddings"], is_list=True),
         StrInput(
             name="embedding_model_name",
@@ -257,7 +243,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 "Use __IMPOSSIBLE_VALUE__ as placeholder to ignore specific filters."
             ),
         ),
-        # ----- Auth controls (dynamic) -----
         DropdownInput(
             name="auth_mode",
             display_name="Authentication Mode",
@@ -307,7 +292,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             show=False,
             advanced=True,
         ),
-        # ----- TLS -----
         BoolInput(
             name="use_ssl",
             display_name="Use SSL/TLS",
@@ -328,28 +312,16 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
     ]
 
     def _get_embedding_model_name(self, embedding_obj=None) -> str:
-        """Get the embedding model name from component config or embedding object.
+        """获取嵌入模型名称。
 
-        Priority: deployment > model > model_id > model_name
-        This ensures we use the actual model being deployed, not just the configured model.
-        Supports multiple embedding providers (OpenAI, Watsonx, Cohere, etc.)
-
-        Args:
-            embedding_obj: Specific embedding object to get name from (optional)
-
-        Returns:
-            Embedding model name
-
-        Raises:
-            ValueError: If embedding model name cannot be determined
+        契约：优先级为 `deployment > model > model_id > model_name`，返回可用于字段命名的模型名。
+        副作用：无。
+        失败语义：无法识别模型名时抛 `ValueError`。
         """
-        # First try explicit embedding_model_name input
         if hasattr(self, "embedding_model_name") and self.embedding_model_name:
             return self.embedding_model_name.strip()
 
-        # Try to get from provided embedding object
         if embedding_obj:
-            # Priority: deployment > model > model_id > model_name
             if hasattr(embedding_obj, "deployment") and embedding_obj.deployment:
                 return str(embedding_obj.deployment)
             if hasattr(embedding_obj, "model") and embedding_obj.model:
@@ -359,9 +331,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             if hasattr(embedding_obj, "model_name") and embedding_obj.model_name:
                 return str(embedding_obj.model_name)
 
-        # Try to get from embedding component (legacy single embedding)
         if hasattr(self, "embedding") and self.embedding:
-            # Handle list of embeddings
             if isinstance(self.embedding, list) and len(self.embedding) > 0:
                 first_emb = self.embedding[0]
                 if hasattr(first_emb, "deployment") and first_emb.deployment:
@@ -372,7 +342,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                     return str(first_emb.model_id)
                 if hasattr(first_emb, "model_name") and first_emb.model_name:
                     return str(first_emb.model_name)
-            # Handle single embedding
             elif not isinstance(self.embedding, list):
                 if hasattr(self.embedding, "deployment") and self.embedding.deployment:
                     return str(self.embedding.deployment)
@@ -390,7 +359,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         )
         raise ValueError(msg)
 
-    # ---------- helper functions for index management ----------
     def _default_text_mapping(
         self,
         dim: int,
@@ -401,23 +369,11 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         m: int = 16,
         vector_field: str = "vector_field",
     ) -> dict[str, Any]:
-        """Create the default OpenSearch index mapping for vector search.
+        """生成默认向量索引映射（含模型标记字段）。
 
-        This method generates the index configuration with k-NN settings optimized
-        for approximate nearest neighbor search using the specified vector engine.
-        Includes the embedding_model keyword field for tracking which model was used.
-
-        Args:
-            dim: Dimensionality of the vector embeddings
-            engine: Vector search engine (jvector, nmslib, faiss, lucene)
-            space_type: Distance metric for similarity calculation
-            ef_search: Size of dynamic list used during search
-            ef_construction: Size of dynamic list used during index construction
-            m: Number of bidirectional links for each vector
-            vector_field: Name of the field storing vector embeddings
-
-        Returns:
-            Dictionary containing OpenSearch index mapping configuration
+        契约：输入维度与引擎参数，输出 OpenSearch mapping 字典。
+        副作用：无。
+        失败语义：无。
         """
         return {
             "settings": {"index": {"knn": True, "knn.algo_param.ef_search": ef_search}},
@@ -433,7 +389,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                             "parameters": {"ef_construction": ef_construction, "m": m},
                         },
                     },
-                    "embedding_model": {"type": "keyword"},  # Track which model was used
+                    "embedding_model": {"type": "keyword"},
                     "embedding_dimensions": {"type": "integer"},
                 }
             },
@@ -450,20 +406,11 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         ef_construction: int,
         m: int,
     ) -> None:
-        """Lazily add a dynamic embedding field to the index if it doesn't exist.
+        """为动态向量字段补充映射。
 
-        This allows adding new embedding models without recreating the entire index.
-        Also ensures the embedding_model tracking field exists.
-
-        Args:
-            client: OpenSearch client instance
-            index_name: Target index name
-            field_name: Dynamic field name for this embedding model
-            dim: Vector dimensionality
-            engine: Vector search engine
-            space_type: Distance metric
-            ef_construction: Construction parameter
-            m: HNSW parameter
+        契约：输入索引与字段配置，确保字段为 `knn_vector`。
+        副作用：会更新索引 mapping。
+        失败语义：映射更新失败时抛异常。
         """
         try:
             mapping = {
@@ -478,7 +425,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                             "parameters": {"ef_construction": ef_construction, "m": m},
                         },
                     },
-                    # Also ensure the embedding_model tracking field exists as keyword
                     "embedding_model": {"type": "keyword"},
                     "embedding_dimensions": {"type": "integer"},
                 }
@@ -496,31 +442,18 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             raise ValueError(msg)
 
     def _validate_aoss_with_engines(self, *, is_aoss: bool, engine: str) -> None:
-        """Validate engine compatibility with Amazon OpenSearch Serverless (AOSS).
+        """校验 AOSS 与向量引擎兼容性。
 
-        Amazon OpenSearch Serverless has restrictions on which vector engines
-        can be used. This method ensures the selected engine is compatible.
-
-        Args:
-            is_aoss: Whether the connection is to Amazon OpenSearch Serverless
-            engine: The selected vector search engine
-
-        Raises:
-            ValueError: If AOSS is used with an incompatible engine
+        契约：输入是否为 AOSS 与引擎类型，校验通过则无返回。
+        副作用：无。
+        失败语义：不兼容时抛 `ValueError`。
         """
         if is_aoss and engine not in {"nmslib", "faiss"}:
             msg = "Amazon OpenSearch Service Serverless only supports `nmslib` or `faiss` engines"
             raise ValueError(msg)
 
     def _is_aoss_enabled(self, http_auth: Any) -> bool:
-        """Determine if Amazon OpenSearch Serverless (AOSS) is being used.
-
-        Args:
-            http_auth: The HTTP authentication object
-
-        Returns:
-            True if AOSS is enabled, False otherwise
-        """
+        """判断是否为 Amazon OpenSearch Serverless (AOSS)。"""
         return http_auth is not None and hasattr(http_auth, "service") and http_auth.service == "aoss"
 
     def _bulk_ingest_embeddings(
@@ -539,28 +472,11 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         *,
         is_aoss: bool = False,
     ) -> list[str]:
-        """Efficiently ingest multiple documents with embeddings into OpenSearch.
+        """批量写入向量文档并记录模型名。
 
-        This method uses bulk operations to insert documents with their vector
-        embeddings and metadata into the specified OpenSearch index. Each document
-        is tagged with the embedding_model name for tracking.
-
-        Args:
-            client: OpenSearch client instance
-            index_name: Target index for document storage
-            embeddings: List of vector embeddings for each document
-            texts: List of document texts
-            metadatas: Optional metadata dictionaries for each document
-            ids: Optional document IDs (UUIDs generated if not provided)
-            vector_field: Field name for storing vector embeddings
-            text_field: Field name for storing document text
-            embedding_model: Name of the embedding model used
-            mapping: Optional index mapping configuration
-            max_chunk_bytes: Maximum size per bulk request chunk
-            is_aoss: Whether using Amazon OpenSearch Serverless
-
-        Returns:
-            List of document IDs that were successfully ingested
+        契约：输入向量/文本/元数据，输出成功写入的文档 ID 列表。
+        副作用：执行 OpenSearch bulk 写入。
+        失败语义：写入失败由底层异常抛出。
         """
         if not mapping:
             mapping = {}
@@ -579,7 +495,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 "_index": index_name,
                 vector_field: embeddings[i],
                 text_field: text,
-                "embedding_model": embedding_model,  # Track which model was used
+                "embedding_model": embedding_model,
                 **metadata,
             }
             if is_aoss:
@@ -593,18 +509,12 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         helpers.bulk(client, requests, max_chunk_bytes=max_chunk_bytes)
         return return_ids
 
-    # ---------- auth / client ----------
     def _build_auth_kwargs(self) -> dict[str, Any]:
-        """Build authentication configuration for OpenSearch client.
+        """构建 OpenSearch 认证参数。
 
-        Constructs the appropriate authentication parameters based on the
-        selected auth mode (basic username/password or JWT token).
-
-        Returns:
-            Dictionary containing authentication configuration
-
-        Raises:
-            ValueError: If required authentication parameters are missing
+        契约：根据 `auth_mode` 返回认证配置字典。
+        副作用：无。
+        失败语义：认证信息缺失时抛 `ValueError`。
         """
         mode = (self.auth_mode or "basic").strip().lower()
         if mode == "jwt":
@@ -623,11 +533,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         return {"http_auth": (user, pwd)}
 
     def build_client(self) -> OpenSearch:
-        """Create and configure an OpenSearch client instance.
-
-        Returns:
-            Configured OpenSearch client ready for operations
-        """
+        """创建 OpenSearch 客户端实例。"""
         auth_kwargs = self._build_auth_kwargs()
         return OpenSearch(
             hosts=[self.opensearch_url],
@@ -640,10 +546,9 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
 
     @check_cached_vector_store
     def build_vector_store(self) -> OpenSearch:
-        # Return raw OpenSearch client as our "vector store."
+        """构建向量存储客户端并触发写入。"""
         client = self.build_client()
 
-        # Check if we're in ingestion-only mode (no search query)
         has_search_query = bool((self.search_query or "").strip())
         if not has_search_query:
             logger.debug("Ingestion-only mode activated: search operations will be skipped")
@@ -653,21 +558,18 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         self._add_documents_to_vector_store(client=client)
         return client
 
-    # ---------- ingest ----------
     def _add_documents_to_vector_store(self, client: OpenSearch) -> None:
-        """Process and ingest documents into the OpenSearch vector store.
+        """处理并写入文档（多模型）。
 
-        This method handles the complete document ingestion pipeline:
-        - Prepares document data and metadata
-        - Generates vector embeddings using the selected model
-        - Creates appropriate index mappings with dynamic field names
-        - Bulk inserts documents with vectors and model tracking
+        契约：输入 OpenSearch 客户端，写入当前 `ingest_data`。
+        关键路径（三步）：
+        1) 选择目标嵌入器并生成向量。
+        2) 确保索引与动态字段映射可用。
+        3) 批量写入并记录模型标记。
 
-        Args:
-            client: OpenSearch client for performing operations
+        异常流：嵌入器缺失或模型匹配失败抛 `ValueError`。
         """
         logger.debug("[INGESTION] _add_documents_to_vector_store called")
-        # Convert DataFrame to Data if needed using parent's method
         self.ingest_data = self._prepare_ingest_data()
 
         logger.debug(
@@ -688,13 +590,10 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             msg = "Embedding handle is required to embed documents."
             raise ValueError(msg)
 
-        # Normalize embedding to list first
         embeddings_list = self.embedding if isinstance(self.embedding, list) else [self.embedding]
 
-        # Filter out None values (fail-safe mode) - do this BEFORE checking if empty
         embeddings_list = [e for e in embeddings_list if e is not None]
 
-        # NOW check if we have any valid embeddings left after filtering
         if not embeddings_list:
             logger.warning("All embeddings returned None (fail-safe mode enabled). Skipping document ingestion.")
             self.log("Embedding returned None (fail-safe mode enabled). Skipping document ingestion.")
@@ -703,18 +602,14 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         logger.debug(f"[INGESTION] Valid embeddings after filtering: {len(embeddings_list)}")
         self.log(f"Available embedding models: {len(embeddings_list)}")
 
-        # Select the embedding to use for ingestion
         selected_embedding = None
         embedding_model = None
 
-        # If embedding_model_name is specified, find matching embedding
         if hasattr(self, "embedding_model_name") and self.embedding_model_name and self.embedding_model_name.strip():
             target_model_name = self.embedding_model_name.strip()
             self.log(f"Looking for embedding model: {target_model_name}")
 
             for emb_obj in embeddings_list:
-                # Check all possible model identifiers (deployment, model, model_id, model_name)
-                # Also check available_models list from EmbeddingsWithModels
                 possible_names = []
                 deployment = getattr(emb_obj, "deployment", None)
                 model = getattr(emb_obj, "model", None)
@@ -731,11 +626,9 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 if model_name:
                     possible_names.append(str(model_name))
 
-                # Also add combined identifier
                 if deployment and model and deployment != model:
                     possible_names.append(f"{deployment}:{model}")
 
-                # Add all models from available_models dict
                 if available_models_attr and isinstance(available_models_attr, dict):
                     possible_names.extend(
                         str(model_key).strip()
@@ -743,27 +636,22 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                         if model_key and str(model_key).strip()
                     )
 
-                # Match if target matches any of the possible names
                 if target_model_name in possible_names:
-                    # Check if target is in available_models dict - use dedicated instance
                     if (
                         available_models_attr
                         and isinstance(available_models_attr, dict)
                         and target_model_name in available_models_attr
                     ):
-                        # Use the dedicated embedding instance from the dict
                         selected_embedding = available_models_attr[target_model_name]
                         embedding_model = target_model_name
                         self.log(f"Found dedicated embedding instance for '{embedding_model}' in available_models dict")
                     else:
-                        # Traditional identifier match
                         selected_embedding = emb_obj
                         embedding_model = self._get_embedding_model_name(emb_obj)
                         self.log(f"Found matching embedding model: {embedding_model} (matched on: {target_model_name})")
                     break
 
             if not selected_embedding:
-                # Build detailed list of available embeddings with all their identifiers
                 available_info = []
                 for idx, emb in enumerate(embeddings_list):
                     emb_type = type(emb).__name__
@@ -783,11 +671,9 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                     if model_name:
                         identifiers.append(f"model_name='{model_name}'")
 
-                    # Add combined identifier as an option
                     if deployment and model and deployment != model:
                         identifiers.append(f"combined='{deployment}:{model}'")
 
-                    # Add available_models dict if present
                     if available_models_attr and isinstance(available_models_attr, dict):
                         identifiers.append(f"available_models={list(available_models_attr.keys())}")
 
@@ -805,7 +691,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 )
                 raise ValueError(msg)
         else:
-            # Use first embedding if no model name specified
             selected_embedding = embeddings_list[0]
             embedding_model = self._get_embedding_model_name(selected_embedding)
             self.log(f"No embedding_model_name specified, using first embedding: {embedding_model}")
@@ -816,7 +701,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         self.log(f"Using embedding model for ingestion: {embedding_model}")
         self.log(f"Dynamic vector field: {dynamic_field_name}")
 
-        # Log embedding details for debugging
         if hasattr(selected_embedding, "deployment"):
             logger.info(f"Embedding deployment: {selected_embedding.deployment}")
         if hasattr(selected_embedding, "model"):
@@ -828,14 +712,10 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         if hasattr(selected_embedding, "available_models"):
             logger.info(f"Embedding available_models: {selected_embedding.available_models}")
 
-        # No model switching needed - each model in available_models has its own dedicated instance
-        # The selected_embedding is already configured correctly for the target model
         logger.info(f"Using embedding instance for '{embedding_model}' - pre-configured and ready to use")
 
-        # Extract texts and metadata from documents
         texts = []
         metadatas = []
-        # Process docs_metadata table input into a dict
         additional_metadata = {}
         logger.debug(f"[LF] Docs metadata {self.docs_metadata}")
         if hasattr(self, "docs_metadata") and self.docs_metadata:
@@ -849,7 +729,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 for item in self.docs_metadata:
                     if isinstance(item, dict) and "key" in item and "value" in item:
                         additional_metadata[item["key"]] = item["value"]
-        # Replace string "None" values with actual None
         for key, value in additional_metadata.items():
             if value == "None":
                 additional_metadata[key] = None
@@ -859,13 +738,11 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             text = data_copy.pop(doc_obj.text_key, doc_obj.default_value)
             texts.append(text)
 
-            # Merge additional metadata from table input
             data_copy.update(additional_metadata)
 
             metadatas.append(data_copy)
         self.log(metadatas)
 
-        # Generate embeddings with rate-limit-aware retry logic using tenacity
         from tenacity import (
             retry,
             retry_if_exception,
@@ -874,17 +751,14 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         )
 
         def is_rate_limit_error(exception: Exception) -> bool:
-            """Check if exception is a rate limit error (429)."""
+            """判断是否为限流错误（429）。"""
             error_str = str(exception).lower()
             return "429" in error_str or "rate_limit" in error_str or "rate limit" in error_str
 
         def is_other_retryable_error(exception: Exception) -> bool:
-            """Check if exception is retryable but not a rate limit error."""
-            # Retry on most exceptions except for specific non-retryable ones
-            # Add other non-retryable exceptions here if needed
+            """判断是否为可重试但非限流错误。"""
             return not is_rate_limit_error(exception)
 
-        # Create retry decorator for rate limit errors (longer backoff)
         retry_on_rate_limit = retry(
             retry=retry_if_exception(is_rate_limit_error),
             stop=stop_after_attempt(5),
@@ -896,7 +770,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             ),
         )
 
-        # Create retry decorator for other errors (shorter backoff)
         retry_on_other_errors = retry(
             retry=retry_if_exception(is_other_retryable_error),
             stop=stop_after_attempt(3),
@@ -909,7 +782,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         )
 
         def embed_chunk_with_retry(chunk_text: str, chunk_idx: int) -> list[float]:
-            """Embed a single chunk with rate-limit-aware retry logic."""
+            """带重试策略生成单段向量。"""
 
             @retry_on_rate_limit
             @retry_on_other_errors
@@ -925,28 +798,22 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 )
                 raise
 
-        # Restrict concurrency for IBM/Watsonx models to avoid rate limits
         is_ibm = (embedding_model and "ibm" in str(embedding_model).lower()) or (
             selected_embedding and "watsonx" in type(selected_embedding).__name__.lower()
         )
         logger.debug(f"Is IBM: {is_ibm}")
 
-        # For IBM models, use sequential processing with rate limiting
-        # For other models, use parallel processing
         vectors: list[list[float]] = [None] * len(texts)
 
         if is_ibm:
-            # Sequential processing with inter-request delay for IBM models
-            inter_request_delay = 0.6  # ~1.67 req/s, safely under 2 req/s limit
+            inter_request_delay = 0.6
             logger.info(f"Using sequential processing for IBM model with {inter_request_delay}s delay between requests")
 
             for idx, chunk in enumerate(texts):
                 if idx > 0:
-                    # Add delay between requests (but not before the first one)
                     time.sleep(inter_request_delay)
                 vectors[idx] = embed_chunk_with_retry(chunk, idx)
         else:
-            # Parallel processing for non-IBM models
             max_workers = min(max(len(texts), 1), 8)
             logger.debug(f"Using parallel processing with {max_workers} workers")
 
@@ -960,18 +827,14 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             self.log(f"No vectors generated from documents for model {embedding_model}.")
             return
 
-        # Get vector dimension for mapping
-        dim = len(vectors[0]) if vectors else 768  # default fallback
+        dim = len(vectors[0]) if vectors else 768
 
-        # Check for AOSS
         auth_kwargs = self._build_auth_kwargs()
         is_aoss = self._is_aoss_enabled(auth_kwargs.get("http_auth"))
 
-        # Validate engine with AOSS
         engine = getattr(self, "engine", "jvector")
         self._validate_aoss_with_engines(is_aoss=is_aoss, engine=engine)
 
-        # Create mapping with proper KNN settings
         space_type = getattr(self, "space_type", "l2")
         ef_construction = getattr(self, "ef_construction", 512)
         m = getattr(self, "m", 16)
@@ -982,10 +845,9 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             space_type=space_type,
             ef_construction=ef_construction,
             m=m,
-            vector_field=dynamic_field_name,  # Use dynamic field name
+            vector_field=dynamic_field_name,
         )
 
-        # Ensure index exists with baseline mapping
         try:
             if not client.indices.exists(index=self.index_name):
                 self.log(f"Creating index '{self.index_name}' with base mapping")
@@ -994,7 +856,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             if creation_error.error != "resource_already_exists_exception":
                 logger.warning(f"Failed to create index '{self.index_name}': {creation_error}")
 
-        # Ensure the dynamic field exists in the index
         self._ensure_embedding_field_mapping(
             client=client,
             index_name=self.index_name,
@@ -1010,16 +871,15 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         logger.info(f"Will store embeddings in field: {dynamic_field_name}")
         logger.info(f"Will tag documents with embedding_model: {embedding_model}")
 
-        # Use the bulk ingestion with model tracking
         return_ids = self._bulk_ingest_embeddings(
             client=client,
             index_name=self.index_name,
             embeddings=vectors,
             texts=texts,
             metadatas=metadatas,
-            vector_field=dynamic_field_name,  # Use dynamic field name
+            vector_field=dynamic_field_name,
             text_field="text",
-            embedding_model=embedding_model,  # Track the model
+            embedding_model=embedding_model,
             mapping=mapping,
             is_aoss=is_aoss,
         )
@@ -1030,43 +890,26 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         )
         self.log(f"Successfully indexed {len(return_ids)} documents with model {embedding_model}.")
 
-    # ---------- helpers for filters ----------
     def _is_placeholder_term(self, term_obj: dict) -> bool:
-        # term_obj like {"filename": "__IMPOSSIBLE_VALUE__"}
+        """判断是否为占位过滤条件。"""
         return any(v == "__IMPOSSIBLE_VALUE__" for v in term_obj.values())
 
     def _coerce_filter_clauses(self, filter_obj: dict | None) -> list[dict]:
-        """Convert filter expressions into OpenSearch-compatible filter clauses.
+        """将过滤配置转换为 OpenSearch 过滤子句。
 
-        This method accepts two filter formats and converts them to standardized
-        OpenSearch query clauses:
-
-        Format A - Explicit filters:
-        {"filter": [{"term": {"field": "value"}}, {"terms": {"field": ["val1", "val2"]}}],
-         "limit": 10, "score_threshold": 1.5}
-
-        Format B - Context-style mapping:
-        {"data_sources": ["file1.pdf"], "document_types": ["pdf"], "owners": ["user1"]}
-
-        Args:
-            filter_obj: Filter configuration dictionary or None
-
-        Returns:
-            List of OpenSearch filter clauses (term/terms objects)
-            Placeholder values with "__IMPOSSIBLE_VALUE__" are ignored
+        契约：输入过滤对象（支持两种格式），输出标准化 filter 子句列表。
+        副作用：无。
+        失败语义：无效 JSON 时返回空列表。
         """
         if not filter_obj:
             return []
 
-        # If it is a string, try to parse it once
         if isinstance(filter_obj, str):
             try:
                 filter_obj = json.loads(filter_obj)
             except json.JSONDecodeError:
-                # Not valid JSON - treat as no filters
                 return []
 
-        # Case A: already an explicit list/dict under "filter"
         if "filter" in filter_obj:
             raw = filter_obj["filter"]
             if isinstance(raw, dict):
@@ -1081,7 +924,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                         explicit_clauses.append(f)
             return explicit_clauses
 
-        # Case B: convert context-style maps into clauses
         field_mapping = {
             "data_sources": "filename",
             "document_types": "mimetype",
@@ -1093,7 +935,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 continue
             field = field_mapping.get(k, k)
             if len(values) == 0:
-                # Match-nothing placeholder (kept to mirror your tool semantics)
                 context_clauses.append({"term": {field: "__IMPOSSIBLE_VALUE__"}})
             elif len(values) == 1:
                 if values[0] != "__IMPOSSIBLE_VALUE__":
@@ -1103,22 +944,15 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         return context_clauses
 
     def _detect_available_models(self, client: OpenSearch, filter_clauses: list[dict] | None = None) -> list[str]:
-        """Detect which embedding models have documents in the index.
+        """检测索引中可用的嵌入模型列表。
 
-        Uses aggregation to find all unique embedding_model values, optionally
-        filtered to only documents matching the user's filter criteria.
-
-        Args:
-            client: OpenSearch client instance
-            filter_clauses: Optional filter clauses to scope model detection
-
-        Returns:
-            List of embedding model names found in the index
+        契约：输入客户端与可选过滤条件，输出模型名列表。
+        副作用：执行聚合查询。
+        失败语义：检测失败时回退到当前模型名。
         """
         try:
             agg_query = {"size": 0, "aggs": {"embedding_models": {"terms": {"field": "embedding_model", "size": 10}}}}
 
-            # Apply filters to model detection if any exist
             if filter_clauses:
                 agg_query["query"] = {"bool": {"filter": filter_clauses}}
 
@@ -1131,7 +965,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             buckets = result.get("aggregations", {}).get("embedding_models", {}).get("buckets", [])
             models = [b["key"] for b in buckets if b["key"]]
 
-            # Log detailed bucket info for debugging
             logger.info(
                 f"Detected embedding models in corpus: {models}"
                 + (f" (with {len(filter_clauses)} filters)" if filter_clauses else "")
@@ -1146,7 +979,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 )
         except (OpenSearchException, KeyError, ValueError) as e:
             logger.warning(f"Failed to detect embedding models: {e}")
-            # Fallback to current model
             fallback_model = self._get_embedding_model_name()
             logger.info(f"Using fallback model: {fallback_model}")
             return [fallback_model]
@@ -1154,7 +986,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             return models
 
     def _get_index_properties(self, client: OpenSearch) -> dict[str, Any] | None:
-        """Retrieve flattened mapping properties for the current index."""
+        """获取索引映射的扁平化 properties。"""
         try:
             mapping = client.indices.get_mapping(index=self.index_name)
         except OpenSearchException as e:
@@ -1171,7 +1003,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         return properties
 
     def _is_knn_vector_field(self, properties: dict[str, Any] | None, field_name: str) -> bool:
-        """Check whether the field is mapped as a knn_vector."""
+        """判断字段是否为 knn_vector。"""
         if not field_name:
             return False
         if properties is None:
@@ -1187,15 +1019,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         return bool(isinstance(nested_props, dict) and nested_props.get("type") == "knn_vector")
 
     def _get_field_dimension(self, properties: dict[str, Any] | None, field_name: str) -> int | None:
-        """Get the dimension of a knn_vector field from the index mapping.
-
-        Args:
-            properties: Index properties from mapping
-            field_name: Name of the vector field
-
-        Returns:
-            Dimension of the field, or None if not found
-        """
+        """从索引映射中读取向量维度。"""
         if not field_name or properties is None:
             return None
 
@@ -1203,47 +1027,30 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         if not isinstance(field_def, dict):
             return None
 
-        # Check direct knn_vector field
         if field_def.get("type") == "knn_vector":
             return field_def.get("dimension")
 
-        # Check nested properties
         nested_props = field_def.get("properties")
         if isinstance(nested_props, dict) and nested_props.get("type") == "knn_vector":
             return nested_props.get("dimension")
 
         return None
 
-    # ---------- search (multi-model hybrid) ----------
     def search(self, query: str | None = None) -> list[dict[str, Any]]:
-        """Perform multi-model hybrid search combining multiple vector similarities and keyword matching.
+        """执行多模型混合检索（多 KNN + 关键词）。
 
-        This method executes a sophisticated search that:
-        1. Auto-detects all embedding models present in the index
-        2. Generates query embeddings for ALL detected models in parallel
-        3. Combines multiple KNN queries using dis_max (picks best match)
-        4. Adds keyword search with fuzzy matching (30% weight)
-        5. Applies optional filtering and score thresholds
-        6. Returns aggregations for faceted search
+        契约：输入查询文本，输出包含内容/元数据/分数的结果列表。
+        关键路径（三步）：
+        1) 检测索引内可用模型并生成查询向量。
+        2) 构建多模型 KNN + 关键词混合查询。
+        3) 返回命中结果并记录匹配情况。
 
-        Search weights:
-        - Semantic search (dis_max across all models): 70%
-        - Keyword search: 30%
-
-        Args:
-            query: Search query string (used for both vector embedding and keyword search)
-
-        Returns:
-            List of search results with page_content, metadata, and relevance scores
-
-        Raises:
-            ValueError: If embedding component is not provided or filter JSON is invalid
+        异常流：嵌入器缺失或过滤 JSON 非法时抛 `ValueError`。
         """
         logger.info(self.ingest_data)
         client = self.build_client()
         q = (query or "").strip()
 
-        # Parse optional filter expression
         filter_obj = None
         if getattr(self, "filter_expression", "") and self.filter_expression.strip():
             try:
@@ -1256,27 +1063,21 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             msg = "Embedding is required to run hybrid search (KNN + keyword)."
             raise ValueError(msg)
 
-        # Check if embedding is None (fail-safe mode)
         if self.embedding is None or (isinstance(self.embedding, list) and all(e is None for e in self.embedding)):
             logger.error("Embedding returned None (fail-safe mode enabled). Cannot perform search.")
             return []
 
-        # Build filter clauses first so we can use them in model detection
         filter_clauses = self._coerce_filter_clauses(filter_obj)
 
-        # Detect available embedding models in the index (scoped by filters)
         available_models = self._detect_available_models(client, filter_clauses)
 
         if not available_models:
             logger.warning("No embedding models found in index, using current model")
             available_models = [self._get_embedding_model_name()]
 
-        # Generate embeddings for ALL detected models
         query_embeddings = {}
 
-        # Normalize embedding to list
         embeddings_list = self.embedding if isinstance(self.embedding, list) else [self.embedding]
-        # Filter out None values (fail-safe mode)
         embeddings_list = [e for e in embeddings_list if e is not None]
 
         if not embeddings_list:
@@ -1285,15 +1086,10 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             )
             return []
 
-        # Create a comprehensive map of model names to embedding objects
-        # Check all possible identifiers (deployment, model, model_id, model_name)
-        # Also leverage available_models list from EmbeddingsWithModels
-        # Handle duplicate identifiers by creating combined keys
         embedding_by_model = {}
-        identifier_conflicts = {}  # Track which identifiers have conflicts
+        identifier_conflicts = {}
 
         for idx, emb_obj in enumerate(embeddings_list):
-            # Get all possible identifiers for this embedding
             identifiers = []
             deployment = getattr(emb_obj, "deployment", None)
             model = getattr(emb_obj, "model", None)
@@ -1308,7 +1104,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 f"available_models={available_models_attr}"
             )
 
-            # If this embedding has available_models dict, map all models to their dedicated instances
             if available_models_attr and isinstance(available_models_attr, dict):
                 logger.info(
                     f"Embedding object {idx} provides {len(available_models_attr)} models via available_models dict"
@@ -1317,17 +1112,14 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                     if model_name_key and str(model_name_key).strip():
                         model_str = str(model_name_key).strip()
                         if model_str not in embedding_by_model:
-                            # Use the dedicated embedding instance from the dict
                             embedding_by_model[model_str] = dedicated_embedding
                             logger.info(f"Mapped available model '{model_str}' to dedicated embedding instance")
                         else:
-                            # Conflict detected - track it
                             if model_str not in identifier_conflicts:
                                 identifier_conflicts[model_str] = [embedding_by_model[model_str]]
                             identifier_conflicts[model_str].append(dedicated_embedding)
                             logger.warning(f"Available model '{model_str}' has conflict - used by multiple embeddings")
 
-            # Also map traditional identifiers (for backward compatibility)
             if deployment:
                 identifiers.append(str(deployment))
             if model:
@@ -1337,27 +1129,22 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             if model_name:
                 identifiers.append(str(model_name))
 
-            # Map all identifiers to this embedding object
             for identifier in identifiers:
                 if identifier not in embedding_by_model:
                     embedding_by_model[identifier] = emb_obj
                     logger.info(f"Mapped identifier '{identifier}' to embedding object {idx}")
                 else:
-                    # Conflict detected - track it
                     if identifier not in identifier_conflicts:
                         identifier_conflicts[identifier] = [embedding_by_model[identifier]]
                     identifier_conflicts[identifier].append(emb_obj)
                     logger.warning(f"Identifier '{identifier}' has conflict - used by multiple embeddings")
 
-            # For embeddings with model+deployment, create combined identifier
-            # This helps when deployment is the same but model differs
             if deployment and model and deployment != model:
                 combined_id = f"{deployment}:{model}"
                 if combined_id not in embedding_by_model:
                     embedding_by_model[combined_id] = emb_obj
                     logger.info(f"Created combined identifier '{combined_id}' for embedding object {idx}")
 
-        # Log conflicts
         if identifier_conflicts:
             logger.warning(
                 f"Found {len(identifier_conflicts)} conflicting identifiers. "
@@ -1371,15 +1158,12 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         self.log(f"[SEARCH] Models detected in index: {available_models}")
         self.log(f"[SEARCH] Available embedding identifiers: {list(embedding_by_model.keys())}")
 
-        # Track matching status for debugging
         matched_models = []
         unmatched_models = []
 
         for model_name in available_models:
             try:
-                # Check if we have an embedding object for this model
                 if model_name in embedding_by_model:
-                    # Use the matching embedding object directly
                     emb_obj = embedding_by_model[model_name]
                     emb_deployment = getattr(emb_obj, "deployment", None)
                     emb_model = getattr(emb_obj, "model", None)
@@ -1393,21 +1177,18 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                         f"dimensions={emb_dimensions}"
                     )
 
-                    # Check if this is a dedicated instance from available_models dict
                     if emb_available_models and isinstance(emb_available_models, dict):
                         logger.info(
                             f"Model '{model_name}' using dedicated instance from available_models dict "
                             f"(pre-configured with correct model and dimensions)"
                         )
 
-                    # Use the embedding instance directly - no model switching needed!
                     vec = emb_obj.embed_query(q)
                     query_embeddings[model_name] = vec
                     matched_models.append(model_name)
                     logger.info(f"Generated embedding for model: {model_name} (actual dimensions: {len(vec)})")
                     self.log(f"[MATCH] Model '{model_name}' - generated {len(vec)}-dim embedding")
                 else:
-                    # No matching embedding found for this model
                     unmatched_models.append(model_name)
                     logger.warning(
                         f"No matching embedding found for model '{model_name}'. "
@@ -1418,7 +1199,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 logger.warning(f"Failed to generate embedding for {model_name}: {e}")
                 self.log(f"[ERROR] Embedding generation failed for '{model_name}': {e}")
 
-        # Log summary of model matching
         logger.info(f"Model matching summary: {len(matched_models)} matched, {len(unmatched_models)} unmatched")
         self.log(f"[SUMMARY] Model matching: {len(matched_models)} matched, {len(unmatched_models)} unmatched")
         if unmatched_models:
@@ -1436,7 +1216,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         index_properties = self._get_index_properties(client)
         legacy_vector_field = getattr(self, "vector_field", "chunk_embedding")
 
-        # Build KNN queries for each model
         embedding_fields: list[str] = []
         knn_queries_with_candidates = []
         knn_queries_without_candidates = []
@@ -1453,8 +1232,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             selected_field = field_name
             vector_dim = len(embedding_vector)
 
-            # Only use the expected dynamic field - no legacy fallback
-            # This prevents dimension mismatches between models
             if not self._is_knn_vector_field(index_properties, selected_field):
                 logger.warning(
                     f"Skipping model {model_name}: field '{field_name}' is not mapped as knn_vector. "
@@ -1463,7 +1240,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                 self.log(f"[SKIP] Field '{selected_field}' not a knn_vector - skipping model '{model_name}'")
                 continue
 
-            # Validate vector dimensions match the field dimensions
             field_dim = self._get_field_dimension(index_properties, selected_field)
             if field_dim is not None and field_dim != vector_dim:
                 logger.error(
@@ -1499,10 +1275,6 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             knn_queries_without_candidates.append(base_query)
 
         if not knn_queries_with_candidates:
-            # No valid fields found - this can happen when:
-            # 1. Index is empty (no documents yet)
-            # 2. Embedding model has changed and field doesn't exist yet
-            # Return empty results instead of failing
             logger.warning(
                 "No valid knn_vector fields found for embedding models. "
                 "This may indicate an empty index or missing field mappings. "
@@ -1515,27 +1287,23 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
             )
             return []
 
-        # Build exists filter - document must have at least one embedding field
         exists_any_embedding = {
             "bool": {"should": [{"exists": {"field": f}} for f in set(embedding_fields)], "minimum_should_match": 1}
         }
 
-        # Combine user filters with exists filter
         all_filters = [*filter_clauses, exists_any_embedding]
 
-        # Get limit and score threshold
         limit = (filter_obj or {}).get("limit", self.number_of_results)
         score_threshold = (filter_obj or {}).get("score_threshold", 0)
 
-        # Build multi-model hybrid query
         body = {
             "query": {
                 "bool": {
                     "should": [
                         {
                             "dis_max": {
-                                "tie_breaker": 0.0,  # Take only the best match, no blending
-                                "boost": 0.7,  # 70% weight for semantic search
+                                "tie_breaker": 0.0,
+                                "boost": 0.7,
                                 "queries": knn_queries_with_candidates,
                             }
                         },
@@ -1545,7 +1313,7 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
                                 "fields": ["text^2", "filename^1.5"],
                                 "type": "best_fields",
                                 "fuzziness": "AUTO",
-                                "boost": 0.3,  # 30% weight for keyword search
+                                "boost": 0.3,
                             }
                         },
                     ],
@@ -1657,53 +1425,34 @@ class OpenSearchVectorStoreComponentMultimodalMultiEmbedding(LCVectorStoreCompon
         ]
 
     def search_documents(self) -> list[Data]:
-        """Search documents and return results as Data objects.
+        """执行检索并返回 `Data` 列表。
 
-        This is the main interface method that performs the multi-model search using the
-        configured search_query and returns results in Langflow's Data format.
-
-        Always builds the vector store (triggering ingestion if needed), then performs
-        search only if a query is provided.
-
-        Returns:
-            List of Data objects containing search results with text and metadata
-
-        Raises:
-            Exception: If search operation fails
+        契约：如无查询则仅触发写入并返回空列表。
+        副作用：可能触发写入与搜索请求。
+        失败语义：检索异常向上抛出。
         """
         try:
-            # Always build/cache the vector store to ensure ingestion happens
             logger.info(f"Search query: {self.search_query}")
             if self._cached_vector_store is None:
                 self.build_vector_store()
 
-            # Only perform search if query is provided
             search_query = (self.search_query or "").strip()
             if not search_query:
                 self.log("No search query provided - ingestion completed, returning empty results")
                 return []
 
-            # Perform search with the provided query
             raw = self.search(search_query)
             return [Data(text=hit["page_content"], **hit["metadata"]) for hit in raw]
         except Exception as e:
             self.log(f"search_documents error: {e}")
             raise
 
-    # -------- dynamic UI handling (auth switch) --------
     async def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:
-        """Dynamically update component configuration based on field changes.
+        """根据字段变化动态调整配置。
 
-        This method handles real-time UI updates, particularly for authentication
-        mode changes that show/hide relevant input fields.
-
-        Args:
-            build_config: Current component configuration
-            field_value: New value for the changed field
-            field_name: Name of the field that changed
-
-        Returns:
-            Updated build configuration with appropriate field visibility
+        契约：输入当前配置与变更字段，输出更新后的配置。
+        副作用：修改字段可见性与必填状态。
+        失败语义：字段缺失时记录日志并返回原配置。
         """
         try:
             if field_name == "auth_mode":

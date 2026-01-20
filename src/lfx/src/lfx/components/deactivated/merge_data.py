@@ -1,3 +1,17 @@
+"""
+模块名称：Data 合并组件（已停用）
+
+本模块提供将多个 `Data` 合并为统一字段集合的能力，主要用于在旧流程中对齐输出结构。主要功能包括：
+- 汇总所有输入 `Data` 的键集合
+- 对缺失键填充空字符串，输出字段一致的 `Data` 列表
+
+关键组件：
+- `MergeDataComponent`：合并组件
+
+设计背景：避免下游组件因键缺失导致解析失败。
+注意事项：输入必须为 `Data` 列表；缺失键将被填充空字符串。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import DataInput, Output
 from lfx.log.logger import logger
@@ -5,10 +19,11 @@ from lfx.schema.data import Data
 
 
 class MergeDataComponent(Component):
-    """MergeDataComponent is responsible for combining multiple Data objects into a unified list of Data objects.
+    """Data 合并组件。
 
-    It ensures that all keys across the input Data objects are present in each merged Data object.
-    Missing keys are filled with empty strings to maintain consistency.
+    契约：输入为 `Data` 列表，输出为字段一致的 `Data` 列表。
+    失败语义：输入元素非 `Data` 时抛 `TypeError`。
+    副作用：记录日志。
     """
 
     display_name = "Merge Data"
@@ -35,13 +50,16 @@ class MergeDataComponent(Component):
     ]
 
     def merge_data(self) -> list[Data]:
-        """Merges multiple Data objects into a single list of Data objects.
+        """合并多个 `Data` 并补齐缺失字段。
 
-        Ensures that all keys from the input Data objects are present in each merged Data object.
-        Missing keys are filled with empty strings.
+        契约：输出列表中每个 `Data.data` 均包含所有输入键，缺失键填空字符串。
+        失败语义：输入元素类型不正确时抛 `TypeError`；其他异常原样抛出。
+        副作用：记录日志。
 
-        Returns:
-            List[Data]: A list of merged Data objects with consistent keys.
+        关键路径（三步）：
+        1) 校验输入并汇总所有键
+        2) 为每个输入生成补齐字段的新 `Data`
+        3) 返回合并后的列表
         """
         logger.info("Initiating the data merging process.")
 
@@ -52,7 +70,6 @@ class MergeDataComponent(Component):
             logger.warning("No data inputs provided. Returning an empty list.")
             return []
 
-        # Collect all unique keys from all Data objects
         all_keys: set[str] = set()
         for idx, data_input in enumerate(data_inputs):
             if not isinstance(data_input, Data):
@@ -66,13 +83,11 @@ class MergeDataComponent(Component):
         logger.debug(f"Collected {len(all_keys)} unique key(s) from input data.")
 
         try:
-            # Create new list of Data objects with missing keys filled with empty strings
             merged_data_list = []
             for idx, data_input in enumerate(data_inputs):
                 merged_data_dict = {}
 
                 for key in all_keys:
-                    # Use the existing value if the key exists, otherwise use an empty string
                     value = data_input.data.get(key, "")
                     if key not in data_input.data:
                         log_message = f"Key '{key}' missing in data input at index {idx}. Assigning empty string."

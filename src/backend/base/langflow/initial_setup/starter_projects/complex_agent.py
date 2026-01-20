@@ -1,3 +1,17 @@
+"""
+模块名称：复杂层级 `Agent` 示例图
+
+本模块构建多角色协作的层级 `Agent` 图，演示动态角色定义与层级任务调度。主要功能包括：
+- 基于用户问题生成 `Role` / `Goal` / `Backstory`
+- 由管理 `Agent` 统筹任务并调用子 `Agent` 工具
+
+关键组件：
+- `complex_agent_graph`: 构建层级任务 `Graph`
+
+设计背景：展示多 `Agent` 分工协作与工具调用的完整链路。
+注意事项：示例依赖外部工具与模型服务，运行时需配置相应凭据。
+"""
+
 from lfx.components.crewai.crewai import CrewAIAgentComponent
 from lfx.components.crewai.hierarchical_crew import HierarchicalCrewComponent
 from lfx.components.crewai.hierarchical_task import HierarchicalTaskComponent
@@ -9,6 +23,24 @@ from lfx.graph import Graph
 
 
 def complex_agent_graph():
+    """构建包含动态角色与层级任务的 `Agent` 示例图。
+
+    契约：返回可执行的 `Graph`；不接受参数，角色与目标由输入消息生成。
+    副作用：构图阶段无 `I/O`；运行阶段会调用搜索与财经工具。
+    失败语义：外部工具或模型不可用会在执行期失败；构图不抛错。
+    关键路径（三步）：
+    1) 生成 `Role` / `Goal` / `Backstory` 提示词
+    2) 组装动态 `Agent` 与管理 `Agent`
+    3) 用层级任务驱动最终输出
+    异常流：工具调用失败会导致任务输出缺失或中断。
+    性能瓶颈：外部检索与模型推理为主要耗时。
+    排障入口：确认搜索工具与模型配置是否可用。
+    决策：将管理 `Agent` 与执行 `Agent` 使用不同模型
+    问题：需要兼顾调度能力与成本控制
+    方案：`manager_llm` 使用更强模型，执行 Agent 使用轻量模型
+    代价：模型配置更复杂，成本与延迟可变
+    重评：当任务复杂度下降或成本压力上升时统一模型规格
+    """
     llm = OpenAIModelComponent(model_name="gpt-4o-mini")
     manager_llm = OpenAIModelComponent(model_name="gpt-4o")
     search_api_tool = SearchAPIComponent()

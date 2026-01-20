@@ -1,3 +1,21 @@
+"""
+模块名称：`Python` 结构化工具生成器
+
+本模块将用户提供的 Python 代码解析为结构化工具，支持动态参数与类型推断。
+主要功能包括：
+- 解析代码中的函数与类定义
+- 根据函数签名生成 `StructuredTool` 参数 schema
+- 注入全局变量并执行用户代码
+
+关键组件：
+- `PythonCodeStructuredTool.update_build_config`：解析代码并更新前端模板
+- `PythonCodeStructuredTool.build_tool`：生成可执行工具
+- `_parse_code`/`_find_imports`：抽取函数、类与导入
+
+设计背景：低代码环境需要把用户函数直接转为工具能力。
+注意事项：该组件会执行用户代码，仅适用于受控环境。
+"""
+
 import ast
 import json
 from typing import Any
@@ -17,6 +35,15 @@ from lfx.schema.dotdict import dotdict
 
 
 class PythonCodeStructuredTool(LCToolComponent):
+    """将 Python 代码转换为结构化工具的组件。
+
+    契约：输入工具代码、函数名与描述，输出 `StructuredTool` 实例。
+    决策：使用 AST 解析函数签名并动态构造 schema。
+    问题：手工维护参数描述易出错且不一致。
+    方案：从代码中抽取参数与注解，并与前端配置联动。
+    代价：解析与执行过程复杂，且存在执行风险。
+    重评：当需要更强安全隔离时改用沙箱或受限执行。
+    """
     DEFAULT_KEYS = [
         "code",
         "_type",
@@ -95,6 +122,14 @@ class PythonCodeStructuredTool(LCToolComponent):
     async def update_build_config(
         self, build_config: dotdict, field_value: Any, field_name: str | None = None
     ) -> dotdict:
+        """解析代码并动态更新前端字段。
+
+        关键路径（三步）：
+        1) 解析代码提取函数/类
+        2) 生成函数参数描述字段
+        3) 写回 `_functions`/`_classes` 与选项
+        异常流：解析失败时记录状态并回退为错误选项。
+        """
         if field_name is None:
             return build_config
 
@@ -138,6 +173,14 @@ class PythonCodeStructuredTool(LCToolComponent):
         return build_config
 
     async def build_tool(self) -> Tool:
+        """构建结构化工具并绑定用户函数。
+
+        关键路径（三步）：
+        1) 解析导入并执行用户代码
+        2) 合并全局变量与类定义
+        3) 构建参数 schema 并生成工具
+        异常流：解析/执行失败会抛出异常并阻断构建。
+        """
         local_namespace = {}  # type: ignore[var-annotated]
         modules = self._find_imports(self.tool_code)
         import_code = ""
@@ -149,7 +192,9 @@ class PythonCodeStructuredTool(LCToolComponent):
             import_code += (
                 f"from {from_module.module} import {', '.join([alias.name for alias in from_module.names])}\n"
             )
+        # 安全：执行用户代码前先显式导入其依赖。
         exec(import_code, globals())
+        # 安全：执行用户代码，仅适用于受控环境。
         exec(self.tool_code, globals(), local_namespace)
 
         class PythonCodeToolFunc:
@@ -223,7 +268,7 @@ class PythonCodeStructuredTool(LCToolComponent):
         )
 
     async def update_frontend_node(self, new_frontend_node: dict, current_frontend_node: dict):
-        """This function is called after the code validation is done."""
+        """在代码校验后更新前端节点模板。"""
         frontend_node = await super().update_frontend_node(new_frontend_node, current_frontend_node)
         frontend_node["template"] = await self.update_build_config(
             frontend_node["template"],
@@ -241,6 +286,14 @@ class PythonCodeStructuredTool(LCToolComponent):
         return frontend_node
 
     def _parse_code(self, code: str) -> tuple[list[dict], list[dict]]:
+        """解析代码并抽取类与函数信息。
+
+        关键路径（三步）：
+        1) 解析 AST 并遍历顶层节点
+        2) 提取类/函数代码片段与参数信息
+        3) 返回结构化描述列表
+        失败语义：多行参数定义直接抛 `ValueError`。
+        """
         parsed_code = ast.parse(code)
         lines = code.split("\n")
         classes = []
@@ -262,10 +315,10 @@ class PythonCodeStructuredTool(LCToolComponent):
                 continue
 
             func = {"name": node.name, "args": []}
-            for arg in node.args.args:
-                if arg.lineno != arg.end_lineno:
-                    msg = "Multiline arguments are not supported"
-                    raise ValueError(msg)
+                for arg in node.args.args:
+                    if arg.lineno != arg.end_lineno:
+                        msg = "Multiline arguments are not supported"
+                        raise ValueError(msg)
 
                 func_arg = {
                     "name": arg.arg,
@@ -308,6 +361,7 @@ class PythonCodeStructuredTool(LCToolComponent):
         return classes, functions
 
     def _find_imports(self, code: str) -> dotdict:
+        """解析代码并提取 import/from import 语句。"""
         imports: list[str] = []
         from_imports = []
         parsed_code = ast.parse(code)
@@ -319,9 +373,11 @@ class PythonCodeStructuredTool(LCToolComponent):
         return dotdict({"imports": imports, "from_imports": from_imports})
 
     def _get_value(self, value: Any, annotation: Any) -> Any:
+        """从字段值或字典中读取配置值。"""
         return value if isinstance(value, annotation) else value["value"]
 
     def _find_arg(self, named_functions: dict, func_name: str, arg_name: str) -> dict | None:
+        """在解析结果中查找指定函数参数。"""
         for arg in named_functions[func_name]["args"]:
             if arg["name"] == arg_name:
                 return arg

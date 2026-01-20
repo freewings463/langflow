@@ -1,3 +1,19 @@
+"""
+模块名称：OpenSearch 向量检索组件
+
+本模块提供 OpenSearch 向量存储与混合检索组件，支持向量相似度与关键词联合搜索，
+并提供认证、过滤与聚合能力。主要功能包括：
+- 构建 OpenSearch 客户端与索引映射
+- 批量写入文档与向量
+- 混合检索（KNN + 关键字）与过滤
+
+关键组件：
+- `OpenSearchVectorStoreComponent`：OpenSearch 组件入口
+
+设计背景：为 OpenSearch 场景提供统一向量检索组件封装。
+注意事项：Amazon OpenSearch Serverless 对向量引擎有限制，需校验兼容性。
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,18 +31,11 @@ from lfx.schema.data import Data
 
 @vector_store_connection
 class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
-    """OpenSearch Vector Store Component with Hybrid Search Capabilities.
+    """OpenSearch 向量存储组件（混合检索）。
 
-    This component provides vector storage and retrieval using OpenSearch, combining semantic
-    similarity search (KNN) with keyword-based search for optimal results. It supports document
-    ingestion, vector embeddings, and advanced filtering with authentication options.
-
-    Features:
-    - Vector storage with configurable engines (jvector, nmslib, faiss, lucene)
-    - Hybrid search combining KNN vector similarity and keyword matching
-    - Flexible authentication (Basic auth, JWT tokens)
-    - Advanced filtering and aggregations
-    - Metadata injection during document ingestion
+    契约：输入连接参数、嵌入器与过滤配置，输出可检索的 OpenSearch 客户端结果。
+    副作用：可能创建索引、写入文档并执行搜索请求。
+    失败语义：认证参数缺失或引擎不兼容会抛 `ValueError`。
     """
 
     display_name: str = "OpenSearch"
@@ -35,11 +44,10 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         "Store and search documents using OpenSearch with hybrid semantic and keyword search capabilities."
     )
 
-    # Keys we consider baseline
     default_keys: list[str] = [
         "opensearch_url",
         "index_name",
-        *[i.name for i in LCVectorStoreComponent.inputs],  # search_query, add_documents, etc.
+        *[i.name for i in LCVectorStoreComponent.inputs],
         "embedding",
         "vector_field",
         "number_of_results",
@@ -144,7 +152,7 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             ),
             advanced=True,
         ),
-        *LCVectorStoreComponent.inputs,  # includes search_query, add_documents, etc.
+        *LCVectorStoreComponent.inputs,
         HandleInput(name="embedding", display_name="Embedding", input_types=["Embeddings"]),
         StrInput(
             name="vector_field",
@@ -177,7 +185,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                 "Use __IMPOSSIBLE_VALUE__ as placeholder to ignore specific filters."
             ),
         ),
-        # ----- Auth controls (dynamic) -----
         DropdownInput(
             name="auth_mode",
             display_name="Authentication Mode",
@@ -227,7 +234,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             show=False,
             advanced=True,
         ),
-        # ----- TLS -----
         BoolInput(
             name="use_ssl",
             display_name="Use SSL/TLS",
@@ -247,7 +253,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         ),
     ]
 
-    # ---------- helper functions for index management ----------
     def _default_text_mapping(
         self,
         dim: int,
@@ -258,22 +263,11 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         m: int = 16,
         vector_field: str = "vector_field",
     ) -> dict[str, Any]:
-        """Create the default OpenSearch index mapping for vector search.
+        """生成默认向量索引映射。
 
-        This method generates the index configuration with k-NN settings optimized
-        for approximate nearest neighbor search using the specified vector engine.
-
-        Args:
-            dim: Dimensionality of the vector embeddings
-            engine: Vector search engine (jvector, nmslib, faiss, lucene)
-            space_type: Distance metric for similarity calculation
-            ef_search: Size of dynamic list used during search
-            ef_construction: Size of dynamic list used during index construction
-            m: Number of bidirectional links for each vector
-            vector_field: Name of the field storing vector embeddings
-
-        Returns:
-            Dictionary containing OpenSearch index mapping configuration
+        契约：输入向量维度与引擎配置，输出 OpenSearch mapping 字典。
+        副作用：无。
+        失败语义：无。
         """
         return {
             "settings": {"index": {"knn": True, "knn.algo_param.ef_search": ef_search}},
@@ -294,30 +288,22 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         }
 
     def _validate_aoss_with_engines(self, *, is_aoss: bool, engine: str) -> None:
-        """Validate engine compatibility with Amazon OpenSearch Serverless (AOSS).
+        """校验 AOSS 与向量引擎兼容性。
 
-        Amazon OpenSearch Serverless has restrictions on which vector engines
-        can be used. This method ensures the selected engine is compatible.
-
-        Args:
-            is_aoss: Whether the connection is to Amazon OpenSearch Serverless
-            engine: The selected vector search engine
-
-        Raises:
-            ValueError: If AOSS is used with an incompatible engine
+        契约：输入是否为 AOSS 与引擎类型，校验通过则无返回。
+        副作用：无。
+        失败语义：不兼容时抛 `ValueError`。
         """
         if is_aoss and engine not in {"nmslib", "faiss"}:
             msg = "Amazon OpenSearch Service Serverless only supports `nmslib` or `faiss` engines"
             raise ValueError(msg)
 
     def _is_aoss_enabled(self, http_auth: Any) -> bool:
-        """Determine if Amazon OpenSearch Serverless (AOSS) is being used.
+        """判断是否为 Amazon OpenSearch Serverless (AOSS)。
 
-        Args:
-            http_auth: The HTTP authentication object
-
-        Returns:
-            True if AOSS is enabled, False otherwise
+        契约：输入认证对象，输出布尔值。
+        副作用：无。
+        失败语义：无。
         """
         return http_auth is not None and hasattr(http_auth, "service") and http_auth.service == "aoss"
 
@@ -336,26 +322,11 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         *,
         is_aoss: bool = False,
     ) -> list[str]:
-        """Efficiently ingest multiple documents with embeddings into OpenSearch.
+        """批量写入向量文档。
 
-        This method uses bulk operations to insert documents with their vector
-        embeddings and metadata into the specified OpenSearch index.
-
-        Args:
-            client: OpenSearch client instance
-            index_name: Target index for document storage
-            embeddings: List of vector embeddings for each document
-            texts: List of document texts
-            metadatas: Optional metadata dictionaries for each document
-            ids: Optional document IDs (UUIDs generated if not provided)
-            vector_field: Field name for storing vector embeddings
-            text_field: Field name for storing document text
-            mapping: Optional index mapping configuration
-            max_chunk_bytes: Maximum size per bulk request chunk
-            is_aoss: Whether using Amazon OpenSearch Serverless
-
-        Returns:
-            List of document IDs that were successfully ingested
+        契约：输入向量、文本与元数据，输出成功写入的文档 ID 列表。
+        副作用：调用 OpenSearch bulk 写入。
+        失败语义：异常由底层客户端抛出。
         """
         if not mapping:
             mapping = {}
@@ -384,18 +355,12 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         helpers.bulk(client, requests, max_chunk_bytes=max_chunk_bytes)
         return return_ids
 
-    # ---------- auth / client ----------
     def _build_auth_kwargs(self) -> dict[str, Any]:
-        """Build authentication configuration for OpenSearch client.
+        """构建 OpenSearch 认证参数。
 
-        Constructs the appropriate authentication parameters based on the
-        selected auth mode (basic username/password or JWT token).
-
-        Returns:
-            Dictionary containing authentication configuration
-
-        Raises:
-            ValueError: If required authentication parameters are missing
+        契约：根据 `auth_mode` 返回认证配置字典。
+        副作用：无。
+        失败语义：认证信息缺失时抛 `ValueError`。
         """
         mode = (self.auth_mode or "basic").strip().lower()
         if mode == "jwt":
@@ -414,10 +379,11 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         return {"http_auth": (user, pwd)}
 
     def build_client(self) -> OpenSearch:
-        """Create and configure an OpenSearch client instance.
+        """创建 OpenSearch 客户端实例。
 
-        Returns:
-            Configured OpenSearch client ready for operations
+        契约：输出已配置的 `OpenSearch` 客户端。
+        副作用：无（仅构造对象）。
+        失败语义：认证配置异常将向上抛出。
         """
         auth_kwargs = self._build_auth_kwargs()
         return OpenSearch(
@@ -431,26 +397,28 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> OpenSearch:
-        # Return raw OpenSearch client as our “vector store.”
+        """构建向量存储客户端并写入文档。
+
+        契约：输出 OpenSearch 客户端（作为向量存储使用）。
+        副作用：会触发文档写入。
+        失败语义：写入异常将向上抛出。
+        """
         self.log(self.ingest_data)
         client = self.build_client()
         self._add_documents_to_vector_store(client=client)
         return client
 
-    # ---------- ingest ----------
     def _add_documents_to_vector_store(self, client: OpenSearch) -> None:
-        """Process and ingest documents into the OpenSearch vector store.
+        """处理并写入文档。
 
-        This method handles the complete document ingestion pipeline:
-        - Prepares document data and metadata
-        - Generates vector embeddings
-        - Creates appropriate index mappings
-        - Bulk inserts documents with vectors
+        契约：输入 OpenSearch 客户端，写入当前 `ingest_data`。
+        关键路径（三步）：
+        1) 预处理文档与元数据。
+        2) 生成向量并校验 AOSS/引擎兼容性。
+        3) 批量写入并记录结果。
 
-        Args:
-            client: OpenSearch client for performing operations
+        异常流：缺少嵌入器或写入失败会抛 `ValueError`。
         """
-        # Convert DataFrame to Data if needed using parent's method
         self.ingest_data = self._prepare_ingest_data()
 
         docs = self.ingest_data or []
@@ -458,10 +426,8 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             self.log("No documents to ingest.")
             return
 
-        # Extract texts and metadata from documents
         texts = []
         metadatas = []
-        # Process docs_metadata table input into a dict
         additional_metadata = {}
         if hasattr(self, "docs_metadata") and self.docs_metadata:
             logger.debug(f"[LF] Docs metadata {self.docs_metadata}")
@@ -474,7 +440,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                 for item in self.docs_metadata:
                     if isinstance(item, dict) and "key" in item and "value" in item:
                         additional_metadata[item["key"]] = item["value"]
-        # Replace string "None" values with actual None
         for key, value in additional_metadata.items():
             if value == "None":
                 additional_metadata[key] = None
@@ -484,7 +449,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             text = data_copy.pop(doc_obj.text_key, doc_obj.default_value)
             texts.append(text)
 
-            # Merge additional metadata from table input
             data_copy.update(additional_metadata)
 
             metadatas.append(data_copy)
@@ -493,25 +457,20 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             msg = "Embedding handle is required to embed documents."
             raise ValueError(msg)
 
-        # Generate embeddings
         vectors = self.embedding.embed_documents(texts)
 
         if not vectors:
             self.log("No vectors generated from documents.")
             return
 
-        # Get vector dimension for mapping
-        dim = len(vectors[0]) if vectors else 768  # default fallback
+        dim = len(vectors[0]) if vectors else 768
 
-        # Check for AOSS
         auth_kwargs = self._build_auth_kwargs()
         is_aoss = self._is_aoss_enabled(auth_kwargs.get("http_auth"))
 
-        # Validate engine with AOSS
         engine = getattr(self, "engine", "jvector")
         self._validate_aoss_with_engines(is_aoss=is_aoss, engine=engine)
 
-        # Create mapping with proper KNN settings
         space_type = getattr(self, "space_type", "l2")
         ef_construction = getattr(self, "ef_construction", 512)
         m = getattr(self, "m", 16)
@@ -527,7 +486,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
 
         self.log(f"Indexing {len(texts)} documents into '{self.index_name}' with proper KNN mapping...")
 
-        # Use the LangChain-style bulk ingestion
         return_ids = self._bulk_ingest_embeddings(
             client=client,
             index_name=self.index_name,
@@ -543,43 +501,26 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
 
         self.log(f"Successfully indexed {len(return_ids)} documents.")
 
-    # ---------- helpers for filters ----------
     def _is_placeholder_term(self, term_obj: dict) -> bool:
-        # term_obj like {"filename": "__IMPOSSIBLE_VALUE__"}
+        """判断是否为占位过滤条件。"""
         return any(v == "__IMPOSSIBLE_VALUE__" for v in term_obj.values())
 
     def _coerce_filter_clauses(self, filter_obj: dict | None) -> list[dict]:
-        """Convert filter expressions into OpenSearch-compatible filter clauses.
+        """将过滤配置转换为 OpenSearch 过滤子句。
 
-        This method accepts two filter formats and converts them to standardized
-        OpenSearch query clauses:
-
-        Format A - Explicit filters:
-        {"filter": [{"term": {"field": "value"}}, {"terms": {"field": ["val1", "val2"]}}],
-         "limit": 10, "score_threshold": 1.5}
-
-        Format B - Context-style mapping:
-        {"data_sources": ["file1.pdf"], "document_types": ["pdf"], "owners": ["user1"]}
-
-        Args:
-            filter_obj: Filter configuration dictionary or None
-
-        Returns:
-            List of OpenSearch filter clauses (term/terms objects)
-            Placeholder values with "__IMPOSSIBLE_VALUE__" are ignored
+        契约：输入过滤对象（支持两种格式），输出标准化 filter 子句列表。
+        副作用：无。
+        失败语义：无效 JSON 时返回空列表。
         """
         if not filter_obj:
             return []
 
-        # If it is a string, try to parse it once
         if isinstance(filter_obj, str):
             try:
                 filter_obj = json.loads(filter_obj)
             except json.JSONDecodeError:
-                # Not valid JSON - treat as no filters
                 return []
 
-        # Case A: already an explicit list/dict under "filter"
         if "filter" in filter_obj:
             raw = filter_obj["filter"]
             if isinstance(raw, dict):
@@ -594,7 +535,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                         explicit_clauses.append(f)
             return explicit_clauses
 
-        # Case B: convert context-style maps into clauses
         field_mapping = {
             "data_sources": "filename",
             "document_types": "mimetype",
@@ -606,7 +546,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                 continue
             field = field_mapping.get(k, k)
             if len(values) == 0:
-                # Match-nothing placeholder (kept to mirror your tool semantics)
                 context_clauses.append({"term": {field: "__IMPOSSIBLE_VALUE__"}})
             elif len(values) == 1:
                 if values[0] != "__IMPOSSIBLE_VALUE__":
@@ -615,30 +554,21 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                 context_clauses.append({"terms": {field: values}})
         return context_clauses
 
-    # ---------- search (single hybrid path matching your tool) ----------
     def search(self, query: str | None = None) -> list[dict[str, Any]]:
-        """Perform hybrid search combining vector similarity and keyword matching.
+        """执行混合检索（向量 + 关键词）。
 
-        This method executes a sophisticated search that combines:
-        - K-nearest neighbor (KNN) vector similarity search (70% weight)
-        - Multi-field keyword search with fuzzy matching (30% weight)
-        - Optional filtering and score thresholds
-        - Aggregations for faceted search results
+        契约：输入查询文本，输出包含内容/元数据/分数的结果列表。
+        关键路径（三步）：
+        1) 解析过滤条件并生成查询向量。
+        2) 组合 KNN 与关键词检索请求。
+        3) 返回命中结果并附带分数。
 
-        Args:
-            query: Search query string (used for both vector embedding and keyword search)
-
-        Returns:
-            List of search results with page_content, metadata, and relevance scores
-
-        Raises:
-            ValueError: If embedding component is not provided or filter JSON is invalid
+        异常流：缺少嵌入器或过滤 JSON 非法时抛 `ValueError`。
         """
         logger.info(self.ingest_data)
         client = self.build_client()
         q = (query or "").strip()
 
-        # Parse optional filter expression (can be either A or B shape; see _coerce_filter_clauses)
         filter_obj = None
         if getattr(self, "filter_expression", "") and self.filter_expression.strip():
             try:
@@ -651,17 +581,13 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             msg = "Embedding is required to run hybrid search (KNN + keyword)."
             raise ValueError(msg)
 
-        # Embed the query
         vec = self.embedding.embed_query(q)
 
-        # Build filter clauses (accept both shapes)
         filter_clauses = self._coerce_filter_clauses(filter_obj)
 
-        # Respect the tool's limit/threshold defaults
         limit = (filter_obj or {}).get("limit", self.number_of_results)
         score_threshold = (filter_obj or {}).get("score_threshold", 0)
 
-        # Build the same hybrid body as your SearchService
         body = {
             "query": {
                 "bool": {
@@ -670,7 +596,7 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
                             "knn": {
                                 self.vector_field: {
                                     "vector": vec,
-                                    "k": 10,  # fixed to match the tool
+                                    "k": 10,
                                     "boost": 0.7,
                                 }
                             }
@@ -709,7 +635,6 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             body["query"]["bool"]["filter"] = filter_clauses
 
         if isinstance(score_threshold, (int, float)) and score_threshold > 0:
-            # top-level min_score (matches your tool)
             body["min_score"] = score_threshold
 
         resp = client.search(index=self.index_name, body=body)
@@ -724,16 +649,11 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
         ]
 
     def search_documents(self) -> list[Data]:
-        """Search documents and return results as Data objects.
+        """执行检索并返回 `Data` 列表。
 
-        This is the main interface method that performs the search using the
-        configured search_query and returns results in Langflow's Data format.
-
-        Returns:
-            List of Data objects containing search results with text and metadata
-
-        Raises:
-            Exception: If search operation fails
+        契约：使用 `search_query` 执行检索并输出 `Data`。
+        副作用：可能触发网络请求与日志记录。
+        失败语义：检索异常向上抛出。
         """
         try:
             raw = self.search(self.search_query or "")
@@ -743,20 +663,12 @@ class OpenSearchVectorStoreComponent(LCVectorStoreComponent):
             self.log(f"search_documents error: {e}")
             raise
 
-    # -------- dynamic UI handling (auth switch) --------
     async def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None) -> dict:
-        """Dynamically update component configuration based on field changes.
+        """根据字段变化动态调整配置。
 
-        This method handles real-time UI updates, particularly for authentication
-        mode changes that show/hide relevant input fields.
-
-        Args:
-            build_config: Current component configuration
-            field_value: New value for the changed field
-            field_name: Name of the field that changed
-
-        Returns:
-            Updated build configuration with appropriate field visibility
+        契约：输入当前配置与变更字段，输出更新后的配置。
+        副作用：修改字段可见性与必填状态。
+        失败语义：字段缺失时记录日志并返回原配置。
         """
         try:
             if field_name == "auth_mode":

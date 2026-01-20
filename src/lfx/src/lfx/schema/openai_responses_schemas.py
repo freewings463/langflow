@@ -1,10 +1,12 @@
+"""OpenAI Responses 兼容 schema。"""
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class OpenAIResponsesRequest(BaseModel):
-    """OpenAI-compatible responses request with flow_id as model parameter."""
+    """OpenAI Responses 请求结构（model 字段用于 flow_id）。"""
 
     model: str = Field(..., description="The flow ID to execute (used instead of OpenAI model)")
     input: str = Field(..., description="The input text to process")
@@ -20,7 +22,7 @@ class OpenAIResponsesRequest(BaseModel):
 
 
 class OpenAIResponsesResponse(BaseModel):
-    """OpenAI-compatible responses response."""
+    """OpenAI Responses 响应结构。"""
 
     id: str
     object: Literal["response"] = "response"
@@ -48,7 +50,7 @@ class OpenAIResponsesResponse(BaseModel):
 
 
 class OpenAIResponsesStreamChunk(BaseModel):
-    """OpenAI-compatible responses stream chunk."""
+    """OpenAI Responses 流式分片结构。"""
 
     id: str
     object: Literal["response.chunk"] = "response.chunk"
@@ -63,7 +65,7 @@ class OpenAIErrorResponse(BaseModel):
 
 
 def create_openai_error(message: str, type_: str = "invalid_request_error", code: str | None = None) -> dict:
-    """Create an OpenAI-compatible error response."""
+    """创建 OpenAI 兼容错误响应。"""
     error_data = {
         "message": message,
         "type": type_,

@@ -1,3 +1,15 @@
+"""
+模块名称：项目级 MCP 服务接口
+
+本模块提供项目级 MCP Server 的创建、运行与健康检查等能力。
+主要功能：
+- 处理项目级 MCP SSE/Streamable HTTP 连接
+- 管理 MCP Composer 启停与配置
+- 提供 MCP 安装与连接信息
+设计背景：将 MCP 能力绑定到项目维度，支持多项目隔离。
+注意事项：部分功能依赖 MCP Composer 与系统环境。
+"""
+
 import asyncio
 import json
 import os
@@ -316,6 +328,7 @@ async def list_project_tools(
     dependencies=[Depends(raise_error_if_astra_cloud_env)],
 )
 async def im_alive(project_id: str):  # noqa: ARG001
+    """SSE 存活探测（项目级）。"""
     return Response()
 
 
@@ -418,6 +431,7 @@ async def handle_project_messages(
 
 @router.head("/{project_id}/streamable", include_in_schema=False)
 async def streamable_health(project_id: UUID):  # noqa: ARG001
+    """Streamable HTTP 健康检查（项目级）。"""
     return Response()
 
 
@@ -1202,6 +1216,8 @@ async def _get_mcp_composer_auth_config(project) -> dict:
 
 # Project-specific MCP server instance for handling project-specific tools
 class ProjectMCPServer:
+    """项目级 MCP Server 封装，管理流式会话与工具路由。"""
+
     def __init__(self, project_id: UUID):
         self.project_id = project_id
         self.server = Server(f"langflow-mcp-project-{project_id}")

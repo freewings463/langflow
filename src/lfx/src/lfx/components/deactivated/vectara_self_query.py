@@ -1,3 +1,17 @@
+"""
+模块名称：Vectara 自查询检索组件（已停用）
+
+本模块提供基于 Vectara 向量存储的自查询检索器构建能力，主要用于通过 LLM 自动生成过滤条件。主要功能包括：
+- 解析元数据字段描述并构建 `AttributeInfo`
+- 通过 `SelfQueryRetriever.from_llm` 构建检索器
+
+关键组件：
+- `VectaraSelfQueryRetriverComponent`：自查询检索组件
+
+设计背景：历史上用于增强 Vectara 检索的结构化查询能力。
+注意事项：`metadata_field_info` 需为 JSON 字符串列表且包含 `name/description/type`。
+"""
+
 # mypy: disable-error-code="attr-defined"
 import json
 
@@ -10,7 +24,12 @@ from lfx.io import HandleInput, StrInput
 
 
 class VectaraSelfQueryRetriverComponent(CustomComponent):
-    """A custom component for implementing Vectara Self Query Retriever using a vector store."""
+    """Vectara 自查询检索组件。
+
+    契约：输入 `vectorstore`/`llm`/`document_content_description` 与元数据描述。
+    失败语义：元数据格式错误抛 `ValueError`；依赖缺失抛 `ImportError`。
+    副作用：无。
+    """
 
     display_name: str = "Vectara Self Query Retriever"
     description: str = "Implementation of Vectara Self Query Retriever"
@@ -47,7 +66,17 @@ class VectaraSelfQueryRetriverComponent(CustomComponent):
 
     @check_cached_vector_store
     def build_vector_store(self):
-        """Builds the Vectara Self Query Retriever."""
+        """构建 Vectara 自查询检索器。
+
+        契约：根据元数据描述生成 `AttributeInfo` 并创建检索器。
+        失败语义：JSON 解析失败或字段缺失抛 `ValueError`；依赖缺失抛 `ImportError`。
+        副作用：无。
+
+        关键路径（三步）：
+        1) 校验依赖并导入 Vectara 向量存储
+        2) 解析 `metadata_field_info` 为 `AttributeInfo`
+        3) 调用 `SelfQueryRetriever.from_llm` 返回检索器
+        """
         try:
             from langchain_community.vectorstores import Vectara  # noqa: F401
         except ImportError as e:

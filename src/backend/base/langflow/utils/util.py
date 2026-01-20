@@ -1,3 +1,15 @@
+"""
+模块名称：util
+
+本模块提供各种实用函数，主要用于向后兼容。
+主要功能包括：
+- 从新的lfx.utils.util模块导入所有实用函数
+- 确保旧版本API路径可用
+
+设计背景：为了支持从旧版langflow到新版lfx的架构迁移，保持API兼容性
+注意事项：新代码应直接使用 lfx.utils.util 模块
+"""
+
 from lfx.utils.util import (
     add_options_to_field,
     build_loader_repr_from_data,

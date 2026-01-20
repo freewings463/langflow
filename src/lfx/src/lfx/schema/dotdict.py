@@ -1,35 +1,25 @@
-"""Dot-notation dictionary implementation copied from langflow for lfx package."""
+"""dotdict 实现。
+
+本模块提供点号访问的字典实现，便于以属性方式读写键值。
+"""
 
 
 class dotdict(dict):  # noqa: N801
-    """dotdict allows accessing dictionary elements using dot notation (e.g., dict.key instead of dict['key']).
+    """支持点号访问的字典类型。
 
-    It automatically converts nested dictionaries into dotdict instances, enabling dot notation on them as well.
-
-    Note:
-        - Only keys that are valid attribute names (e.g., strings that could be variable names) are accessible via dot
-          notation.
-        - Keys which are not valid Python attribute names or collide with the dict method names (like 'items', 'keys')
-          should be accessed using the traditional dict['key'] notation.
+    关键路径（三步）：
+    1) 点号访问转为字典取值；
+    2) 点号赋值转为字典写入；
+    3) 递归将嵌套 dict 转为 dotdict。
     """
 
     def __getattr__(self, attr):
-        """Override dot access to behave like dictionary lookup. Automatically convert nested dicts to dotdicts.
-
-        Args:
-            attr (str): Attribute to access.
-
-        Returns:
-            The value associated with 'attr' in the dictionary, converted to dotdict if it is a dict.
-
-        Raises:
-            AttributeError: If the attribute is not found in the dictionary.
-        """
+        """点号访问转为字典查找并自动转换嵌套 dict。"""
         try:
             value = self[attr]
             if isinstance(value, dict) and not isinstance(value, dotdict):
                 value = dotdict(value)
-                self[attr] = value  # Update self to nest dotdict for future accesses
+                self[attr] = value  # 更新为嵌套 dotdict 以便后续访问
         except KeyError as e:
             msg = f"'dotdict' object has no attribute '{attr}'"
             raise AttributeError(msg) from e
@@ -37,25 +27,13 @@ class dotdict(dict):  # noqa: N801
             return value
 
     def __setattr__(self, key, value) -> None:
-        """Override attribute setting to work as dictionary item assignment.
-
-        Args:
-            key (str): The key under which to store the value.
-            value: The value to store in the dictionary.
-        """
+        """点号赋值转为字典写入。"""
         if isinstance(value, dict) and not isinstance(value, dotdict):
             value = dotdict(value)
         self[key] = value
 
     def __delattr__(self, key) -> None:
-        """Override attribute deletion to work as dictionary item deletion.
-
-        Args:
-            key (str): The key of the item to delete from the dictionary.
-
-        Raises:
-            AttributeError: If the key is not found in the dictionary.
-        """
+        """点号删除转为字典删除。"""
         try:
             del self[key]
         except KeyError as e:
@@ -63,12 +41,5 @@ class dotdict(dict):  # noqa: N801
             raise AttributeError(msg) from e
 
     def __missing__(self, key):
-        """Handle missing keys by returning an empty dotdict. This allows chaining access without raising KeyError.
-
-        Args:
-            key: The missing key.
-
-        Returns:
-            An empty dotdict instance for the given missing key.
-        """
+        """缺失键返回空 dotdict，便于链式访问。"""
         return dotdict()

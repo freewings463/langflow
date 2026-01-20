@@ -1,3 +1,10 @@
+"""消息存储组件。
+
+本模块将聊天消息存储到 Langflow 表或外部 Memory。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：外部 Memory 为空时写入 Langflow 内建存储。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.inputs.inputs import (
     HandleInput,
@@ -10,6 +17,12 @@ from lfx.utils.constants import MESSAGE_SENDER_AI, MESSAGE_SENDER_NAME_AI
 
 
 class MessageStoreComponent(Component):
+    """消息存储组件封装。
+
+    契约：输入为消息文本与可选 Memory；输出为已存储的 Message。
+    副作用：写入外部或本地存储并更新 `self.status`。
+    失败语义：未找到存储结果时抛 `ValueError`。
+    """
     display_name = "Message Store"
     description = "Stores a chat message or text into Langflow tables or an external memory."
     icon = "message-square-text"
@@ -54,6 +67,13 @@ class MessageStoreComponent(Component):
     ]
 
     async def store_message(self) -> Message:
+        """存储消息并返回最新记录。
+
+        关键路径（三步）：
+        1) 规范化消息与会话字段；
+        2) 写入外部 Memory 或本地存储；
+        3) 读取并返回最新消息。
+        """
         message = Message(text=self.message) if isinstance(self.message, str) else self.message
 
         message.session_id = self.session_id or message.session_id

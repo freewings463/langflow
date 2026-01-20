@@ -1,3 +1,14 @@
+"""NVIDIA LLM 组件。
+
+本模块封装 `langchain_nvidia_ai_endpoints` 的 ChatNVIDIA 以生成文本。
+主要功能包括：
+- 从 NVIDIA API 拉取可用模型列表
+- 构建 Langflow 模型输入参数
+- 在配置变更时刷新模型下拉选项
+
+注意事项：依赖 `langchain-nvidia-ai-endpoints`，并需要有效 `api_key`。
+"""
+
 from typing import Any
 
 from lfx.base.models.model import LCModelComponent
@@ -9,6 +20,13 @@ from lfx.schema.dotdict import dotdict
 
 
 class NVIDIAModelComponent(LCModelComponent):
+    """NVIDIA LLM 组件封装。
+
+    契约：输入由 `inputs` 定义；输出为 `LanguageModel`。
+    副作用：初始化时尝试拉取模型列表并可能记录日志。
+    失败语义：依赖缺失抛 `ImportError`；模型拉取失败记录警告并降级为空列表。
+    """
+
     display_name = "NVIDIA"
     description = "Generates text using NVIDIA LLMs."
     icon = "NVIDIA"
@@ -16,7 +34,7 @@ class NVIDIAModelComponent(LCModelComponent):
     try:
         import warnings
 
-        # Suppresses repeated warnings about NIM key in langchain_nvidia_ai_endpoints==0.3.8
+        # 注意：抑制特定版本重复的 NIM Key 警告，避免日志噪声
         warnings.filterwarnings("ignore", category=UserWarning, module="langchain_nvidia_ai_endpoints._common")
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
@@ -92,13 +110,18 @@ class NVIDIAModelComponent(LCModelComponent):
     ]
 
     def get_models(self, *, tool_model_enabled: bool | None = None) -> list[str]:
+        """获取可用模型列表。
+
+        契约：输入可选 `tool_model_enabled`；输出模型 ID 列表（已排序）。
+        失败语义：依赖缺失抛 `ImportError`。
+        """
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
         except ImportError as e:
             msg = "Please install langchain-nvidia-ai-endpoints to use the NVIDIA model."
             raise ImportError(msg) from e
 
-        # Note: don't include the previous model, as it may not exist in available models from the new base url
+        # 注意：不使用旧模型缓存，避免 base_url 变化后出现不可用模型
         model = ChatNVIDIA(base_url=self.base_url, api_key=self.api_key)
         if tool_model_enabled:
             tool_models = [m for m in model.get_available_models() if m.supports_tools]
@@ -106,6 +129,12 @@ class NVIDIAModelComponent(LCModelComponent):
         return sorted(m.id for m in model.available_models)
 
     def update_build_config(self, build_config: dotdict, _field_value: Any, field_name: str | None = None):
+        """根据字段变化刷新构建配置。
+
+        契约：输入为 `build_config` 与字段名；输出更新后的 `build_config`。
+        副作用：可能触发模型列表拉取并修改 `build_config`。
+        失败语义：拉取模型失败抛 `ValueError`。
+        """
         if field_name in {"model_name", "tool_model_enabled", "base_url", "api_key"}:
             try:
                 ids = self.get_models(tool_model_enabled=self.tool_model_enabled)
@@ -116,7 +145,7 @@ class NVIDIAModelComponent(LCModelComponent):
                 elif build_config["model_name"]["value"] not in ids:
                     build_config["model_name"]["value"] = None
 
-                # TODO: use api to determine if model supports detailed thinking
+                # TODO：后续通过 API 判断模型是否支持详细思考
                 if build_config["model_name"]["value"] == "nemotron":
                     build_config["detailed_thinking"]["show"] = True
                 else:
@@ -131,6 +160,11 @@ class NVIDIAModelComponent(LCModelComponent):
         return build_config
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 NVIDIA Chat 模型实例。
+
+        契约：读取组件输入并返回 `ChatNVIDIA` 实例。
+        失败语义：依赖缺失抛 `ImportError`。
+        """
         try:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
         except ImportError as e:

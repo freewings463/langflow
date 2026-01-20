@@ -1,4 +1,12 @@
-"""Local file-based storage service for langflow."""
+"""模块名称：本地文件存储服务
+
+模块目的：提供基于本地文件系统的存储实现。
+主要功能：文件保存、读取、流式读取、列举与删除。
+使用场景：默认本地存储或不启用对象存储时使用。
+关键组件：`LocalStorageService`
+设计背景：为存储接口提供本地实现，便于开发与部署。
+注意事项：路径以 `flow_id/filename` 组织，异常由文件系统抛出。
+"""
 
 from __future__ import annotations
 
@@ -16,79 +24,61 @@ if TYPE_CHECKING:
     from langflow.services.session.service import SessionService
     from langflow.services.settings.service import SettingsService
 
-# Constants for path parsing
-EXPECTED_PATH_PARTS = 2  # Path format: "flow_id/filename"
+# 路径解析常量：路径格式为 `flow_id/filename`
+EXPECTED_PATH_PARTS = 2
 
 
 class LocalStorageService(StorageService):
-    """A service class for handling local file storage operations."""
+    """本地文件存储服务。"""
 
     def __init__(
         self,
         session_service: SessionService,
         settings_service: SettingsService,
     ) -> None:
-        """Initialize the local storage service.
+        """初始化本地存储服务。
 
-        Args:
-            session_service: Session service instance
-            settings_service: Settings service instance containing configuration
+        契约：`config_dir` 必须可用作本地存储根目录。
+        副作用：初始化基类并设置 `data_dir`。
         """
-        # Initialize base class with services
         super().__init__(session_service, settings_service)
-        # Base class already sets self.data_dir as anyio.Path from settings_service.settings.config_dir
 
     def resolve_component_path(self, logical_path: str) -> str:
-        """Convert logical path to absolute filesystem path for local storage.
+        """将逻辑路径转换为本地绝对路径。
 
-        Args:
-            logical_path: Path in format "flow_id/filename"
-        Returns:
-            str: Absolute filesystem path
+        契约：期望格式为 `flow_id/filename`，否则返回原始路径。
         """
-        # Split the logical path into flow_id and filename
         parts = logical_path.split("/", 1)
         if len(parts) != EXPECTED_PATH_PARTS:
-            # Handle edge case - return as-is if format is unexpected
             return logical_path
 
         flow_id, file_name = parts
         return self.build_full_path(flow_id, file_name)
 
     def build_full_path(self, flow_id: str, file_name: str) -> str:
-        """Build the full path of a file in the local storage."""
+        """构建本地存储中文件的完整路径。"""
         return str(self.data_dir / flow_id / file_name)
 
     def parse_file_path(self, full_path: str) -> tuple[str, str]:
-        r"""Parse a full local storage path to extract flow_id and file_name.
+        r"""解析本地路径并提取 `flow_id` 与 `file_name`。
 
-        Uses pathlib.Path for robust cross-platform path handling, including
-        Windows paths with backslashes.
+        关键路径（三步）：
+        1) 使用 `Path` 标准化路径（兼容 `Windows` 反斜杠）
+        2) 去除 `data_dir` 前缀（如存在）
+        3) 以最后一个 `/` 拆分为 `flow_id` 与文件名
 
-        Args:
-            full_path: Filesystem path, may or may not include data_dir
-                e.g., "/data/user_123/image.png" or "user_123/image.png"
-                Also handles Windows paths like "C:\\data\\user_123\\image.png"
-
-        Returns:
-            tuple[str, str]: A tuple of (flow_id, file_name)
-
-        Examples:
-            >>> parse_file_path("/data/user_123/image.png")  # with data_dir
-            ("user_123", "image.png")
-            >>> parse_file_path("user_123/image.png")  # without data_dir
-            ("user_123", "image.png")
+        异常流：无显式异常；无法拆分时返回 `("", file_name)`。
+        性能瓶颈：路径字符串规范化开销。
+        排障入口：无日志，需由调用方校验返回值。
         """
         full_path_obj = Path(full_path)
         data_dir_path = Path(self.data_dir)
 
-        # Remove data_dir prefix if present
         try:
             path_without_prefix = full_path_obj.relative_to(data_dir_path)
         except ValueError:
             path_without_prefix = full_path_obj
 
-        # Normalize to forward slashes for consistent handling
         path_str = str(path_without_prefix).replace("\\", "/")
 
         if "/" not in path_str:
@@ -98,18 +88,16 @@ class LocalStorageService(StorageService):
         return flow_id, file_name
 
     async def save_file(self, flow_id: str, file_name: str, data: bytes, *, append: bool = False) -> None:
-        """Save a file in the local storage.
+        """保存文件到本地存储。
 
-        Args:
-            flow_id: The identifier for the flow.
-            file_name: The name of the file to be saved.
-            data: The byte content of the file.
-            append: If True, append to existing file; if False, overwrite.
+        关键路径（三步）：
+        1) 确保 `flow_id` 目录存在
+        2) 以追加或覆盖模式写入字节数据
+        3) 记录成功/失败日志
 
-        Raises:
-            FileNotFoundError: If the specified flow does not exist.
-            IsADirectoryError: If the file name is a directory.
-            PermissionError: If there is no permission to write the file.
+        异常流：写入失败时抛出底层异常并记录日志。
+        性能瓶颈：磁盘写入与目录创建。
+        排障入口：日志关键字 `Error saving file`。
         """
         folder_path = self.data_dir / flow_id
         await folder_path.mkdir(parents=True, exist_ok=True)
@@ -126,17 +114,16 @@ class LocalStorageService(StorageService):
             raise
 
     async def get_file(self, flow_id: str, file_name: str) -> bytes:
-        """Retrieve a file from the local storage.
+        """读取本地文件并返回字节内容。
 
-        Args:
-            flow_id: The identifier for the flow.
-            file_name: The name of the file to be retrieved.
+        关键路径（三步）：
+        1) 校验文件是否存在
+        2) 以二进制模式读取内容
+        3) 返回内容并记录日志
 
-        Returns:
-            The byte content of the file.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
+        异常流：文件不存在时抛 `FileNotFoundError`。
+        性能瓶颈：磁盘读取。
+        排障入口：日志关键字 `File {file_name} not found`。
         """
         file_path = self.data_dir / flow_id / file_name
         if not await file_path.exists():
@@ -151,7 +138,17 @@ class LocalStorageService(StorageService):
         return content
 
     async def get_file_stream(self, flow_id: str, file_name: str, chunk_size: int = 8192) -> AsyncIterator[bytes]:
-        """Retrieve a file from storage as a stream."""
+        """以流式分块读取文件内容。
+
+        关键路径（三步）：
+        1) 校验文件存在
+        2) 逐块读取并 `yield`
+        3) 读取结束后正常退出
+
+        异常流：文件不存在时抛 `FileNotFoundError`。
+        性能瓶颈：磁盘顺序读取。
+        排障入口：日志关键字 `File {file_name} not found`。
+        """
         file_path = self.data_dir / flow_id / file_name
         if not await file_path.exists():
             await logger.awarning(f"File {file_name} not found in flow {flow_id}.")
@@ -166,13 +163,16 @@ class LocalStorageService(StorageService):
                 yield chunk
 
     async def list_files(self, flow_id: str) -> list[str]:
-        """List all files in a specific flow directory.
+        """列出指定 `flow_id` 目录下的文件名。
 
-        Args:
-            flow_id: The identifier for the flow.
+        关键路径（三步）：
+        1) 校验目录存在与类型
+        2) 异步遍历文件项
+        3) 返回文件名列表
 
-        Returns:
-            List of file names in the flow directory.
+        异常流：遍历异常时记录日志并返回空列表。
+        性能瓶颈：目录遍历 `iterdir`。
+        排障入口：日志关键字 `Error listing files`。
         """
         if not isinstance(flow_id, str):
             flow_id = str(flow_id)
@@ -192,15 +192,7 @@ class LocalStorageService(StorageService):
             return files
 
     async def delete_file(self, flow_id: str, file_name: str) -> None:
-        """Delete a file from the local storage.
-
-        Args:
-            flow_id: The identifier for the flow.
-            file_name: The name of the file to be deleted.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-        """
+        """删除本地文件。"""
         file_path = self.data_dir / flow_id / file_name
         if await file_path.exists():
             await file_path.unlink()
@@ -209,17 +201,16 @@ class LocalStorageService(StorageService):
             await logger.awarning(f"Attempted to delete non-existent file {file_name} in flow {flow_id}.")
 
     async def get_file_size(self, flow_id: str, file_name: str) -> int:
-        """Get the size of a file in bytes.
+        """获取文件大小（字节数）。
 
-        Args:
-            flow_id: The identifier for the flow.
-            file_name: The name of the file.
+        关键路径（三步）：
+        1) 校验文件存在
+        2) 读取 `stat` 信息
+        3) 返回文件大小
 
-        Returns:
-            The size of the file in bytes.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
+        异常流：文件不存在时抛 `FileNotFoundError`。
+        性能瓶颈：`stat` 调用。
+        排障入口：日志关键字 `Error getting size of file`。
         """
         file_path = self.data_dir / flow_id / file_name
         if not await file_path.exists():
@@ -236,5 +227,4 @@ class LocalStorageService(StorageService):
             return file_size_stat.st_size
 
     async def teardown(self) -> None:
-        """Perform any cleanup operations when the service is being torn down."""
-        # No specific teardown actions required for local
+        """服务销毁时的清理入口（本地存储无需额外处理）。"""

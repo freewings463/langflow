@@ -1,3 +1,9 @@
+"""
+模块名称：`Azure` 组件子包
+
+本子包提供 `Azure OpenAI` 相关组件的动态导入入口，用于延迟加载依赖并降低启动成本。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -20,7 +26,14 @@ __all__ = [
 
 
 def __getattr__(attr_name: str) -> Any:
-    """Lazily import azure components on attribute access."""
+    """按需延迟导入 `Azure` 组件
+
+    契约：
+    - 输入：属性名
+    - 输出：对应组件类或模块对象
+    - 副作用：将已导入对象写入 `globals()` 缓存
+    - 失败语义：不存在或导入失败时抛 `AttributeError`
+    """
     if attr_name not in _dynamic_imports:
         msg = f"module '{__name__}' has no attribute '{attr_name}'"
         raise AttributeError(msg)
@@ -34,4 +47,12 @@ def __getattr__(attr_name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """返回该模块可导出的符号列表
+
+    契约：
+    - 输入：无
+    - 输出：符号名列表
+    - 副作用：无
+    - 失败语义：无
+    """
     return list(__all__)

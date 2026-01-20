@@ -1,4 +1,15 @@
-"""Cache service implementations for lfx."""
+"""
+模块名称：缓存服务实现
+
+本模块提供基于内存的缓存实现，支持过期与 LRU 淘汰策略。
+主要功能：
+- 线程安全的内存缓存；
+- 过期时间与最大容量控制；
+- 提供 get/set/upsert 等常见操作。
+
+设计背景：为 lfx 提供轻量级默认缓存实现。
+注意事项：仅内存级缓存，不适合跨进程共享。
+"""
 
 import pickle
 import threading
@@ -24,22 +35,20 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
     Example:
         cache = ThreadingInMemoryCache(max_size=3, expiration_time=5)
 
-        # setting cache values
+        # 示例：写入缓存值。
         cache.set("a", 1)
         cache.set("b", 2)
         cache["c"] = 3
 
-        # getting cache values
+        # 示例：读取缓存值。
         a = cache.get("a")
         b = cache["b"]
     """
 
     def __init__(self, max_size=None, expiration_time=60 * 60) -> None:
-        """Initialize a new ThreadingInMemoryCache instance.
+        """初始化内存缓存
 
-        Args:
-            max_size (int, optional): Maximum number of items to store in the cache.
-            expiration_time (int, optional): Time in seconds after which a cached item expires. Default is 1 hour.
+        契约：配置最大容量与过期时间；默认过期为 1 小时。
         """
         self._cache: OrderedDict = OrderedDict()
         self._lock = threading.RLock()
@@ -47,59 +56,44 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
         self.expiration_time = expiration_time
 
     def get(self, key, lock: Union[threading.Lock, None] = None):  # noqa: UP007
-        """Retrieve an item from the cache.
+        """获取缓存值
 
-        Args:
-            key: The key of the item to retrieve.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The value associated with the key, or CACHE_MISS if the key is not found or the item has expired.
+        契约：未命中或过期返回 CACHE_MISS。
         """
         with lock or self._lock:
             return self._get_without_lock(key)
 
     def _get_without_lock(self, key):
-        """Retrieve an item from the cache without acquiring the lock."""
+        """无锁获取缓存值（内部使用）。"""
         if item := self._cache.get(key):
             if self.expiration_time is None or time.time() - item["time"] < self.expiration_time:
-                # Move the key to the end to make it recently used
+                # 注意：命中后移动到队尾以保持 LRU 顺序。
                 self._cache.move_to_end(key)
-                # Check if the value is pickled
+                # 注意：若为字节则反序列化。
                 return pickle.loads(item["value"]) if isinstance(item["value"], bytes) else item["value"]  # noqa: S301
             self.delete(key)
         return CACHE_MISS
 
     def set(self, key, value, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Add an item to the cache.
+        """写入缓存值
 
-        If the cache is full, the least recently used item is evicted.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache.
-            lock: A lock to use for the operation.
+        契约：若超出容量则淘汰最久未使用项。
         """
         with lock or self._lock:
             if key in self._cache:
-                # Remove existing key before re-inserting to update order
+                # 注意：先删除再写入以更新 LRU 顺序。
                 self.delete(key)
             elif self.max_size and len(self._cache) >= self.max_size:
-                # Remove least recently used item
+                # 注意：移除最久未使用项。
                 self._cache.popitem(last=False)
-            # pickle locally to mimic Redis
+            # 注意：本地写入，保持 Redis 类似行为（可扩展）。
 
             self._cache[key] = {"value": value, "time": time.time()}
 
     def upsert(self, key, value, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Inserts or updates a value in the cache.
+        """插入或更新缓存值
 
-        If the existing value and the new value are both dictionaries, they are merged.
-
-        Args:
-            key: The key of the item.
-            value: The value to insert or update.
-            lock: A lock to use for the operation.
+        契约：若旧值和新值均为 dict，则合并更新。
         """
         with lock or self._lock:
             existing_value = self._get_without_lock(key)
@@ -110,17 +104,9 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
             self.set(key, value)
 
     def get_or_set(self, key, value, lock: Union[threading.Lock, None] = None):  # noqa: UP007
-        """Retrieve an item from the cache.
+        """获取或写入缓存值
 
-        If the item does not exist, set it with the provided value.
-
-        Args:
-            key: The key of the item.
-            value: The value to cache if the item doesn't exist.
-            lock: A lock to use for the operation.
-
-        Returns:
-            The cached value associated with the key.
+        契约：若不存在则写入并返回。
         """
         with lock or self._lock:
             if key in self._cache:
@@ -129,38 +115,39 @@ class ThreadingInMemoryCache(CacheService, Generic[LockType]):
             return value
 
     def delete(self, key, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
+        """删除指定 key。"""
         with lock or self._lock:
             self._cache.pop(key, None)
 
     def clear(self, lock: Union[threading.Lock, None] = None) -> None:  # noqa: UP007
-        """Clear all items from the cache."""
+        """清空缓存。"""
         with lock or self._lock:
             self._cache.clear()
 
     def contains(self, key) -> bool:
-        """Check if the key is in the cache."""
+        """判断 key 是否存在。"""
         return key in self._cache
 
     def __contains__(self, key) -> bool:
-        """Check if the key is in the cache."""
+        """`in` 操作支持。"""
         return self.contains(key)
 
     def __getitem__(self, key):
-        """Retrieve an item from the cache using the square bracket notation."""
+        """`cache[key]` 读取接口。"""
         return self.get(key)
 
     def __setitem__(self, key, value) -> None:
-        """Add an item to the cache using the square bracket notation."""
+        """`cache[key] = value` 写入接口。"""
         self.set(key, value)
 
     def __delitem__(self, key) -> None:
-        """Remove an item from the cache using the square bracket notation."""
+        """`del cache[key]` 删除接口。"""
         self.delete(key)
 
     def __len__(self) -> int:
-        """Return the number of items in the cache."""
+        """返回缓存条目数。"""
         return len(self._cache)
 
     def __repr__(self) -> str:
-        """Return a string representation of the ThreadingInMemoryCache instance."""
+        """返回缓存实例的字符串表示。"""
         return f"ThreadingInMemoryCache(max_size={self.max_size}, expiration_time={self.expiration_time})"

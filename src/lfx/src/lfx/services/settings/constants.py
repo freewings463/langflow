@@ -1,3 +1,21 @@
+"""
+模块名称：settings.constants
+
+本模块集中定义设置系统的默认值与环境变量白名单，用于统一配置行为与迁移兼容。
+主要功能包括：
+- 默认超级用户与初始密码的占位值
+- 允许从环境变量自动注入的配置项列表
+- Agentic 体验专用的变量集合
+
+关键组件：
+- DEFAULT_SUPERUSER / DEFAULT_SUPERUSER_PASSWORD：默认凭据占位
+- VARIABLES_TO_GET_FROM_ENVIRONMENT：环境变量白名单
+- AGENTIC_VARIABLES：Agentic 功能依赖变量
+
+设计背景：配置来源多且分散，需在单点维护白名单以避免遗漏与不一致。
+注意事项：默认凭据仅用于开发/初始化场景，生产环境应显式覆盖。
+"""
+
 from pydantic import SecretStr
 
 DEFAULT_SUPERUSER = "langflow"
@@ -34,7 +52,7 @@ VARIABLES_TO_GET_FROM_ENVIRONMENT = [
     "COMETAPI_KEY",
 ]
 
-# Agentic experience specific variables
+# 注意：Agentic 体验专用变量，仅在对应功能启用时注入
 AGENTIC_VARIABLES = [
     "FLOW_ID",
     "COMPONENT_ID",

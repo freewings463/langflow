@@ -1,3 +1,19 @@
+"""
+模块名称：cleanlab_rag_evaluator
+
+本模块提供 Cleanlab 的 RAG 评估组件，用于评估检索上下文与回复质量。
+主要功能包括：
+- 功能1：评估 RAG 回复的可信度与多维度指标。
+- 功能2：输出解释、其他评分以及完整评估摘要。
+
+使用场景：对 RAG 系统输出进行可信度与检索质量诊断。
+关键组件：
+- 类 `CleanlabRAGEvaluator`
+
+设计背景：将多维度 RAG 评估封装为组件，便于流程化使用。
+注意事项：是否运行额外 eval 由输入开关控制，成本与时延随之变化。
+"""
+
 from cleanlab_tlm import TrustworthyRAG, get_default_evals
 
 from lfx.custom import Component
@@ -12,30 +28,20 @@ from lfx.schema.message import Message
 
 
 class CleanlabRAGEvaluator(Component):
-    """A component that evaluates the quality of RAG (Retrieval-Augmented Generation) outputs using Cleanlab.
+    """Cleanlab RAG 评估组件，用于多维度评估检索与回复质量。
 
-    This component takes a query, retrieved context, and generated response from a RAG pipeline,
-    and uses Cleanlab's evaluation algorithms to assess various aspects of the RAG system's performance.
-
-    The component can evaluate:
-    - Overall trustworthiness of the LLM generated response
-    - Context sufficiency (whether the retrieved context contains information needed to answer the query)
-    - Response groundedness (whether the response is supported directly by the context)
-    - Response helpfulness (whether the response effectively addresses the user's query)
-    - Query ease (whether the user query seems easy for an AI system to properly handle, useful to diagnose
-      queries that are: complex, vague, tricky, or disgruntled-sounding)
-
-    Outputs:
-        - Trust Score: A score between 0-1 corresponding to the trustworthiness of the response. A higher score
-          indicates a higher confidence that the response is correct/good.
-        - Explanation: An LLM generated explanation of the trustworthiness assessment
-        - Other Evals: Additional evaluation metrics for selected evaluation types in the "Controls" tab
-        - Evaluation Summary: A comprehensive summary of context, query, response, and selected evaluation results
-
-    This component works well in conjunction with the CleanlabRemediator to create a complete trust evaluation
-    and remediation pipeline.
-
-    More details on the evaluation metrics can be found here: https://help.cleanlab.ai/tlm/use-cases/tlm_rag/
+    契约：输入包含 `context/query/response/api_key`；输出可信度分数与解释、其他评估与摘要。
+    关键路径：
+    1) 根据开关筛选评估项；
+    2) 调用 `TrustworthyRAG.score` 生成评估结果；
+    3) 提取分数、解释与摘要。
+    异常流：网络/鉴权/评估失败会捕获并返回空结果。
+    排障入口：`self.status` 记录配置与评估状态。
+    决策：
+    问题：RAG 质量评估维度多且配置复杂。
+    方案：以组件形式封装并允许选择性评估。
+    代价：增加外部 API 调用与潜在延迟。
+    重评：当引入本地评估器或统一评估网关时。
     """
 
     display_name = "Cleanlab RAG Evaluator"
@@ -150,6 +156,20 @@ class CleanlabRAGEvaluator(Component):
     ]
 
     def _evaluate_once(self):
+        """执行一次 RAG 评估并缓存结果。
+
+        契约：返回评估结果字典；同一实例内复用缓存。
+        关键路径：
+        1) 读取开关并筛选 evals；
+        2) 初始化 `TrustworthyRAG`；
+        3) 调用 `score` 并缓存结果。
+        异常流：评估失败时记录状态并返回空字典。
+        决策：
+        问题：多次访问不同输出会重复计算评估。
+        方案：将评估结果缓存到 `_cached_result`。
+        代价：实例生命周期内不自动刷新。
+        重评：当需要实时更新或批量评估时。
+        """
         if not hasattr(self, "_cached_result"):
             try:
                 self.status = "Configuring selected evals..."
@@ -187,20 +207,60 @@ class CleanlabRAGEvaluator(Component):
         return self._cached_result
 
     def pass_response(self) -> Message:
+        """透传原始回复。
+
+        契约：返回 `Message(text=response)`。
+        关键路径：更新状态 -> 返回消息。
+        决策：
+        问题：评估后仍需保留原始输出供下游使用。
+        方案：提供透传输出端口。
+        代价：无额外代价。
+        重评：当需要附加评估元信息时。
+        """
         self.status = "Passing through response."
         return Message(text=self.response)
 
     def get_trust_score(self) -> float:
+        """返回可信度分数（0-1）。
+
+        契约：若无结果则返回 0.0；更新状态文本。
+        关键路径：读取评估结果 -> 提取 `trustworthiness.score`。
+        决策：
+        问题：下游需要数值型评分用于阈值判断。
+        方案：单独输出评分字段。
+        代价：无额外代价。
+        重评：当需要输出多维评分聚合值时。
+        """
         score = self._evaluate_once().get("trustworthiness", {}).get("score", 0.0)
         self.status = f"Trust Score: {score:.3f}"
         return score
 
     def get_trust_explanation(self) -> Message:
+        """返回可信度解释文本。
+
+        契约：若无解释返回空字符串；更新状态。
+        关键路径：读取 `trustworthiness.log.explanation`。
+        决策：
+        问题：单一分数不足以解释评估原因。
+        方案：输出解释文本供用户阅读。
+        代价：解释可能较长，增加展示成本。
+        重评：当需要结构化解释或多语言支持时。
+        """
         explanation = self._evaluate_once().get("trustworthiness", {}).get("log", {}).get("explanation", "")
         self.status = "Trust explanation extracted."
         return Message(text=explanation)
 
     def get_other_scores(self) -> dict:
+        """返回选中的其他评估分数。
+
+        契约：只返回开启的 eval 项分数；空结果返回空字典。
+        关键路径：读取评估结果 -> 过滤选中项 -> 汇总分数。
+        决策：
+        问题：非所有评估项都需要输出，需按开关过滤。
+        方案：依据输入开关筛选结果。
+        代价：当评估未启用时返回空。
+        重评：当需要输出完整评估结构时。
+        """
         result = self._evaluate_once()
 
         selected = {
@@ -216,6 +276,16 @@ class CleanlabRAGEvaluator(Component):
         return filtered_scores
 
     def get_evaluation_summary(self) -> Message:
+        """构建评估摘要文本。
+
+        契约：返回 `Message(text=summary)`，包含 query/context/response 与指标。
+        关键路径：清理输入文本 -> 拼接指标 -> 构建摘要。
+        决策：
+        问题：评估结果分散，阅读成本高。
+        方案：输出集中摘要便于人工审阅。
+        代价：摘要为文本格式，无法结构化消费。
+        重评：当需要结构化报告或可视化时。
+        """
         result = self._evaluate_once()
 
         query_text = self.query.strip()

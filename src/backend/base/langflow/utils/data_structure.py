@@ -1,3 +1,17 @@
+"""
+模块名称：data_structure
+
+本模块提供数据结构分析和类型推断功能，主要用于理解和描述复杂数据的结构。
+主要功能包括：
+- 推断列表类型
+- 获取值的类型字符串表示
+- 分析值的结构
+- 生成数据结构的详细schema表示
+
+设计背景：在处理复杂数据结构时，需要一种方法来理解并描述数据的类型和结构
+注意事项：处理深度嵌套结构时需要注意最大递归深度限制
+"""
+
 import json
 from collections import Counter
 from typing import Any
@@ -6,9 +20,16 @@ from langflow.schema.data import Data
 
 
 def infer_list_type(items: list, max_samples: int = 5) -> str:
-    """Infer the type of a list by sampling its items.
-
-    Handles mixed types and provides more detailed type information.
+    """通过采样列表项来推断列表类型。
+    
+    关键路径（三步）：
+    1) 从列表中采样最多max_samples个项目
+    2) 获取每个样本的类型字符串表示
+    3) 统计类型出现次数并返回合适的类型表示
+    
+    异常流：空列表返回'list(unknown)'
+    性能瓶颈：大量样本的类型推断
+    排障入口：检查返回的类型字符串是否正确反映了列表内容
     """
     if not items:
         return "list(unknown)"
@@ -29,9 +50,16 @@ def infer_list_type(items: list, max_samples: int = 5) -> str:
 
 
 def get_type_str(value: Any) -> str:
-    """Get a detailed string representation of the type of a value.
-
-    Handles special cases and provides more specific type information.
+    """获取值的详细类型字符串表示。
+    
+    关键路径（三步）：
+    1) 检查基本类型（None, bool, int, float, str等）
+    2) 对于字符串，进一步检查是否为日期或JSON
+    3) 对于复杂类型（list, dict等），返回相应类型表示
+    
+    异常流：自定义对象返回类名
+    性能瓶颈：JSON解析可能较慢
+    排障入口：检查返回的类型字符串是否准确反映值的实际类型
     """
     if value is None:
         return "null"
@@ -70,15 +98,16 @@ def analyze_value(
     size_hints: bool = True,
     include_samples: bool = True,
 ) -> str | dict:
-    """Analyze a value and return its structure with additional metadata.
-
-    Args:
-        value: The value to analyze
-        max_depth: Maximum recursion depth
-        current_depth: Current recursion depth
-        path: Current path in the structure
-        size_hints: Whether to include size information for collections
-        include_samples: Whether to include sample structure for lists
+    """分析一个值并返回其结构及附加元数据。
+    
+    关键路径（三步）：
+    1) 检查当前递归深度是否超过最大深度限制
+    2) 根据值的类型（列表/元组/集合/字典/其他）分别处理
+    3) 递归分析嵌套结构，收集类型和大小信息
+    
+    异常流：达到最大深度时返回'max_depth_reached'，发生异常时返回'error'
+    性能瓶颈：深度嵌套结构的递归分析
+    排障入口：检查返回的结构是否正确反映了输入值的类型和组织
     """
     if current_depth >= max_depth:
         return f"max_depth_reached(depth={max_depth})"
@@ -144,49 +173,16 @@ def get_data_structure(
     include_sample_values: bool = False,
     include_sample_structure: bool = True,
 ) -> dict:
-    """Convert a Data object or dictionary into a detailed schema representation.
-
-    Args:
-        data_obj: The Data object or dictionary to analyze
-        max_depth: Maximum depth for nested structures
-        size_hints: Include size information for collections
-        include_sample_values: Whether to include sample values in the output
-        include_sample_structure: Whether to include sample structure for lists
-        max_sample_size: Maximum number of sample values to include
-
-    Returns:
-        dict: A dictionary containing:
-            - structure: The structure of the data
-            - samples: (optional) Sample values from the data
-
-    Example:
-        >>> data = {
-        ...     "name": "John",
-        ...     "scores": [1, 2, 3, 4, 5],
-        ...     "details": {
-        ...         "age": 30,
-        ...         "cities": ["NY", "LA", "SF", "CHI"],
-        ...         "metadata": {
-        ...             "created": "2023-01-01",
-        ...             "tags": ["user", "admin", 123]
-        ...         }
-        ...     }
-        ... }
-        >>> result = get_data_structure(data)
-        {
-            "structure": {
-                "name": "str",
-                "scores": "list(int)[size=5]",
-                "details": {
-                    "age": "int",
-                    "cities": "list(str)[size=4]",
-                    "metadata": {
-                        "created": "str(possible_date)",
-                        "tags": "list(str|int)[size=3]"
-                    }
-                }
-            }
-        }
+    """将Data对象或字典转换为详细的schema表示。
+    
+    关键路径（三步）：
+    1) 处理Data对象或普通字典，提取实际数据
+    2) 使用analyze_value函数分析数据结构
+    3) 根据需要添加样本值
+    
+    异常流：无显式异常处理
+    性能瓶颈：大数据集的递归分析
+    排障入口：检查返回的结构是否正确反映了输入数据的组织方式
     """
     # Handle both Data objects and dictionaries
     data = data_obj.data if isinstance(data_obj, Data) else data_obj
@@ -204,7 +200,17 @@ def get_data_structure(
 
 
 def get_sample_values(data: Any, max_items: int = 3) -> Any:
-    """Get sample values from a data structure, handling nested structures."""
+    """从数据结构中获取样本值，处理嵌套结构。
+    
+    关键路径（三步）：
+    1) 检查数据类型（列表/元组/集合/字典/其他）
+    2) 对于集合类型，取前max_items个项目并递归处理
+    3) 对于字典类型，递归处理每个键值对
+    
+    异常流：无异常处理
+    性能瓶颈：深度嵌套结构的递归处理
+    排障入口：检查返回的样本值是否代表了原始数据的结构
+    """
     if isinstance(data, list | tuple | set):
         return [get_sample_values(item) for item in list(data)[:max_items]]
     if isinstance(data, dict):

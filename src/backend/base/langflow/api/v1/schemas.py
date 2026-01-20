@@ -1,3 +1,15 @@
+"""
+模块名称：API v1 数据模型
+
+本模块集中定义 API v1 的请求/响应 Pydantic 模型与序列化规则。
+主要功能：
+- 统一接口入参与出参结构
+- 提供流式/运行/任务等响应模型
+- 约束序列化长度与敏感字段处理
+设计背景：避免跨模块重复声明模型，保证序列化一致性。
+注意事项：序列化使用全局长度限制，前端需处理截断字段。
+"""
+
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -29,7 +41,7 @@ from langflow.services.tracing.schema import Log
 
 
 class BuildStatus(Enum):
-    """Status of the build."""
+    """构建状态枚举。"""
 
     SUCCESS = "success"
     FAILURE = "failure"
@@ -38,22 +50,26 @@ class BuildStatus(Enum):
 
 
 class TweaksRequest(BaseModel):
+    """组件 `tweaks` 请求体。"""
+
     tweaks: dict[str, dict[str, Any]] | None = Field(default_factory=dict)
 
 
 class UpdateTemplateRequest(BaseModel):
+    """模板更新请求。"""
+
     template: dict
 
 
 class TaskResponse(BaseModel):
-    """Task response schema."""
+    """任务响应模型。"""
 
     id: str | None = Field(None)
     href: str | None = Field(None)
 
 
 class ProcessResponse(BaseModel):
-    """Process response schema."""
+    """处理任务响应模型。"""
 
     result: Any
     status: str | None = None
@@ -63,14 +79,14 @@ class ProcessResponse(BaseModel):
 
 
 class RunResponse(BaseModel):
-    """Run response schema."""
+    """流程运行响应模型。"""
 
     outputs: list[RunOutputs] | None = []
     session_id: str | None = None
 
     @model_serializer(mode="plain")
     def serialize(self):
-        # Serialize all the outputs if they are base models
+        # 实现：将 `BaseModel` 输出序列化为字典，保持结构一致。
         serialized = {"session_id": self.session_id, "outputs": []}
         if self.outputs:
             serialized_outputs = []
@@ -84,21 +100,21 @@ class RunResponse(BaseModel):
 
 
 class PreloadResponse(BaseModel):
-    """Preload response schema."""
+    """预加载响应模型。"""
 
     session_id: str | None = None
     is_clear: bool | None = None
 
 
 class TaskStatusResponse(BaseModel):
-    """Task status response schema."""
+    """任务状态响应模型。"""
 
     status: str
     result: Any | None = None
 
 
 class ChatMessage(BaseModel):
-    """Chat message schema."""
+    """聊天消息基础模型。"""
 
     is_bot: bool = False
     message: str | None | dict = None
@@ -107,7 +123,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatResponse(ChatMessage):
-    """Chat response schema."""
+    """聊天响应模型（含中间步骤）。"""
 
     intermediate_steps: str
 
@@ -118,6 +134,7 @@ class ChatResponse(ChatMessage):
     @field_validator("type")
     @classmethod
     def validate_message_type(cls, v):
+        """校验消息类型枚举。"""
         if v not in {"start", "stream", "end", "error", "info", "file"}:
             msg = "type must be start, stream, end, error, info, or file"
             raise ValueError(msg)
@@ -125,7 +142,7 @@ class ChatResponse(ChatMessage):
 
 
 class PromptResponse(ChatMessage):
-    """Prompt response schema."""
+    """提示词展示响应模型。"""
 
     prompt: str
     type: str = "prompt"
@@ -133,7 +150,7 @@ class PromptResponse(ChatMessage):
 
 
 class FileResponse(ChatMessage):
-    """File response schema."""
+    """文件下载/展示响应模型。"""
 
     data: Any = None
     data_type: str
@@ -143,6 +160,7 @@ class FileResponse(ChatMessage):
     @field_validator("data_type")
     @classmethod
     def validate_data_type(cls, v):
+        """校验文件数据类型。"""
         if v not in {"image", "csv"}:
             msg = "data_type must be image or csv"
             raise ValueError(msg)
@@ -150,86 +168,118 @@ class FileResponse(ChatMessage):
 
 
 class FlowListCreate(BaseModel):
+    """创建流程列表请求。"""
+
     flows: list[FlowCreate]
 
 
 class FlowListIds(BaseModel):
+    """流程 ID 列表请求。"""
+
     flow_ids: list[str]
 
 
 class FlowListRead(BaseModel):
+    """流程列表响应。"""
+
     flows: list[FlowRead]
 
 
 class FlowListReadWithFolderName(BaseModel):
+    """带文件夹名称的流程列表响应。"""
+
     flows: list[FlowRead]
     folder_name: str
     description: str
 
 
 class InitResponse(BaseModel):
+    """初始化响应，返回 `flowId`。"""
+
     flow_id: str = Field(serialization_alias="flowId")
 
 
 class BuiltResponse(BaseModel):
+    """构建结果响应。"""
+
     built: bool
 
 
 class UploadFileResponse(BaseModel):
-    """Upload file response schema."""
+    """文件上传响应。"""
 
     flow_id: str = Field(serialization_alias="flowId")
     file_path: Path
 
 
 class StreamData(BaseModel):
+    """SSE 流式事件载体。"""
+
     event: str
     data: dict
 
     def __str__(self) -> str:
+        """按 SSE 规范拼接事件字符串。"""
         return f"event: {self.event}\ndata: {orjson_dumps(self.data, indent_2=False)}\n\n"
 
 
 class CustomComponentRequest(BaseModel):
+    """自定义组件构建请求。"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
     code: str
     frontend_node: dict | None = None
 
 
 class CustomComponentResponse(BaseModel):
+    """自定义组件构建响应。"""
+
     data: dict
     type: str
 
 
 class UpdateCustomComponentRequest(CustomComponentRequest):
+    """自定义组件字段更新请求。"""
+
     field: str
     field_value: str | int | float | bool | dict | list | None = None
     template: dict
     tool_mode: bool = False
 
     def get_template(self):
+        """将模板转换为 `dotdict` 便于下游读取。"""
         return dotdict(self.template)
 
 
 class CustomComponentResponseError(BaseModel):
+    """自定义组件错误响应。"""
+
     detail: str
     traceback: str
 
 
 class ComponentListCreate(BaseModel):
+    """组件列表创建请求。"""
+
     flows: list[FlowCreate]
 
 
 class ComponentListRead(BaseModel):
+    """组件列表读取响应。"""
+
     flows: list[FlowRead]
 
 
 class UsersResponse(BaseModel):
+    """用户列表响应。"""
+
     total_count: int
     users: list[UserRead]
 
 
 class ApiKeyResponse(BaseModel):
+    """API Key 详情响应（含展示字段）。"""
+
     id: str
     api_key: str
     name: str
@@ -238,32 +288,44 @@ class ApiKeyResponse(BaseModel):
 
 
 class ApiKeysResponse(BaseModel):
+    """API Key 列表响应。"""
+
     total_count: int
     user_id: UUID
     api_keys: list[ApiKeyRead]
 
 
 class CreateApiKeyRequest(BaseModel):
+    """创建 API Key 请求。"""
+
     name: str
 
 
 class Token(BaseModel):
+    """认证令牌响应。"""
+
     access_token: str
     refresh_token: str
     token_type: str
 
 
 class ApiKeyCreateRequest(BaseModel):
+    """前端存储 API Key 请求。"""
+
     api_key: str
 
 
 class VerticesOrderResponse(BaseModel):
+    """顶点执行顺序响应。"""
+
     ids: list[str]
     run_id: UUID
     vertices_to_run: list[str]
 
 
 class ResultDataResponse(BaseModel):
+    """构建结果响应，包含输出、日志与耗时信息。"""
+
     results: Any | None = Field(default_factory=dict)
     outputs: dict[str, OutputValue] = Field(default_factory=dict)
     logs: dict[str, list[Log]] = Field(default_factory=dict)
@@ -276,22 +338,12 @@ class ResultDataResponse(BaseModel):
     @field_serializer("results")
     @classmethod
     def serialize_results(cls, v):
-        """Serializes the results value with custom handling for special types and applies truncation limits.
-
-        Returns:
-            The serialized representation of the input value, truncated according to configured
-            maximum text length and item count.
-        """
+        """序列化 `results` 并应用长度/条目截断。"""
         return serialize(v, max_length=get_max_text_length(), max_items=get_max_items_length())
 
     @model_serializer(mode="plain")
     def serialize_model(self) -> dict:
-        """Serialize the entire model into a dictionary with truncation applied to large fields.
-
-        Returns:
-            dict: A dictionary representation of the model with serialized and truncated
-            results, outputs, logs, message, and artifacts.
-        """
+        """序列化整体响应并对大字段做截断。"""
         return {
             "results": self.serialize_results(self.results),
             "outputs": serialize(self.outputs, max_length=get_max_text_length(), max_items=get_max_items_length()),
@@ -305,37 +357,36 @@ class ResultDataResponse(BaseModel):
 
 
 class VertexBuildResponse(BaseModel):
+    """单个顶点构建响应。"""
+
     id: str | None = None
     inactivated_vertices: list[str] | None = None
     next_vertices_ids: list[str] | None = None
     top_level_vertices: list[str] | None = None
     valid: bool
     params: Any | None = Field(default_factory=dict)
-    """JSON string of the params."""
+    """参数内容（可能为 JSON）。"""
     data: ResultDataResponse
-    """Mapping of vertex ids to result dict containing the param name and result value."""
+    """顶点结果数据，包含参数与输出。"""
     timestamp: datetime | None = Field(default_factory=lambda: datetime.now(timezone.utc))
-    """Timestamp of the build."""
+    """构建时间戳（UTC）。"""
 
     @field_serializer("data")
     def serialize_data(self, data: ResultDataResponse) -> dict:
-        """Serialize a ResultDataResponse object into a dictionary with enforced maximum text and item lengths.
-
-        Parameters:
-            data (ResultDataResponse): The data object to serialize.
-
-        Returns:
-            dict: The serialized representation of the data with truncation applied.
-        """
-        # return serialize(data, max_length=get_max_text_length())  TODO: Safe?
+        """序列化 `ResultDataResponse` 并应用截断限制。"""
+        # return serialize(data, max_length=get_max_text_length())  TODO: 是否安全？
         return serialize(data, max_length=get_max_text_length(), max_items=get_max_items_length())
 
 
 class VerticesBuiltResponse(BaseModel):
+    """批量顶点构建响应。"""
+
     vertices: list[VertexBuildResponse]
 
 
 class SimplifiedAPIRequest(BaseModel):
+    """简化运行请求（用于 API 直连调用）。"""
+
     input_value: str | None = Field(default=None, description="The input value")
     input_type: InputType | None = Field(default="chat", description="The input type")
     output_type: OutputType | None = Field(default="chat", description="The output type")
@@ -347,19 +398,18 @@ class SimplifiedAPIRequest(BaseModel):
     session_id: str | None = Field(default=None, description="The session id")
 
 
-# (alias) type ReactFlowJsonObject<NodeData = any, EdgeData = any> = {
-#     nodes: Node<NodeData>[];
-#     edges: Edge<EdgeData>[];
-#     viewport: Viewport;
-# }
-# import ReactFlowJsonObject
+# 迁移上下文：对齐前端 `ReactFlow` JSON 结构。
 class FlowDataRequest(BaseModel):
+    """前端画布数据请求（节点/边/视口）。"""
+
     nodes: list[dict]
     edges: list[dict]
     viewport: dict | None = None
 
 
 class ConfigResponse(BaseModel):
+    """应用配置响应（含特性开关与阈值）。"""
+
     feature_flags: FeatureFlags
     serialization_max_items_length: int
     serialization_max_text_length: int
@@ -379,15 +429,7 @@ class ConfigResponse(BaseModel):
 
     @classmethod
     def from_settings(cls, settings: Settings, auth_settings) -> "ConfigResponse":
-        """Create a ConfigResponse instance using values from a Settings object and AuthSettings.
-
-        Parameters:
-            settings (Settings): The Settings object containing configuration values.
-            auth_settings: The AuthSettings object containing authentication configuration values.
-
-        Returns:
-            ConfigResponse: An instance populated with configuration and feature flag values.
-        """
+        """从系统配置与认证配置构建 `ConfigResponse`。"""
         import os
 
         from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
@@ -413,14 +455,14 @@ class ConfigResponse(BaseModel):
 
 
 class CancelFlowResponse(BaseModel):
-    """Response model for flow build cancellation."""
+    """流程构建取消响应。"""
 
     success: bool
     message: str
 
 
 class AuthSettings(BaseModel):
-    """Model representing authentication settings for MCP."""
+    """MCP 认证设置模型。"""
 
     auth_type: Literal["none", "apikey", "oauth"] = "none"
     oauth_host: str | None = None
@@ -436,15 +478,15 @@ class AuthSettings(BaseModel):
     oauth_provider_scope: str | None = None
 
     def model_post_init(self, __context, /) -> None:
-        """Normalize oauth_callback_path to oauth_callback_url for backwards compatibility."""
-        # If oauth_callback_url is not set but oauth_callback_path is, use the path value
+        """兼容旧字段 `oauth_callback_path` 并归一化为 `oauth_callback_url`。"""
+        # 注意：仅在新字段为空时回填旧字段。
         if self.oauth_callback_url is None and self.oauth_callback_path is not None:
             self.oauth_callback_url = self.oauth_callback_path
-        # If both are set, oauth_callback_url takes precedence (already set correctly)
+        # 注意：两者同时存在时以 `oauth_callback_url` 为准。
 
 
 class MCPSettings(BaseModel):
-    """Model representing MCP settings for a flow."""
+    """流程级 MCP 设置模型。"""
 
     id: UUID
     mcp_enabled: bool | None = None
@@ -455,21 +497,21 @@ class MCPSettings(BaseModel):
 
 
 class MCPProjectUpdateRequest(BaseModel):
-    """Request model for updating MCP project settings including auth."""
+    """更新 MCP 项目与认证设置的请求模型。"""
 
     settings: list[MCPSettings]
     auth_settings: AuthSettings | None = None
 
 
 class MCPProjectResponse(BaseModel):
-    """Response model for MCP project tools with auth settings."""
+    """MCP 项目工具列表响应（含认证设置）。"""
 
     tools: list[MCPSettings]
     auth_settings: AuthSettings | None = None
 
 
 class ComposerUrlResponse(BaseModel):
-    """Response model for MCP Composer connection details."""
+    """MCP Composer 连接信息响应。"""
 
     project_id: str
     uses_composer: bool
@@ -479,5 +521,7 @@ class ComposerUrlResponse(BaseModel):
 
 
 class MCPInstallRequest(BaseModel):
+    """MCP 客户端安装请求。"""
+
     client: str
     transport: Literal["sse", "streamablehttp"] | None = None

@@ -1,3 +1,20 @@
+"""
+模块名称：`Yahoo Finance` 工具组件
+
+本模块通过 `yfinance` 访问 Yahoo! Finance 数据并返回结构化结果。
+主要功能包括：
+- 根据方法枚举调用不同数据接口
+- 支持新闻条数控制
+- 将结果格式化为 `Data`
+
+关键组件：
+- `YfinanceToolComponent._yahoo_finance_tool`：核心数据获取
+- `YahooFinanceMethod`：可用数据方法集合
+
+设计背景：为金融数据查询提供统一入口。
+注意事项：`yfinance` 为非官方库，数据稳定性依赖第三方。
+"""
+
 import ast
 import pprint
 from enum import Enum
@@ -14,6 +31,7 @@ from lfx.schema.data import Data
 
 
 class YahooFinanceMethod(Enum):
+    """Yahoo Finance 可用数据方法枚举。"""
     GET_INFO = "get_info"
     GET_NEWS = "get_news"
     GET_ACTIONS = "get_actions"
@@ -42,12 +60,22 @@ class YahooFinanceMethod(Enum):
 
 
 class YahooFinanceSchema(BaseModel):
+    """Yahoo Finance 工具参数结构。"""
     symbol: str = Field(..., description="The stock symbol to retrieve data for.")
     method: YahooFinanceMethod = Field(YahooFinanceMethod.GET_INFO, description="The type of data to retrieve.")
     num_news: int | None = Field(5, description="The number of news articles to retrieve.")
 
 
 class YfinanceToolComponent(LCToolComponent):
+    """Yahoo Finance 工具组件。
+
+    契约：输入股票代码与方法，输出 `Data` 列表。
+    决策：基于枚举映射到 `yfinance` 的属性/方法。
+    问题：接口繁多且参数不统一。
+    方案：用枚举约束输入并统一调用路径。
+    代价：新增方法需手动扩展枚举。
+    重评：当方法稳定且覆盖率足够时保持现状。
+    """
     display_name = "Yahoo! Finance"
     description = """Uses [yfinance](https://pypi.org/project/yfinance/) (unofficial package) \
 to access financial data and market information from Yahoo! Finance."""
@@ -78,6 +106,7 @@ to access financial data and market information from Yahoo! Finance."""
     ]
 
     def run_model(self) -> list[Data]:
+        """执行查询并返回结果。"""
         return self._yahoo_finance_tool(
             self.symbol,
             self.method,
@@ -85,6 +114,7 @@ to access financial data and market information from Yahoo! Finance."""
         )
 
     def build_tool(self) -> Tool:
+        """构建可调用的 Yahoo Finance 工具。"""
         return StructuredTool.from_function(
             name="yahoo_finance",
             description="Access financial data and market information from Yahoo! Finance.",
@@ -98,10 +128,14 @@ to access financial data and market information from Yahoo! Finance."""
         method: YahooFinanceMethod,
         num_news: int | None = 5,
     ) -> list[Data]:
+        """调用 `yfinance` 并返回结构化结果。
+
+        失败语义：依赖缺失或请求异常会抛 `ToolException`。
+        """
         try:
             import yfinance as yf
         except ImportError as e:
-            msg = ""
+            msg = "yfinance is not installed. Please install it with `pip install yfinance`."
             raise ImportError(msg) from e
 
         ticker = yf.Ticker(symbol)
@@ -117,6 +151,7 @@ to access financial data and market information from Yahoo! Finance."""
             result = pprint.pformat(result)
 
             if method == YahooFinanceMethod.GET_NEWS:
+                # 注意：新闻结果先格式化为字符串，再用 `literal_eval` 解析。
                 data_list = [Data(data=article) for article in ast.literal_eval(result)]
             else:
                 data_list = [Data(data={"result": result})]

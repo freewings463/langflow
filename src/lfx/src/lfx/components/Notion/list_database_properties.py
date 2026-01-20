@@ -10,12 +10,14 @@ from lfx.schema.data import Data
 
 
 class NotionDatabaseProperties(LCToolComponent):
+    # 获取 Notion 数据库属性
     display_name: str = "List Database Properties "
     description: str = "Retrieve properties of a Notion database."
     documentation: str = "https://docs.langflow.org/bundles-notion"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：数据库 ID 与密钥
         StrInput(
             name="database_id",
             display_name="Database ID",
@@ -30,9 +32,11 @@ class NotionDatabaseProperties(LCToolComponent):
     ]
 
     class NotionDatabasePropertiesSchema(BaseModel):
+        # 工具入参 Schema
         database_id: str = Field(..., description="The ID of the Notion database.")
 
     def run_model(self) -> Data:
+        # 执行查询并包装返回
         result = self._fetch_database_properties(self.database_id)
         if isinstance(result, str):
             # An error occurred, return it as text
@@ -41,6 +45,7 @@ class NotionDatabaseProperties(LCToolComponent):
         return Data(text=str(result), data=result)
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="notion_database_properties",
             description="Retrieve properties of a Notion database. Input should include the database ID.",
@@ -49,6 +54,7 @@ class NotionDatabaseProperties(LCToolComponent):
         )
 
     def _fetch_database_properties(self, database_id: str) -> dict | str:
+        # 拉取数据库元信息并返回 properties
         url = f"https://api.notion.com/v1/databases/{database_id}"
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",

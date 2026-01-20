@@ -1,17 +1,33 @@
+"""
+模块名称：Telemetry 数据结构
+
+本模块定义 Telemetry 上报所需的 Pydantic 模型与字段别名。
+主要功能：
+- 统一上报 payload 结构
+- 控制 URL 长度与分片策略
+- 提供组件输入拆分逻辑
+设计背景：保证 Telemetry 数据格式稳定且可追踪。
+注意事项：超过 URL 长度限制会触发分片或截断。
+"""
+
 from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field
 
-# Maximum URL length for telemetry GET requests (Scarf pixel tracking)
-# Scarf supports up to 2KB (2048 bytes) for query parameters
+# 注意：Telemetry GET 请求 URL 长度上限（Scarf 像素追踪）。
+# Scarf 查询参数最大支持 2KB（2048 字节）。
 MAX_TELEMETRY_URL_SIZE = 2048
 
 
 class BasePayload(BaseModel):
+    """Telemetry 基础字段载体。"""
+
     client_type: str | None = Field(default=None, serialization_alias="clientType")
 
 
 class RunPayload(BasePayload):
+    """流程运行上报载体。"""
+
     run_is_webhook: bool = Field(default=False, serialization_alias="runIsWebhook")
     run_seconds: int = Field(serialization_alias="runSeconds")
     run_success: bool = Field(serialization_alias="runSuccess")
@@ -20,14 +36,20 @@ class RunPayload(BasePayload):
 
 
 class ShutdownPayload(BasePayload):
+    """进程关闭上报载体。"""
+
     time_running: int = Field(serialization_alias="timeRunning")
 
 
 class EmailPayload(BasePayload):
+    """注册邮箱上报载体。"""
+
     email: EmailStr
 
 
 class VersionPayload(BasePayload):
+    """版本与环境信息上报载体。"""
+
     package: str
     version: str
     platform: str
@@ -39,6 +61,8 @@ class VersionPayload(BasePayload):
 
 
 class PlaygroundPayload(BasePayload):
+    """Playground 运行上报载体。"""
+
     playground_seconds: int = Field(serialization_alias="playgroundSeconds")
     playground_component_count: int | None = Field(None, serialization_alias="playgroundComponentCount")
     playground_success: bool = Field(serialization_alias="playgroundSuccess")
@@ -47,6 +71,8 @@ class PlaygroundPayload(BasePayload):
 
 
 class ComponentPayload(BasePayload):
+    """组件执行上报载体。"""
+
     component_name: str = Field(serialization_alias="componentName")
     component_id: str = Field(serialization_alias="componentId")
     component_seconds: int = Field(serialization_alias="componentSeconds")
@@ -56,26 +82,17 @@ class ComponentPayload(BasePayload):
 
 
 class ComponentInputsPayload(BasePayload):
-    """Separate payload for component input values, joined via component_run_id.
+    """组件输入上报载体（支持分片）。
 
-    This payload supports automatic splitting when URL size exceeds limits:
-    - If component_inputs causes URL to exceed max_url_size (default 2000 chars),
-      the payload is split into multiple chunks
-    - Each chunk includes all fixed fields (component_run_id, component_id, component_name)
-      for analytics join
-    - Input fields are distributed across chunks to respect size limits
-    - Chunks include chunk_index and total_chunks metadata for reassembly
-    - Single oversized fields are truncated with "...[truncated]" marker
+    契约：
+    - 输入：`component_inputs` 字典
+    - 输出：可分片的 payload 列表
+    - 失败语义：输入非字典时仅返回自身
 
-    Usage:
-        payload = ComponentInputsPayload(
-            component_run_id="run-123",
-            component_id="comp-456",
-            component_name="MyComponent",
-            component_inputs={"input1": "value1", "input2": "value2"}
-        )
-        chunks = payload.split_if_needed(max_url_size=2000)
-        # Returns list of 1+ payloads, all respecting size limit
+    关键路径（三步）：
+    1) 计算当前 URL 长度
+    2) 逐字段分片，必要时截断超大字段
+    3) 生成带 `chunk_index/total_chunks` 的 payload 列表
     """
 
     component_run_id: str = Field(serialization_alias="componentRunId")
@@ -86,14 +103,7 @@ class ComponentInputsPayload(BasePayload):
     total_chunks: int | None = Field(None, serialization_alias="totalChunks")
 
     def _calculate_url_size(self, base_url: str = "https://api.scarf.sh/v1/pixel") -> int:
-        """Calculate actual encoded URL size using httpx.
-
-        Args:
-            base_url: Base URL for telemetry endpoint (default: Scarf pixel URL)
-
-        Returns:
-            Total character length of the encoded URL including all query parameters
-        """
+        """计算编码后的 URL 长度。"""
         from urllib.parse import urlencode
 
         import orjson
@@ -108,25 +118,13 @@ class ComponentInputsPayload(BasePayload):
         return len(url)
 
     def _truncate_value_to_fit(self, key: str, value: Any, max_url_size: int) -> Any:
-        """Truncate a value using binary search to find max length that fits within max_url_size.
-
-        Args:
-            key: The field key
-            value: The field value to truncate
-            max_url_size: Maximum allowed URL size in characters
-
-        Returns:
-            Truncated value with "...[truncated]" suffix
-        """
+        """二分截断字段值以满足 URL 长度限制。"""
         truncation_suffix = "...[truncated]"
 
-        # Convert to string if needed (handles both string and non-string values)
-        # For string values: truncate directly
-        # For non-string values: convert to string representation, then truncate
+        # 实现：非字符串值先转为字符串再截断。
         str_value = value if isinstance(value, str) else str(value)
 
-        # Use binary search to find optimal truncation point
-        # This finds the maximum prefix length that keeps the URL under max_url_size
+        # 实现：二分搜索找到满足长度限制的最大前缀。
         max_len = len(str_value)
         min_len = 0
         truncated_value = str_value[:100] + truncation_suffix  # Initial guess
@@ -153,40 +151,32 @@ class ComponentInputsPayload(BasePayload):
         return truncated_value
 
     def split_if_needed(self, max_url_size: int = MAX_TELEMETRY_URL_SIZE) -> list["ComponentInputsPayload"]:
-        """Split payload into multiple chunks if URL size exceeds max_url_size.
-
-        Args:
-            max_url_size: Maximum allowed URL length in characters (default: MAX_TELEMETRY_URL_SIZE)
-
-        Returns:
-            List of ComponentInputsPayload objects. Single item if no split needed,
-            multiple items if payload was split across chunks.
-        """
+        """超出长度限制时拆分 payload。"""
         from lfx.log.logger import logger
 
-        # Calculate current URL size
+        # 实现：计算当前 URL 长度。
         current_size = self._calculate_url_size()
 
-        # If fits within limit, return as-is
+        # 注意：未超限直接返回。
         if current_size <= max_url_size:
             return [self]
 
-        # Need to split - check if component_inputs is a dict
+        # 注意：仅对字典类型做分片。
         if not isinstance(self.component_inputs, dict):
-            # If not a dict, return as-is (fail-safe)
+            # 注意：非字典直接返回，避免异常。
             logger.warning(f"component_inputs is not a dict, cannot split: {type(self.component_inputs)}")
             return [self]
 
         if not self.component_inputs:
-            # Empty inputs, return as-is
+            # 注意：空输入直接返回。
             return [self]
 
-        # Distribute input fields across chunks
+        # 实现：按字段分配到多个分片。
         chunks_data = []
         current_chunk_inputs: dict[str, Any] = {}
 
         for key, value in self.component_inputs.items():
-            # Calculate size if we add this field to current chunk
+            # 实现：试算加入当前分片后的长度。
             test_inputs = {**current_chunk_inputs, key: value}
             test_payload = ComponentInputsPayload(
                 component_run_id=self.component_run_id,
@@ -198,10 +188,10 @@ class ComponentInputsPayload(BasePayload):
             )
             test_size = test_payload._calculate_url_size()
 
-            # If adding this field exceeds limit, start new chunk
+            # 实现：超限则开启新分片。
             if test_size > max_url_size and current_chunk_inputs:
                 chunks_data.append(current_chunk_inputs)
-                # Check if the field by itself exceeds the limit
+                # 注意：检查单字段是否仍超限。
                 single_field_test = ComponentInputsPayload(
                     component_run_id=self.component_run_id,
                     component_id=self.component_id,
@@ -211,27 +201,27 @@ class ComponentInputsPayload(BasePayload):
                     total_chunks=1,
                 )
                 if single_field_test._calculate_url_size() > max_url_size:
-                    # Single field is too large - truncate it
+                    # 注意：单字段超限则截断。
                     logger.warning(f"Truncating oversized field '{key}' in component_inputs")
                     truncated_value = self._truncate_value_to_fit(key, value, max_url_size)
                     current_chunk_inputs = {key: truncated_value}
                 else:
                     current_chunk_inputs = {key: value}
             elif test_size > max_url_size and not current_chunk_inputs:
-                # Single field is too large - truncate it
+                # 注意：单字段超限则截断。
                 logger.warning(f"Truncating oversized field '{key}' in component_inputs")
 
-                # Binary search to find max value length that fits
+                # 实现：二分截断至可用长度。
                 truncated_value = self._truncate_value_to_fit(key, value, max_url_size)
                 current_chunk_inputs[key] = truncated_value
             else:
                 current_chunk_inputs[key] = value
 
-        # Add final chunk
+        # 实现：追加最后一个分片。
         if current_chunk_inputs:
             chunks_data.append(current_chunk_inputs)
 
-        # Create chunk payloads
+        # 实现：构建带序号的分片 payload。
         total_chunks = len(chunks_data)
         result = []
 
@@ -250,6 +240,8 @@ class ComponentInputsPayload(BasePayload):
 
 
 class ExceptionPayload(BasePayload):
+    """异常上报载体。"""
+
     exception_type: str = Field(serialization_alias="exceptionType")
     exception_message: str = Field(serialization_alias="exceptionMessage")
     exception_context: str = Field(serialization_alias="exceptionContext")  # "lifespan" or "handler"
@@ -257,7 +249,9 @@ class ExceptionPayload(BasePayload):
 
 
 class ComponentIndexPayload(BasePayload):
-    index_source: str = Field(serialization_alias="indexSource")  # "builtin", "cache", or "dynamic"
+    """组件索引上报载体。"""
+
+    index_source: str = Field(serialization_alias="indexSource")  # 注意：取值 "builtin"/"cache"/"dynamic"。
     num_modules: int = Field(serialization_alias="numModules")
     num_components: int = Field(serialization_alias="numComponents")
     dev_mode: bool = Field(serialization_alias="devMode")

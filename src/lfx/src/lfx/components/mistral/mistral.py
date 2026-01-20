@@ -1,3 +1,19 @@
+"""
+模块名称：Mistral 文本生成组件
+
+模块目的：提供可在 Langflow 运行时调用的 Mistral 语言模型组件。
+使用场景：在流程中配置 Mistral LLM 节点并生成文本。
+主要功能包括：
+- 定义 Mistral 相关输入参数（模型名、超时、并发等）
+- 使用 `ChatMistralAI` 创建模型实例
+
+关键组件：
+- `MistralAIModelComponent`：模型组件入口
+
+设计背景：统一对接 LangChain 生态以复用通用模型接口。
+注意：模型构建失败会抛 `ValueError`，调用方需提示配置/网络问题。
+"""
+
 from langchain_mistralai import ChatMistralAI
 from pydantic.v1 import SecretStr
 
@@ -7,6 +23,17 @@ from lfx.io import BoolInput, DropdownInput, FloatInput, IntInput, SecretStrInpu
 
 
 class MistralAIModelComponent(LCModelComponent):
+    """Mistral 文本生成组件。
+
+    契约：基于组件输入返回 `LanguageModel`，输入需包含 `api_key`。
+    关键路径：由 `build_model` 完成参数整理与客户端构建。
+
+    决策：通过 `ChatMistralAI` 适配 LangChain 接口
+    问题：需要与 `LCModelComponent` 生态保持一致
+    方案：复用 `langchain_mistralai` 的封装能力
+    代价：受其版本与参数支持范围限制
+    重评：当上游 SDK 破坏性变更或需要直连 API 时
+    """
     display_name = "MistralAI"
     description = "Generates text using MistralAI LLMs."
     icon = "MistralAI"
@@ -94,6 +121,20 @@ class MistralAIModelComponent(LCModelComponent):
     ]
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """将组件输入转换为可运行的 Mistral 模型实例。
+
+        契约：读取组件字段并返回 `LanguageModel`，依赖 `api_key`/`model_name` 等配置。
+        副作用：创建外部 API 客户端（网络 I/O 在后续调用阶段发生）。
+
+        关键路径（三步）：
+        1) 解密 `api_key` 并整理输入参数
+        2) 初始化 `ChatMistralAI`
+        3) 返回模型实例供运行时调用
+
+        注意：异常流为初始化异常统一抛 `ValueError`，调用方提示配置/网络问题后重试。
+        性能：远端推理耗时，吞吐受 `max_concurrent_requests` 限制。
+        排障：异常消息 `Could not connect to MistralAI API.`
+        """
         try:
             return ChatMistralAI(
                 model_name=self.model_name,

@@ -1,10 +1,14 @@
-"""ServiceManager with pluggable service discovery.
+"""
+模块名称：服务管理器
 
-Supports multiple discovery mechanisms:
-1. Decorator-based registration (@register_service)
-2. Config file (lfx.toml / pyproject.toml)
-3. Entry points (Python packages)
-4. Fallback to noop/minimal implementations
+本模块提供可插拔的服务发现与创建机制。
+主要功能包括：
+- 通过工厂或插件注册服务
+- 支持 entry points / 配置文件 / 装饰器注册
+- 管理服务依赖与生命周期
+
+设计背景：服务实现多样，需统一管理与可扩展发现机制。
+注意事项：Settings 服务不可被插件覆盖。
 """
 
 from __future__ import annotations
@@ -26,33 +30,33 @@ if TYPE_CHECKING:
 
 
 class NoFactoryRegisteredError(Exception):
-    """Raised when no factory is registered for a service type."""
+    """当服务类型未注册工厂时抛出。"""
 
 
 class NoServiceRegisteredError(Exception):
-    """Raised when no service or factory is registered for a service type."""
+    """当服务类型未注册服务或工厂时抛出。"""
 
 
 class ServiceManager:
-    """Manages the creation of different services with pluggable discovery."""
+    """可插拔服务管理器。"""
 
     def __init__(self) -> None:
-        """Initialize the service manager with empty service and factory registries."""
+        """初始化服务与工厂注册表。"""
         self.services: dict[str, Service] = {}
         self.factories: dict[str, ServiceFactory] = {}
-        self.service_classes: dict[ServiceType, type[Service]] = {}  # New: direct service class registry
+        self.service_classes: dict[ServiceType, type[Service]] = {}  # 注意：直接服务类注册表
         self._lock = threading.RLock()
         self.keyed_lock = KeyedMemoryLockManager()
         self.factory_registered = False
         self._plugins_discovered = False
 
-        # Always register settings service
+        # 注意：Settings 服务必须始终注册。
         from lfx.services.settings.factory import SettingsServiceFactory
 
         self.register_factory(SettingsServiceFactory())
 
     def register_factories(self, factories: list[ServiceFactory] | None = None) -> None:
-        """Register all available service factories."""
+        """注册全部可用服务工厂。"""
         if factories is None:
             return
         for factory in factories:
@@ -63,11 +67,11 @@ class ServiceManager:
         self.set_factory_registered()
 
     def are_factories_registered(self) -> bool:
-        """Check if the factory is registered."""
+        """检查工厂是否已注册。"""
         return self.factory_registered
 
     def set_factory_registered(self) -> None:
-        """Set the factory registered flag."""
+        """设置工厂注册完成标记。"""
         self.factory_registered = True
 
     def register_service_class(
@@ -77,17 +81,12 @@ class ServiceManager:
         *,
         override: bool = True,
     ) -> None:
-        """Register a service class directly (without factory).
+        """直接注册服务类（无需工厂）。
 
-        Args:
-            service_type: The service type enum value
-            service_class: The service class to register
-            override: Whether to override existing registration (default: True)
-
-        Raises:
-            ValueError: If attempting to register the settings service (not allowed)
+        契约：支持覆盖已有注册。
+        失败语义：注册 Settings 服务将抛 `ValueError`。
         """
-        # Settings service cannot be overridden via plugins
+        # 注意：Settings 服务不可被插件覆盖。
         if service_type == ServiceType.SETTINGS_SERVICE:
             msg = "Settings service cannot be registered via plugins. It is always created using the built-in factory."
             logger.warning(msg)
@@ -107,29 +106,29 @@ class ServiceManager:
         self,
         service_factory: ServiceFactory,
     ) -> None:
-        """Registers a new factory with dependencies."""
+        """注册服务工厂并记录依赖。"""
         service_name = service_factory.service_class.name
         self.factories[service_name] = service_factory
 
     def get(self, service_name: ServiceType, default: ServiceFactory | None = None) -> Service:
-        """Get (or create) a service by its name."""
+        """获取或创建指定服务实例。"""
         with self.keyed_lock.lock(service_name):
             if service_name not in self.services:
                 self._create_service(service_name, default)
             return self.services[service_name]
 
     def _create_service(self, service_name: ServiceType, default: ServiceFactory | None = None) -> None:
-        """Create a new service given its name, handling dependencies."""
+        """创建服务实例并处理依赖。"""
         logger.debug(f"Create service {service_name}")
 
-        # Settings service is special - always use factory, never from plugins
+        # 注意：Settings 服务只能通过工厂创建。
         if service_name == ServiceType.SETTINGS_SERVICE:
             self._create_service_from_factory(service_name, default)
             return
 
-        # Try plugin discovery first (if not already done)
+        # 注意：首次创建前触发插件发现。
         if not self._plugins_discovered:
-            # Get config_dir from settings service if available
+            # 实现：从 settings 服务获取配置目录（若可用）。
             config_dir = None
             if ServiceType.SETTINGS_SERVICE in self.services:
                 settings_service = self.services[ServiceType.SETTINGS_SERVICE]
@@ -138,20 +137,20 @@ class ServiceManager:
 
             self.discover_plugins(config_dir)
 
-        # Check if we have a direct service class registration (new system)
+        # 实现：优先使用直接注册的服务类。
         if service_name in self.service_classes:
             self._create_service_from_class(service_name)
             return
 
-        # Fall back to factory-based creation (old system)
+        # 实现：回退到工厂创建（旧系统）。
         self._create_service_from_factory(service_name, default)
 
     def _create_service_from_class(self, service_name: ServiceType) -> None:
-        """Create a service from a registered service class (new plugin system)."""
+        """从已注册服务类创建实例（插件系统）。"""
         service_class = self.service_classes[service_name]
         logger.debug(f"Creating service from class: {service_name.value} -> {service_class.__name__}")
 
-        # Inspect __init__ to determine dependencies
+        # 实现：解析 __init__ 获取依赖。
         init_signature = inspect.signature(service_class.__init__)
         dependencies = {}
 
@@ -159,34 +158,32 @@ class ServiceManager:
             if param_name == "self":
                 continue
 
-            # Try to resolve dependency from type hint first
+            # 实现：优先从类型注解解析依赖。
             dependency_type = None
             if param.annotation != inspect.Parameter.empty:
                 dependency_type = self._resolve_service_type_from_annotation(param.annotation)
 
-            # If type hint didn't work, try to resolve from parameter name
-            # E.g., param name "settings_service" -> ServiceType.SETTINGS_SERVICE
+            # 实现：类型注解失败时尝试从参数名解析。
             if not dependency_type:
                 try:
                     dependency_type = ServiceType(param_name)
                 except ValueError:
-                    # Not a valid service type - skip this parameter if it has a default
-                    # Otherwise let it fail during instantiation
+                    # 注意：无法解析且无默认值时，实例化可能失败。
                     if param.default == inspect.Parameter.empty:
-                        # No default, can't resolve - will fail during instantiation
+                        # 注意：无默认值无法解析，实例化可能失败。
                         pass
                     continue
 
             if dependency_type:
-                # Recursively create dependency if not exists
+                # 实现：递归创建依赖服务。
                 if dependency_type not in self.services:
                     self._create_service(dependency_type)
                 dependencies[param_name] = self.services[dependency_type]
 
-        # Create the service instance
+        # 实现：创建服务实例并写入缓存。
         try:
             service_instance = service_class(**dependencies)
-            # Don't call set_ready() here - let the service control its own ready state
+            # 注意：由服务自身控制 ready 状态。
             self.services[service_name] = service_instance
             logger.debug(f"Service created successfully: {service_name.value}")
         except Exception as exc:
@@ -194,31 +191,22 @@ class ServiceManager:
             raise
 
     def _resolve_service_type_from_annotation(self, annotation) -> ServiceType | None:
-        """Resolve a ServiceType from a type annotation.
-
-        Args:
-            annotation: The type annotation from __init__ signature
-
-        Returns:
-            ServiceType if resolvable, None otherwise
-        """
-        # Handle string annotations (forward references)
+        """从类型注解解析 ServiceType。"""
+        # 注意：处理字符串前向引用。
         annotation_name = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", None)
 
         if not annotation_name:
             return None
 
-        # Try to match service class name to ServiceType
-        # E.g., "SettingsService" -> ServiceType.SETTINGS_SERVICE
+        # 实现：匹配类名到 ServiceType。
         for service_type in ServiceType:
-            # Check if registered service class matches
+            # 实现：优先匹配已注册类名。
             if service_type in self.service_classes:
                 registered_class = self.service_classes[service_type]
                 if registered_class.__name__ == annotation_name:
                     return service_type
 
-            # Check if annotation name matches expected pattern
-            # E.g., "SettingsService" -> "settings_service"
+            # 实现：按命名规则推断 ServiceType。
             expected_name = annotation_name.replace("Service", "").lower() + "_service"
             if service_type.value == expected_name:
                 return service_type
@@ -226,7 +214,7 @@ class ServiceManager:
         return None
 
     def _create_service_from_factory(self, service_name: ServiceType, default: ServiceFactory | None = None) -> None:
-        """Create a service from a factory (old system)."""
+        """通过工厂创建服务实例（旧系统）。"""
         self._validate_service_creation(service_name, default)
 
         if service_name == ServiceType.SETTINGS_SERVICE:
@@ -238,7 +226,7 @@ class ServiceManager:
         else:
             factory = self.factories.get(service_name)
 
-        # Create dependencies first
+        # 实现：先创建依赖服务。
         if factory is None and default is not None:
             self.register_factory(default)
             factory = default
@@ -249,15 +237,15 @@ class ServiceManager:
             if dependency not in self.services:
                 self._create_service(dependency)
 
-        # Collect the dependent services
+        # 实现：收集依赖注入参数。
         dependent_services = {dep.value: self.services[dep] for dep in factory.dependencies}
 
-        # Create the actual service
+        # 实现：创建服务并标记就绪。
         self.services[service_name] = self.factories[service_name].create(**dependent_services)
         self.services[service_name].set_ready()
 
     def _validate_service_creation(self, service_name: ServiceType, default: ServiceFactory | None = None) -> None:
-        """Validate whether the service can be created."""
+        """校验服务是否可创建。"""
         if service_name == ServiceType.SETTINGS_SERVICE:
             return
         if service_name not in self.factories and default is None:
@@ -265,14 +253,14 @@ class ServiceManager:
             raise NoFactoryRegisteredError(msg)
 
     def update(self, service_name: ServiceType) -> None:
-        """Update a service by its name."""
+        """重建指定服务实例。"""
         if service_name in self.services:
             logger.debug(f"Update service {service_name}")
             self.services.pop(service_name, None)
             self.get(service_name)
 
     async def teardown(self) -> None:
-        """Teardown all the services."""
+        """销毁所有已创建服务。"""
         for service in list(self.services.values()):
             if service is None:
                 continue
@@ -288,7 +276,7 @@ class ServiceManager:
 
     @classmethod
     def get_factories(cls) -> list[ServiceFactory]:
-        """Auto-discover and return all service factories."""
+        """自动发现并返回所有服务工厂。"""
         from lfx.services.factory import ServiceFactory
         from lfx.services.schema import ServiceType
 
@@ -301,42 +289,31 @@ class ServiceManager:
                 module_name = f"{base_module}.{name}.factory"
                 module = importlib.import_module(module_name)
 
-                # Find all classes in the module that are subclasses of ServiceFactory
+                # 实现：查找模块内的工厂子类。
                 for _, obj in inspect.getmembers(module, inspect.isclass):
                     if isinstance(obj, type) and issubclass(obj, ServiceFactory) and obj is not ServiceFactory:
                         factories.append(obj())
                         break
 
             except Exception:  # noqa: BLE001, S110
-                # This is expected during initial service discovery - some services
-                # may not have factories yet or depend on settings service being ready first
-                # Intentionally suppressed to avoid startup noise - not an error condition
+                # 注意：初始发现阶段允许失败，避免启动噪声。
                 pass
 
         return factories
 
     def discover_plugins(self, config_dir: Path | None = None) -> None:
-        """Discover and register service plugins from multiple sources.
+        """发现并注册服务插件。
 
-        Discovery order (last wins):
-        1. Entry points (installed packages)
-        2. Config files (lfx.toml / pyproject.toml)
-        3. Decorator-registered services (already in self.service_classes)
-
-        Args:
-            config_dir: Directory to search for config files.
-                       If None, tries to use settings_service.settings.config_dir,
-                       then falls back to current working directory.
-
-        Note:
-            The settings service cannot be overridden via plugins and is always
-            created using the built-in factory.
+        发现顺序（后者覆盖前者）：
+        1) entry points
+        2) 配置文件（lfx.toml / pyproject.toml）
+        3) 装饰器注册
         """
         if self._plugins_discovered:
             logger.debug("Plugins already discovered, skipping...")
             return
 
-        # Get config_dir from settings service if not provided
+        # 实现：从 settings 获取配置目录。
         if config_dir is None and ServiceType.SETTINGS_SERVICE in self.services:
             settings_service = self.services[ServiceType.SETTINGS_SERVICE]
             if hasattr(settings_service, "settings") and settings_service.settings.config_dir:
@@ -344,17 +321,17 @@ class ServiceManager:
 
         logger.debug(f"Starting plugin discovery (config_dir: {config_dir or 'cwd'})...")
 
-        # 1. Discover from entry points
+        # 实现：从 entry points 发现服务。
         self._discover_from_entry_points()
 
-        # 2. Discover from config files
+        # 实现：从配置文件发现服务。
         self._discover_from_config(config_dir)
 
         self._plugins_discovered = True
         logger.debug(f"Plugin discovery complete. Registered services: {list(self.service_classes.keys())}")
 
     def _discover_from_entry_points(self) -> None:
-        """Discover services from Python entry points."""
+        """从 Python entry points 发现服务。"""
         from importlib.metadata import entry_points
 
         eps = entry_points(group="lfx.services")
@@ -362,7 +339,7 @@ class ServiceManager:
         for ep in eps:
             try:
                 service_class = ep.load()
-                # Entry point name should match ServiceType enum value
+                # 注意：entry point 名称需匹配 ServiceType 枚举值。
                 service_type = ServiceType(ep.name)
                 self.register_service_class(service_type, service_class, override=False)
                 logger.debug(f"Loaded service from entry point: {ep.name}")
@@ -372,26 +349,26 @@ class ServiceManager:
                 logger.debug(f"Error loading entry point {ep.name}: {exc}")
 
     def _discover_from_config(self, config_dir: Path | None = None) -> None:
-        """Discover services from config files (lfx.toml / pyproject.toml)."""
+        """从配置文件发现服务。"""
         config_dir = Path.cwd() if config_dir is None else Path(config_dir)
 
-        # Try lfx.toml first
+        # 注意：优先读取 lfx.toml。
         lfx_config = config_dir / "lfx.toml"
         if lfx_config.exists():
             self._load_config_file(lfx_config)
             return
 
-        # Try pyproject.toml with [tool.lfx.services]
+        # 注意：其次读取 pyproject.toml 的 [tool.lfx.services]。
         pyproject_config = config_dir / "pyproject.toml"
         if pyproject_config.exists():
             self._load_pyproject_config(pyproject_config)
 
     def _load_config_file(self, config_path: Path) -> None:
-        """Load services from lfx.toml config file."""
+        """从 lfx.toml 读取服务配置。"""
         try:
-            import tomllib as tomli  # Python 3.11+
+            import tomllib as tomli  # 注意：Python 3.11+ 内置
         except ImportError:
-            import tomli  # Python 3.10
+            import tomli  # 注意：Python 3.10 需外部依赖
 
         try:
             with config_path.open("rb") as f:
@@ -406,11 +383,11 @@ class ServiceManager:
             logger.warning(f"Failed to load config from {config_path}: {exc}")
 
     def _load_pyproject_config(self, config_path: Path) -> None:
-        """Load services from pyproject.toml [tool.lfx.services] section."""
+        """从 pyproject.toml 读取服务配置。"""
         try:
-            import tomllib as tomli  # Python 3.11+
+            import tomllib as tomli  # 注意：Python 3.11+ 内置
         except ImportError:
-            import tomli  # Python 3.10
+            import tomli  # 注意：Python 3.10 需外部依赖
 
         try:
             with config_path.open("rb") as f:
@@ -426,21 +403,16 @@ class ServiceManager:
             logger.warning(f"Failed to load config from {config_path}: {exc}")
 
     def _register_service_from_path(self, service_key: str, service_path: str) -> None:
-        """Register a service from a module:class path string.
-
-        Args:
-            service_key: ServiceType enum value (e.g., "database_service")
-            service_path: Import path (e.g., "langflow.services.database.service:DatabaseService")
-        """
+        """通过 `module:class` 路径注册服务类。"""
         try:
-            # Validate service_key matches ServiceType enum
+            # 注意：service_key 必须匹配 ServiceType。
             service_type = ServiceType(service_key)
         except ValueError:
             logger.warning(f"Invalid service key '{service_key}' - must match ServiceType enum value")
             return
 
         try:
-            # Parse module:class format
+            # 实现：解析 module:class 格式。
             if ":" not in service_path:
                 logger.warning(f"Invalid service path '{service_path}' - must be 'module:class' format")
                 return
@@ -455,20 +427,13 @@ class ServiceManager:
             logger.warning(f"Failed to register service {service_key} from {service_path}: {exc}")
 
 
-# Global variables for lazy initialization
+# 注意：懒加载单例服务管理器。
 _service_manager: ServiceManager | None = None
 _service_manager_lock = threading.Lock()
 
 
 def get_service_manager() -> ServiceManager:
-    """Get or create the service manager instance using lazy initialization.
-
-    This function ensures thread-safe lazy initialization of the service manager,
-    preventing automatic service creation during module import.
-
-    Returns:
-        ServiceManager: The singleton service manager instance.
-    """
+    """获取服务管理器单例（线程安全懒加载）。"""
     global _service_manager  # noqa: PLW0603
     if _service_manager is None:
         with _service_manager_lock:

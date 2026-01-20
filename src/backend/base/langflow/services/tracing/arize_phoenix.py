@@ -1,3 +1,20 @@
+"""
+模块名称：Arize/Phoenix Tracer 适配
+
+本模块实现 Arize Phoenix 的 tracing 适配，并维护 Langflow 的 root/child spans。
+主要功能包括：
+- 初始化 Phoenix/Arize OTEL tracer
+- 记录组件级 spans 与日志/错误
+- 将 Langflow 数据类型转换为 Phoenix 兼容结构
+
+关键组件：
+- `ArizePhoenixTracer`
+- `CollectingSpanProcessor`
+
+设计背景：对接 Arize/Phoenix 以提供可观测性与模型追踪能力。
+注意事项：未配置 API Key/Space ID 时会自动禁用。
+"""
+
 from __future__ import annotations
 
 import json
@@ -42,15 +59,15 @@ class CollectingSpanProcessor(SpanProcessor):
         self._lock = threading.Lock()
 
     def on_start(self, span, parent_context=None):
-        # Silence unused variable warnings
+        """在特定 span 上注入关联 ID。"""
         _ = parent_context
 
-        # Generate the correlation ID once (thread-safe)
+        # 注意：只生成一次 correlation_id，保证跨 span 一致
         with self._lock:
             if self.correlation_id is None:
                 self.correlation_id = str(uuid.uuid4())
 
-        # Inject into the CHAIN & LLM spans
+        # 注意：仅在链路与模型 span 注入关联 ID
         if span.name in ("Langflow", "Language Model"):
             span.set_attribute("langflow.correlation_id", self.correlation_id)
 
@@ -73,7 +90,18 @@ class ArizePhoenixTracer(BaseTracer):
     def __init__(
         self, trace_name: str, trace_type: str, project_name: str, trace_id: UUID, session_id: str | None = None
     ):
-        """Initializes the ArizePhoenixTracer instance and sets up a root span."""
+        """初始化 Arize/Phoenix tracer 并创建 root span。
+
+        契约：初始化失败时 `ready=False`。
+        副作用：创建 root span 并注入 trace 上下文。
+        失败语义：环境或 SDK 初始化失败将禁用 tracer。
+
+        决策：root span 使用固定名称 `Langflow`
+        问题：需要统一根 span 便于检索
+        方案：固定名称并写入 `langflow.*` 属性
+        代价：不同流程共用名称需依赖属性区分
+        重评：若要求每条流独立 root 名称再调整
+        """
         self.trace_name = trace_name
         self.trace_type = trace_type
         self.project_name = project_name
@@ -118,11 +146,15 @@ class ArizePhoenixTracer(BaseTracer):
 
     @property
     def ready(self):
-        """Indicates if the tracer is ready for usage."""
+        """指示 tracer 是否可用。"""
         return self._ready
 
     def setup_arize_phoenix(self) -> bool:
-        """Configures Arize/Phoenix specific environment variables and registers the tracer provider."""
+        """配置 Arize/Phoenix 环境并注册 tracer provider。
+
+        契约：初始化成功返回 `True`。
+        失败语义：缺少依赖或鉴权失败时返回 `False`。
+        """
         arize_phoenix_batch = os.getenv("ARIZE_PHOENIX_BATCH", "False").lower() in {
             "true",
             "t",
@@ -131,7 +163,7 @@ class ArizePhoenixTracer(BaseTracer):
             "1",
         }
 
-        # Arize Config
+        # 注意：Arize 与 Phoenix 可同时启用
         arize_api_key = os.getenv("ARIZE_API_KEY", None)
         arize_space_id = os.getenv("ARIZE_SPACE_ID", None)
         arize_collector_endpoint = os.getenv("ARIZE_COLLECTOR_ENDPOINT", "https://otlp.arize.com")
@@ -143,7 +175,6 @@ class ArizePhoenixTracer(BaseTracer):
             "authorization": f"Bearer {arize_api_key}",
         }
 
-        # Phoenix Config
         phoenix_api_key = os.getenv("PHOENIX_API_KEY", None)
         phoenix_collector_endpoint = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "https://app.phoenix.arize.com")
         phoenix_auth_disabled = "localhost" in phoenix_collector_endpoint or "127.0.0.1" in phoenix_collector_endpoint
@@ -228,7 +259,12 @@ class ArizePhoenixTracer(BaseTracer):
         metadata: dict[str, Any] | None = None,
         vertex: Vertex | None = None,
     ) -> None:
-        """Adds a trace span, attaching inputs and metadata as attributes."""
+        """创建组件级 span 并写入输入与元数据。
+
+        契约：`trace_id` 唯一标识组件 span。
+        副作用：向 tracer 写入 span 属性。
+        失败语义：未就绪时静默返回。
+        """
         if not self._ready:
             return
 
@@ -274,7 +310,12 @@ class ArizePhoenixTracer(BaseTracer):
         error: Exception | None = None,
         logs: Sequence[Log | dict] = (),
     ) -> None:
-        """Ends a trace span, attaching outputs, errors, and logs as attributes."""
+        """结束组件级 span 并写入输出/日志/错误。
+
+        契约：仅结束已存在的 child span。
+        副作用：结束 span 并移除缓存。
+        失败语义：未就绪或 span 不存在时静默返回。
+        """
         if not self._ready or trace_id not in self.child_spans:
             return
 
@@ -304,7 +345,12 @@ class ArizePhoenixTracer(BaseTracer):
         error: Exception | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Ends tracing with the specified inputs, outputs, errors, and metadata as attributes."""
+        """结束 root span 并写入输入/输出与元数据。
+
+        契约：使用 ChatInput/ChatOutput 作为最终输入输出。
+        副作用：结束 root span 并注销 LangChain instrumentor。
+        失败语义：未就绪时静默返回。
+        """
         if not self._ready:
             return
 
@@ -332,13 +378,13 @@ class ArizePhoenixTracer(BaseTracer):
             )
 
     def _convert_to_arize_phoenix_types(self, io_dict: dict[str | Any, Any]) -> dict[str, Any]:
-        """Converts data types to Arize/Phoenix compatible formats."""
+        """将输入字典转换为 Arize/Phoenix 兼容格式。"""
         return {
             str(key): self._convert_to_arize_phoenix_type(value) for key, value in io_dict.items() if key is not None
         }
 
     def _convert_to_arize_phoenix_type(self, value):
-        """Recursively converts a value to a Arize/Phoenix compatible type."""
+        """递归转换为 Arize/Phoenix 兼容类型。"""
         if isinstance(value, dict):
             value = {key: self._convert_to_arize_phoenix_type(val) for key, val in value.items()}
 
@@ -367,7 +413,7 @@ class ArizePhoenixTracer(BaseTracer):
 
     @staticmethod
     def _error_to_string(error: Exception | None):
-        """Converts an error to a string with traceback details."""
+        """将异常转换为包含堆栈的字符串。"""
         error_message = None
         if error:
             string_stacktrace = traceback.format_exception(error)
@@ -376,16 +422,16 @@ class ArizePhoenixTracer(BaseTracer):
 
     @staticmethod
     def _get_current_timestamp() -> int:
-        """Gets the current UTC timestamp in nanoseconds."""
+        """获取 UTC 纳秒时间戳。"""
         return int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
 
     @staticmethod
     def _safe_json_dumps(obj: Any, **kwargs: Any) -> str:
-        """A convenience wrapper around `json.dumps` that ensures that any object can be safely encoded."""
+        """安全 JSON 序列化包装。"""
         return json.dumps(obj, default=str, ensure_ascii=False, **kwargs)
 
     def _set_span_status(self, current_span: Span, error: Exception | None = None):
-        """Sets the status and attributes of the current span based on the presence of an error."""
+        """根据错误设置 span 状态与属性。"""
         if error:
             error_string = self._error_to_string(error)
             current_span.set_status(Status(StatusCode.ERROR, error_string))
@@ -410,11 +456,15 @@ class ArizePhoenixTracer(BaseTracer):
 
     @override
     def get_langchain_callback(self) -> BaseCallbackHandler | None:
-        """Returns the LangChain callback handler if applicable."""
+        """返回 LangChain callback（此实现不提供）。"""
         return None
 
     def close(self):
-        """Flush tracer provider spans safely before shutdown."""
+        """关闭前强制 flush tracer spans。
+
+        契约：若 provider 支持 `force_flush` 则调用。
+        失败语义：flush 失败记录日志但不中断。
+        """
         try:
             if hasattr(self, "tracer_provider") and hasattr(self.tracer_provider, "force_flush"):
                 self.tracer_provider.force_flush(timeout_millis=3000)
@@ -422,5 +472,5 @@ class ArizePhoenixTracer(BaseTracer):
             logger.error("[Arize/Phoenix] Error Flushing Spans: %s", str(e), exc_info=True)
 
     def __del__(self):
-        """Ensure tracer provider flushes on object destruction."""
+        """对象销毁前确保 flush。"""
         self.close()

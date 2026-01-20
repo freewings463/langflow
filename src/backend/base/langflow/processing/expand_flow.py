@@ -1,7 +1,18 @@
-"""Expand compact flow format to full flow format.
+"""
+模块名称：紧凑 Flow 展开器
 
-This module provides functionality to expand a minimal/compact flow format
-(used by AI agents) into the full flow format expected by Langflow.
+本模块将 AI 生成的紧凑流程结构转换为 Langflow UI 需要的完整流程格式。
+主要功能包括：
+- 紧凑节点/边的解析与校验
+- 根据组件模板补全节点结构
+- 生成 ReactFlow 兼容的 handle 编码
+
+关键组件：
+- `expand_compact_flow`
+- `_expand_node` / `_expand_edge`
+
+设计背景：AI 产出的简化结构无法直接驱动前端，需要补齐模板与连线信息。
+注意事项：组件类型未命中模板时会抛出异常。
 """
 
 from __future__ import annotations
@@ -12,18 +23,26 @@ from pydantic import BaseModel, Field
 
 
 class CompactNode(BaseModel):
-    """A compact node representation for AI-generated flows."""
+    """AI 紧凑节点结构。
+
+    契约：`type` 为组件名，`values` 为字段值，`edited=True` 时需提供 `node` 全量数据。
+    失败语义：字段缺失由 Pydantic 校验抛错。
+    """
 
     id: str
     type: str
     values: dict[str, Any] = Field(default_factory=dict)
-    # If edited is True, the node field must contain the full node data
+    # 注意：edited=True 时必须提供完整节点数据
     edited: bool = False
     node: dict[str, Any] | None = None
 
 
 class CompactEdge(BaseModel):
-    """A compact edge representation for AI-generated flows."""
+    """AI 紧凑边结构。
+
+    契约：`source/target` 为节点 ID，`*_output`/`*_input` 为端口名。
+    失败语义：字段缺失由 Pydantic 校验抛错。
+    """
 
     source: str
     source_output: str
@@ -32,14 +51,23 @@ class CompactEdge(BaseModel):
 
 
 class CompactFlowData(BaseModel):
-    """The compact flow data structure."""
+    """紧凑流程数据结构。
+
+    契约：包含 `nodes` 与 `edges` 列表。
+    失败语义：字段缺失由 Pydantic 校验抛错。
+    """
 
     nodes: list[CompactNode]
     edges: list[CompactEdge]
 
 
 def _get_flat_components(all_types_dict: dict[str, Any]) -> dict[str, Any]:
-    """Flatten the component types dict for easy lookup by component name."""
+    """将组件类型索引扁平化为 `{组件名: 模板}`。
+
+    契约：输入嵌套组件字典，返回平铺字典。
+    副作用：无。
+    失败语义：非字典的层级会被忽略。
+    """
     return {
         comp_name: comp_data
         for components in all_types_dict.values()
@@ -52,19 +80,22 @@ def _expand_node(
     compact_node: CompactNode,
     flat_components: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expand a compact node to full node format.
+    """将紧凑节点展开为完整节点结构。
 
-    Args:
-        compact_node: The compact node to expand
-        flat_components: Flattened component templates dict
+    契约：返回可直接渲染的 `genericNode` 数据结构。
+    关键路径（三步）：
+    1) 若 `edited=True`，直接使用完整节点数据
+    2) 根据组件类型查找模板
+    3) 合并 `values` 到模板并生成节点
+    副作用：无（仅返回新结构）。
+    失败语义：模板缺失或 edited 节点缺少数据抛 `ValueError`。
 
-    Returns:
-        Full node data structure
-
-    Raises:
-        ValueError: If component type is not found and node is not edited
+    决策：`edited=True` 时跳过模板合并
+    问题：编辑过的节点已包含完整结构
+    方案：直接复用节点数据
+    代价：依赖上游保证节点结构完整
+    重评：若上游无法保证则引入校验
     """
-    # If the node is edited, it should have full node data
     if compact_node.edited:
         if not compact_node.node:
             msg = f"Node {compact_node.id} is marked as edited but has no node data"
@@ -79,26 +110,20 @@ def _expand_node(
             },
         }
 
-    # Look up component template
     if compact_node.type not in flat_components:
         msg = f"Component type '{compact_node.type}' not found in component index"
         raise ValueError(msg)
 
-    # Fast deepcopy for known structure.
-    # Instead of deepcopy, use shallow copy and per-field dict copy for template subdict.
+    # 性能：避免全量 deepcopy，仅复制会被修改的 template
     src_data = flat_components[compact_node.type]
-    # Assume template is a dict (if present)
     if "template" in src_data:
-        # Shallow copy for outer structure
         template_data = src_data.copy()
-        # Deep copy only 'template' portion (which is mutated and thus not shared)
         template_data["template"] = template = src_data["template"].copy()
     else:
         template_data = src_data.copy()
         template = template_data.get("template", {})
 
-    # Merge user values into template
-    # Use items() directly, reduce field lookups
+    # 注意：将用户 `values` 合并进模板字段
     for field_name, field_value in compact_node.values.items():
         t_value = template.get(field_name)
         if t_value is not None:
@@ -107,7 +132,7 @@ def _expand_node(
             else:
                 template[field_name] = field_value
         else:
-            # Add as new field if not in template
+            # 注意：模板缺失字段时按新字段追加
             template[field_name] = {"value": field_value}
 
     return {
@@ -122,9 +147,11 @@ def _expand_node(
 
 
 def _encode_handle(data: dict[str, Any]) -> str:
-    """Encode a handle dict to the special string format used by ReactFlow.
+    """将 handle 字典编码为 ReactFlow 专用字符串。
 
-    Uses œ instead of " for JSON encoding.
+    契约：输入字典，返回编码字符串。
+    副作用：无。
+    失败语义：序列化失败抛异常。
     """
     from lfx.utils.util import escape_json_dump
 
@@ -137,7 +164,12 @@ def _build_source_handle_data(
     output_name: str,
     output_types: list[str],
 ) -> dict[str, Any]:
-    """Build the sourceHandle data dict for an edge."""
+    """构建 sourceHandle 数据结构。
+
+    契约：返回包含输出类型信息的字典。
+    副作用：无。
+    失败语义：不抛异常，依赖输入参数正确性。
+    """
     return {
         "dataType": component_type,
         "id": node_id,
@@ -152,7 +184,12 @@ def _build_target_handle_data(
     input_types: list[str],
     field_type: str,
 ) -> dict[str, Any]:
-    """Build the targetHandle data dict for an edge."""
+    """构建 targetHandle 数据结构。
+
+    契约：返回包含输入类型与字段信息的字典。
+    副作用：无。
+    失败语义：不抛异常，依赖输入参数正确性。
+    """
     return {
         "fieldName": field_name,
         "id": node_id,
@@ -165,14 +202,21 @@ def _expand_edge(
     compact_edge: CompactEdge,
     expanded_nodes: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Expand a compact edge to full edge format.
+    """将紧凑边展开为完整连线结构。
 
-    Args:
-        compact_edge: The compact edge to expand
-        expanded_nodes: Dict of node_id -> expanded node data
+    契约：返回 ReactFlow 兼容的 edge 结构。
+    关键路径（三步）：
+    1) 获取源/目标节点并解析模板
+    2) 推断输出/输入类型与字段类型
+    3) 生成 handle 数据并编码
+    副作用：无（仅返回新结构）。
+    失败语义：节点缺失抛 `ValueError`。
 
-    Returns:
-        Full edge data structure
+    决策：输出类型缺失时回退到 `base_classes`
+    问题：部分组件未声明 outputs
+    方案：使用 `base_classes` 作为输出类型
+    代价：类型信息可能不够精确
+    重评：当所有组件补齐 outputs 后移除回退
     """
     source_node = expanded_nodes.get(compact_edge.source)
     target_node = expanded_nodes.get(compact_edge.target)
@@ -187,7 +231,6 @@ def _expand_edge(
     source_node_data = source_node["data"]["node"]
     target_node_data = target_node["data"]["node"]
 
-    # Find output types from source node
     source_outputs = source_node_data.get("outputs", [])
     source_output = next(
         (o for o in source_outputs if o.get("name") == compact_edge.source_output),
@@ -195,11 +238,9 @@ def _expand_edge(
     )
     output_types = source_output.get("types", []) if source_output else []
 
-    # If no outputs defined, use base_classes
     if not output_types:
         output_types = source_node_data.get("base_classes", [])
 
-    # Find input types and field type from target node template
     target_template = target_node_data.get("template", {})
     target_field = target_template.get(compact_edge.target_input, {})
     input_types = target_field.get("input_types", [])
@@ -209,7 +250,6 @@ def _expand_edge(
 
     source_type = source_node["data"]["type"]
 
-    # Build handle data objects
     source_handle_data = _build_source_handle_data(
         compact_edge.source,
         source_type,
@@ -223,7 +263,6 @@ def _expand_edge(
         field_type,
     )
 
-    # Encode handles to string format
     source_handle_str = _encode_handle(source_handle_data)
     target_handle_str = _encode_handle(target_handle_data)
 
@@ -249,39 +288,31 @@ def expand_compact_flow(
     compact_data: dict[str, Any],
     all_types_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expand a compact flow format to full flow format.
+    """展开紧凑 Flow 为完整 Flow 数据。
 
-    Args:
-        compact_data: The compact flow data with nodes and edges
-        all_types_dict: The component types dictionary from component_cache
+    契约：返回包含 `nodes` 与 `edges` 的完整结构。
+    关键路径（三步）：
+    1) 解析并校验紧凑数据
+    2) 扁平化组件模板并展开节点
+    3) 解析连线并生成 edge
+    副作用：无（仅返回新结构）。
+    失败语义：紧凑数据格式错误或组件缺失时抛异常。
 
-    Returns:
-        Full flow data structure ready for Langflow UI
-
-    Example compact input:
-        {
-            "nodes": [
-                {"id": "1", "type": "ChatInput"},
-                {"id": "2", "type": "OpenAIModel", "values": {"model_name": "gpt-4"}}
-            ],
-            "edges": [
-                {"source": "1", "source_output": "message", "target": "2", "target_input": "input_value"}
-            ]
-        }
+    决策：先展开节点再展开边
+    问题：边解析依赖节点模板信息
+    方案：先构建 `expanded_nodes` 再处理边
+    代价：需要在内存中维护节点映射
+    重评：若引入流式转换可调整顺序
     """
-    # Parse and validate compact data
     flow_data = CompactFlowData(**compact_data)
 
-    # Flatten components for lookup
     flat_components = _get_flat_components(all_types_dict)
 
-    # Expand nodes
     expanded_nodes: dict[str, dict[str, Any]] = {}
     for compact_node in flow_data.nodes:
         expanded = _expand_node(compact_node, flat_components)
         expanded_nodes[compact_node.id] = expanded
 
-    # Expand edges
     expanded_edges = []
     for compact_edge in flow_data.edges:
         expanded = _expand_edge(compact_edge, expanded_nodes)

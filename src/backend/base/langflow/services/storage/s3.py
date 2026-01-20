@@ -1,7 +1,11 @@
-"""S3-based storage service implementation using async boto3.
+"""模块名称：`S3` 对象存储服务
 
-This service handles file storage operations with AWS S3, including
-file upload, download, deletion, and listing operations.
+模块目的：提供基于 `S3` 的对象存储实现。
+主要功能：文件上传、下载、删除、列表与流式读取。
+使用场景：配置启用对象存储并需要跨实例共享文件时使用。
+关键组件：`S3StorageService`
+设计背景：通过 `aioboto3` 异步客户端适配 `S3` 访问。
+注意事项：需配置 `bucket`、凭证与区域；`append` 不支持。
 """
 
 from __future__ import annotations
@@ -22,22 +26,23 @@ if TYPE_CHECKING:
 
 
 class S3StorageService(StorageService):
-    """A service class for handling S3 storage operations using aioboto3."""
+    """基于 `S3` 的存储服务实现。"""
 
     def __init__(self, session_service: SessionService, settings_service: SettingsService) -> None:
-        """Initialize the S3 storage service with session and settings services.
+        """初始化 `S3` 存储服务。
 
-        Args:
-            session_service: The session service instance
-            settings_service: The settings service instance
+        关键路径（三步）：
+        1) 校验 `bucket`、前缀与标签配置
+        2) 确保 `aioboto3` 可用并创建 `Session`
+        3) 标记服务就绪并输出初始化日志
 
-        Raises:
-            ImportError: If aioboto3 is not installed
-            ValueError: If required S3 configuration is missing
+        异常流：缺少 `aioboto3` 抛 `ImportError`；缺少 `bucket` 抛 `ValueError`。
+        性能瓶颈：首次创建 `Session` 与环境变量解析。
+        排障入口：日志关键字 `S3 storage initialized`。
         """
         super().__init__(session_service, settings_service)
 
-        # Validate required S3 configuration
+        # 校验必要配置
         self.bucket_name = settings_service.settings.object_storage_bucket_name
         if not self.bucket_name:
             msg = "S3 bucket name is required when using S3 storage"
@@ -55,7 +60,7 @@ class S3StorageService(StorageService):
             msg = "aioboto3 is required for S3 storage. Install it with: uv pip install aioboto3"
             raise ImportError(msg) from exc
 
-        # Create session - AWS credentials are picked up from environment variables
+        # 创建会话，凭证由环境变量提供
         self.session = aioboto3.Session()
         self._client = None
 
@@ -66,78 +71,51 @@ class S3StorageService(StorageService):
         )
 
     def build_full_path(self, flow_id: str, file_name: str) -> str:
-        """Build the full S3 key for a file.
-
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file
-
-        Returns:
-            str: The full S3 key (e.g., 'files/flow_123/myfile.txt')
-        """
-        # note: prefix already contains the / at the end
+        """构建 `S3` 对象键。"""
+        # 注意：`prefix` 已包含末尾 `/`
         return f"{self.prefix}{flow_id}/{file_name}"
 
     def parse_file_path(self, full_path: str) -> tuple[str, str]:
-        """Parse a full S3 path to extract flow_id and file_name.
+        """解析 `S3` 路径并提取 `flow_id` 与文件名。
 
-        Args:
-            full_path: S3 path, may or may not include prefix
-                e.g., "files/user_123/image.png" or "user_123/image.png"
+        关键路径（三步）：
+        1) 若包含 `prefix` 则去除
+        2) 以最后一个 `/` 拆分路径
+        3) 返回 `(flow_id, file_name)`
 
-        Returns:
-            tuple[str, str]: A tuple of (flow_id, file_name)
-
-        Examples:
-            >>> parse_file_path("files/user_123/image.png")  # with prefix
-            ("user_123", "image.png")
-            >>> parse_file_path("user_123/image.png")  # without prefix
-            ("user_123", "image.png")
+        异常流：无法拆分时返回 `("", file_name)`。
+        性能瓶颈：字符串处理开销。
+        排障入口：无日志，需由调用方校验返回值。
         """
-        # Remove prefix if present (but don't require it)
         path_without_prefix = full_path
         if self.prefix and full_path.startswith(self.prefix):
             path_without_prefix = full_path[len(self.prefix) :]
 
-        # Split from the right to get the filename
-        # Everything before the last "/" is the flow_id
         if "/" not in path_without_prefix:
             return "", path_without_prefix
 
-        # Use rsplit to split from the right, limiting to 1 split
         flow_id, file_name = path_without_prefix.rsplit("/", 1)
         return flow_id, file_name
 
     def resolve_component_path(self, logical_path: str) -> str:
-        """Return logical path as-is for S3 storage.
-
-        For S3, components work with logical paths (flow_id/filename) and the
-        storage service adds the prefix internally when performing operations.
-
-        Args:
-            logical_path: Path in format "flow_id/filename"
-
-        Returns:
-            str: The same logical path (components use this with storage service)
-        """
+        """`S3` 模式下保持逻辑路径不变。"""
         return logical_path
 
     def _get_client(self):
-        """Get or create an S3 client using the async context manager."""
+        """获取 `S3` 客户端（通过异步上下文管理器）。"""
         return self.session.client("s3")
 
     async def save_file(self, flow_id: str, file_name: str, data: bytes, *, append: bool = False) -> None:
-        """Save a file to S3.
+        """保存文件到 `S3`。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to be saved
-            data: The byte content of the file
-            append: If True, append to existing file (not supported in S3, will raise error)
+        关键路径（三步）：
+        1) 校验 `append` 模式
+        2) 组装 `put_object` 参数并写入
+        3) 解析异常并映射为明确错误
 
-        Raises:
-            Exception: If the file cannot be saved to S3
-            NotImplementedError: If append=True (not supported in S3)
+        异常流：不支持 `append` 抛 `NotImplementedError`；访问错误映射为权限或不存在异常。
+        性能瓶颈：网络上传与 `put_object` 请求。
+        排障入口：日志关键字 `Error saving file`。
         """
         if append:
             msg = "Append mode is not supported for S3 storage"
@@ -170,6 +148,7 @@ class S3StorageService(StorageService):
                 error_code = error_info.get("Code")
                 error_msg = error_info.get("Message", str(e))
 
+            # 排障：将常见 `S3` 错误码映射为明确异常，便于调用方处理
             logger.exception(f"Error saving file {file_name} to S3 in flow {flow_id}: {error_msg}")
 
             if error_code == "NoSuchBucket":
@@ -185,17 +164,16 @@ class S3StorageService(StorageService):
             raise RuntimeError(msg) from e
 
     async def get_file(self, flow_id: str, file_name: str) -> bytes:
-        """Retrieve a file from S3.
+        """从 `S3` 读取文件并返回字节内容。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to be retrieved
+        关键路径（三步）：
+        1) 构建对象键
+        2) 调用 `get_object` 读取内容
+        3) 返回内容并记录日志
 
-        Returns:
-            bytes: The file content
-
-        Raises:
-            FileNotFoundError: If the file does not exist in S3
+        异常流：对象不存在时抛 `FileNotFoundError`。
+        性能瓶颈：网络下载与对象读取。
+        排障入口：日志关键字 `Error retrieving file`。
         """
         key = self.build_full_path(flow_id, file_name)
 
@@ -217,18 +195,16 @@ class S3StorageService(StorageService):
             return content
 
     async def get_file_stream(self, flow_id: str, file_name: str, chunk_size: int = 8192) -> AsyncIterator[bytes]:
-        """Retrieve a file from S3 as a stream.
+        """以流式分块读取 `S3` 对象。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to retrieve
-            chunk_size: Size of chunks to yield (default: 8192 bytes)
+        关键路径（三步）：
+        1) 调用 `get_object` 获取 `Body`
+        2) 逐块迭代并 `yield`
+        3) 关闭 `Body` 句柄
 
-        Yields:
-            bytes: Chunks of the file content
-
-        Raises:
-            FileNotFoundError: If the file does not exist in S3
+        异常流：对象不存在时抛 `FileNotFoundError`。
+        性能瓶颈：网络流式读取与分块迭代。
+        排障入口：日志关键字 `Error streaming file`。
         """
         key = self.build_full_path(flow_id, file_name)
 
@@ -241,6 +217,7 @@ class S3StorageService(StorageService):
                     async for chunk in body.iter_chunks(chunk_size):
                         yield chunk
                 finally:
+                    # 注意：关闭 `Body` 以释放连接与资源
                     if hasattr(body, "close"):
                         with contextlib.suppress(Exception):
                             await body.close()
@@ -255,16 +232,16 @@ class S3StorageService(StorageService):
             raise
 
     async def list_files(self, flow_id: str) -> list[str]:
-        """List all files in a specified S3 prefix (flow namespace).
+        """列出指定 `flow_id` 前缀下的文件名。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
+        关键路径（三步）：
+        1) 计算 `prefix` 并分页遍历
+        2) 去除前缀并收集文件名
+        3) 返回文件名列表
 
-        Returns:
-            list[str]: A list of file names (without the prefix)
-
-        Raises:
-            Exception: If there's an error listing files from S3
+        异常流：分页或请求异常时抛出原异常。
+        性能瓶颈：`S3` 分页请求次数。
+        排障入口：日志关键字 `Error listing files`。
         """
         if not isinstance(flow_id, str):
             flow_id = str(flow_id)
@@ -279,11 +256,9 @@ class S3StorageService(StorageService):
                 async for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
                     if "Contents" in page:
                         for obj in page["Contents"]:
-                            # Extract just the filename (remove the prefix)
                             full_key = obj["Key"]
-                            # Remove the flow_id prefix to get just the filename
                             file_name = full_key[len(prefix) :]
-                            if file_name:  # Skip the directory marker if it exists
+                            if file_name:
                                 files.append(file_name)
 
         except Exception:
@@ -293,14 +268,9 @@ class S3StorageService(StorageService):
             return files
 
     async def delete_file(self, flow_id: str, file_name: str) -> None:
-        """Delete a file from S3.
+        """删除 `S3` 对象。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file to be deleted
-
-        Note:
-            S3 delete_object doesn't raise an error if the object doesn't exist
+        注意：`S3` 的 `delete_object` 对不存在对象不会报错。
         """
         key = self.build_full_path(flow_id, file_name)
 
@@ -313,17 +283,16 @@ class S3StorageService(StorageService):
             raise
 
     async def get_file_size(self, flow_id: str, file_name: str) -> int:
-        """Get the size of a file in S3.
+        """获取 `S3` 对象大小（字节数）。
 
-        Args:
-            flow_id: The flow/user identifier for namespacing
-            file_name: The name of the file
+        关键路径（三步）：
+        1) 调用 `head_object` 获取元信息
+        2) 读取 `ContentLength`
+        3) 返回大小
 
-        Returns:
-            int: Size of the file in bytes
-
-        Raises:
-            FileNotFoundError: If the file does not exist in S3
+        异常流：对象不存在时抛 `FileNotFoundError`。
+        性能瓶颈：`head_object` 请求延迟。
+        排障入口：日志关键字 `Error getting file size`。
         """
         key = self.build_full_path(flow_id, file_name)
 
@@ -333,7 +302,6 @@ class S3StorageService(StorageService):
                 file_size = response["ContentLength"]
 
         except Exception as e:
-            # Check if it's a 404 error
             if hasattr(e, "response") and e.response.get("Error", {}).get("Code") in ["NoSuchKey", "404"]:
                 await logger.awarning(f"File {file_name} not found in S3 flow {flow_id}")
                 msg = f"File not found: {file_name}"
@@ -345,9 +313,5 @@ class S3StorageService(StorageService):
             return file_size
 
     async def teardown(self) -> None:
-        """Perform any cleanup operations when the service is being torn down.
-
-        For S3, we don't need to do anything as aioboto3 handles cleanup
-        via context managers.
-        """
+        """服务销毁时的清理入口（`S3` 无额外动作）。"""
         logger.info("S3 storage service teardown complete")

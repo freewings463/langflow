@@ -1,9 +1,32 @@
+"""模块名称：Vertex AI Embeddings 组件适配
+
+本模块提供 Vertex AI 向量化能力的 Langflow 组件封装。
+使用场景：在检索增强或语义搜索中生成文本嵌入向量。
+主要功能包括：
+- 构建 `VertexAIEmbeddings` 实例并注入项目/区域/凭证
+- 支持服务账号文件或环境变量鉴权
+
+关键组件：
+- VertexAIEmbeddingsComponent：Vertex AI 嵌入组件入口
+
+设计背景：统一 Langflow Embeddings 接口，兼容 GCP 鉴权路径
+注意事项：`credentials` 为空时依赖环境变量或 gcloud CLI
+"""
+
 from lfx.base.models.model import LCModelComponent
 from lfx.field_typing import Embeddings
 from lfx.io import BoolInput, FileInput, FloatInput, IntInput, MessageTextInput, Output
 
 
 class VertexAIEmbeddingsComponent(LCModelComponent):
+    """Vertex AI 嵌入组件，封装鉴权与实例化。
+
+    契约：输入 `credentials`/`project`/`location` 等，输出 `Embeddings`
+    关键路径：1) 检查依赖 2) 处理凭证 3) 构建 `VertexAIEmbeddings`
+    副作用：可能进行网络初始化
+    异常流：缺少依赖抛 `ImportError`
+    排障入口：`ImportError` 提示安装 `langchain-google-vertexai`
+    """
     display_name = "Vertex AI Embeddings"
     description = "Generate embeddings using Google Cloud Vertex AI models."
     icon = "VertexAI"
@@ -37,6 +60,12 @@ class VertexAIEmbeddingsComponent(LCModelComponent):
     ]
 
     def build_embeddings(self) -> Embeddings:
+        """构建 Vertex AI Embeddings 实例。
+
+        契约：返回 `Embeddings`
+        副作用：可能进行网络初始化
+        异常流：缺少依赖抛 `ImportError`
+        """
         try:
             from langchain_google_vertexai import VertexAIEmbeddings
         except ImportError as e:
@@ -48,7 +77,7 @@ class VertexAIEmbeddingsComponent(LCModelComponent):
         if self.credentials:
             gcloud_credentials = service_account.Credentials.from_service_account_file(self.credentials)
         else:
-            # will fallback to environment variable or inferred from gcloud CLI
+            # 注意：将回退到环境变量或 gcloud CLI 认证上下文。
             gcloud_credentials = None
         return VertexAIEmbeddings(
             credentials=gcloud_credentials,

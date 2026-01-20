@@ -1,4 +1,8 @@
-"""Schema modules for lfx package."""
+"""Schema 模块入口。
+
+本模块集中导出常用 schema 类型，并通过惰性导入避免循环依赖。
+注意事项：访问未注册名称将抛出 `AttributeError`。
+"""
 
 __all__ = [
     "ComponentOutput",
@@ -26,7 +30,12 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    # Import to avoid circular dependencies
+    """按名称惰性导入 schema 类型。
+
+    契约：输入为类型名字符串；输出对应类型。
+    失败语义：未注册名称抛 `AttributeError`。
+    """
+    # 注意：避免循环导入
     if name == "Data":
         from .data import Data
 

@@ -1,4 +1,17 @@
-"""Transaction service implementations for lfx."""
+"""
+模块名称：services.transaction.service
+
+本模块提供事务服务的实现，目前包含独立模式下的无操作实现。
+主要功能包括：
+- 提供满足 TransactionServiceProtocol 的空实现
+- 在无事务系统时安全降级
+
+关键组件：
+- NoopTransactionService：无操作事务服务
+
+设计背景：lfx 可在无 Langflow 环境下运行，需要替代实现避免调用失败。
+注意事项：该实现不会记录或持久化任何事务数据。
+"""
 
 from __future__ import annotations
 
@@ -8,11 +21,13 @@ from lfx.services.interfaces import TransactionServiceProtocol
 
 
 class NoopTransactionService(TransactionServiceProtocol):
-    """No-operation transaction service for standalone lfx mode.
+    """独立模式下的无操作事务服务。
 
-    This service is used when lfx runs without a concrete transaction
-    service implementation (e.g., without langflow). All operations
-    are no-ops and transaction logging is disabled.
+    契约：
+    - 输入：事务相关参数（见 `log_transaction`）
+    - 输出：无
+    - 副作用：无
+    - 失败语义：不会抛出异常，始终静默返回
     """
 
     async def log_transaction(
@@ -25,11 +40,15 @@ class NoopTransactionService(TransactionServiceProtocol):
         target_id: str | None = None,
         error: str | None = None,
     ) -> None:
-        """No-op implementation of transaction logging.
+        """记录事务的空实现。
 
-        In standalone mode, transactions are not persisted.
+        关键路径：
+        1) 接收事务参数但不做持久化
+        2) 保持接口稳定，调用方无需分支判断
+
+        失败语义：不抛异常，不记录数据。
         """
 
     def is_enabled(self) -> bool:
-        """Transaction logging is disabled in noop mode."""
+        """返回事务记录是否启用（始终 False）。"""
         return False

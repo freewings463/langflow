@@ -15,13 +15,14 @@ HTTP_STATUS_OK = 200
 
 
 class OllamaEmbeddingsComponent(LCModelComponent):
+    # Ollama Embeddings 组件配置
     display_name: str = "Ollama Embeddings"
     description: str = "Generate embeddings using Ollama models."
     documentation = "https://python.langchain.com/docs/integrations/text_embedding/ollama"
     icon = "Ollama"
     name = "OllamaEmbeddings"
 
-    # Define constants for JSON keys
+    # JSON 字段常量
     JSON_MODELS_KEY = "models"
     JSON_NAME_KEY = "name"
     JSON_CAPABILITIES_KEY = "capabilities"
@@ -64,6 +65,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
     @property
     def headers(self) -> dict[str, str] | None:
         """Get the headers for the Ollama API."""
+        # 仅在提供 API Key 时附加鉴权头
         if self.api_key and self.api_key.strip():
             return {"Authorization": f"Bearer {self.api_key}"}
         return None
@@ -71,7 +73,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
     def build_embeddings(self) -> Embeddings:
         transformed_base_url = transform_localhost_url(self.base_url)
 
-        # Strip /v1 suffix if present
+        # 若 base_url 带 /v1，提示并自动移除
         if transformed_base_url and transformed_base_url.rstrip("/").endswith("/v1"):
             transformed_base_url = transformed_base_url.rstrip("/").removesuffix("/v1")
             logger.warning(
@@ -87,6 +89,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
         }
 
         if self.headers:
+            # 透传鉴权头到客户端
             llm_params["client_kwargs"] = {"headers": self.headers}
 
         try:
@@ -100,6 +103,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
         return output
 
     async def update_build_config(self, build_config: dict, field_value: Any, field_name: str | None = None):
+        # 根据配置变更动态更新表单
         if field_name in {"base_url", "model_name"} and not await self.is_valid_ollama_url(self.base_url):
             msg = "Ollama is not running on the provided base URL. Please start Ollama and try again."
             raise ValueError(msg)
@@ -135,7 +139,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
 
             async with httpx.AsyncClient() as client:
                 headers = self.headers
-                # Fetch available models
+                # 拉取可用模型列表
                 tags_response = await client.get(url=tags_url, headers=headers)
                 tags_response.raise_for_status()
                 models = tags_response.json()
@@ -143,7 +147,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
                     models = await models
                 await logger.adebug(f"Available models: {models}")
 
-                # Filter models that are embedding models
+                # 过滤出支持 embedding 的模型
                 model_ids = []
                 for model in models[self.JSON_MODELS_KEY]:
                     model_name = model[self.JSON_NAME_KEY]
@@ -169,6 +173,7 @@ class OllamaEmbeddingsComponent(LCModelComponent):
         return model_ids
 
     async def is_valid_ollama_url(self, url: str) -> bool:
+        # 校验 Ollama API 是否可用
         try:
             async with httpx.AsyncClient() as client:
                 url = transform_localhost_url(url)

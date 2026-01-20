@@ -1,3 +1,19 @@
+"""
+模块名称：Flow Tool 组件
+
+本模块提供将已有 Flow 封装为工具的组件实现，主要用于在代理场景中
+以工具形式调用其他 Flow。
+主要功能包括：
+- 查询可用 Flow 列表并获取 Flow 数据
+- 将 Flow 构建为可调用的 `FlowTool`
+
+关键组件：
+- `FlowToolComponent`：Flow 作为工具的组件封装
+
+设计背景：复用已有 Flow 逻辑并以工具方式对代理暴露。
+注意事项：组件已标记为 legacy，推荐使用替代组件。
+"""
+
 from typing import Any
 
 from typing_extensions import override
@@ -14,6 +30,11 @@ from lfx.schema.dotdict import dotdict
 
 
 class FlowToolComponent(LCToolComponent):
+    """将 Flow 封装为工具的组件。
+
+    契约：`build_tool` 返回 `FlowTool` 实例；必要参数缺失会抛 `ValueError`。
+    副作用：加载并解析 Flow 数据，更新 `self.status`。
+    """
     display_name = "Flow as Tool"
     description = "Construct a Tool from a function that runs the loaded Flow."
     field_order = ["flow_name", "name", "description", "return_direct"]
@@ -24,18 +45,12 @@ class FlowToolComponent(LCToolComponent):
     icon = "hammer"
 
     async def get_flow_names(self) -> list[str]:
+        """获取当前用户可访问的 Flow 名称列表。"""
         flow_datas = await self.alist_flows()
         return [flow_data.data["name"] for flow_data in flow_datas]
 
     async def get_flow(self, flow_name: str) -> Data | None:
-        """Retrieves a flow by its name.
-
-        Args:
-            flow_name (str): The name of the flow to retrieve.
-
-        Returns:
-            Optional[Text]: The flow record if found, None otherwise.
-        """
+        """按名称获取 Flow 数据记录。"""
         flow_datas = await self.alist_flows()
         for flow_data in flow_datas:
             if flow_data.data["name"] == flow_name:
@@ -44,6 +59,7 @@ class FlowToolComponent(LCToolComponent):
 
     @override
     async def update_build_config(self, build_config: dotdict, field_value: Any, field_name: str | None = None):
+        """根据字段变化刷新构建配置选项。"""
         if field_name == "flow_name":
             build_config["flow_name"]["options"] = self.get_flow_names()
 
@@ -76,6 +92,14 @@ class FlowToolComponent(LCToolComponent):
     ]
 
     async def build_tool(self) -> Tool:
+        """构建 FlowTool 实例并返回。
+
+        关键路径（三步）：
+        1) 校验 flow_name 并加载 Flow 数据
+        2) 由 Flow 构建 Graph 并提取输入
+        3) 组装 FlowTool 并更新状态描述
+        异常流：Flow 缺失或构建失败会抛 `ValueError`。
+        """
         FlowTool.model_rebuild()
         if "flow_name" not in self._attributes or not self._attributes["flow_name"]:
             msg = "Flow name is required"

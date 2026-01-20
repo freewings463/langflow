@@ -1,3 +1,13 @@
+"""生命周期可观测事件装饰器。
+
+本模块提供 `observable` 装饰器，用于在异步方法前后发布生命周期事件。
+主要功能包括：
+- 在调用前/后/异常时生成事件负载
+- 统一使用 `EventEncoder` 进行编码
+
+注意事项：需要调用方提供 `event_manager`，否则仅记录告警。
+"""
+
 import functools
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -12,48 +22,22 @@ encoder: EventEncoder = EventEncoder()
 
 
 def observable(observed_method: AsyncMethod) -> AsyncMethod:
-    """Decorator to make an async method observable by emitting lifecycle events.
+    """将异步方法包装为可观测事件。
 
-    Decorated classes are expected to implement specific methods to emit AGUI events:
-    - `before_callback_event(*args, **kwargs)`: Called before the decorated method executes.
-      It should return a dictionary representing the event payload.
-    - `after_callback_event(result, *args, **kwargs)`: Called after the decorated method
-      successfully completes. It should return a dictionary representing the event payload.
-      The `result` of the decorated method is passed as the first argument.
-    - `error_callback_event(exception, *args, **kwargs)`: (Optional) Called if the decorated
-      method raises an exception. It should return a dictionary representing the error event payload.
-      The `exception` is passed as the first argument.
+    约定：被装饰类可实现以下方法以生成事件负载：
+    - `before_callback_event(*args, **kwargs)`
+    - `after_callback_event(result, *args, **kwargs)`
+    - `error_callback_event(exception, *args, **kwargs)`（可选）
 
-    If these methods are implemented, the decorator will call them to generate event payloads.
-    If an implementation is missing, the corresponding event publishing will be skipped without error.
-
-    Payloads returned by these methods can include custom metrics by placing them
-    under the 'langflow' key within the 'raw_events' dictionary.
-
-    Example:
-        class MyClass:
-            display_name = "My Observable Class"
-
-            def before_callback_event(self, *args, **kwargs):
-                return {"event_name": "my_method_started", "data": {"input_args": args}}
-
-            async def my_method(self, event_manager: EventManager, data: str):
-                # ... method logic ...
-                return "processed_data"
-
-            def after_callback_event(self, result, *args, **kwargs):
-                return {"event_name": "my_method_completed", "data": {"output": result}}
-
-            def error_callback_event(self, exception, *args, **kwargs):
-                return {"event_name": "my_method_failed", "error": str(exception)}
-
-        @observable
-        async def my_observable_method(self, event_manager: EventManager, data: str):
-            # ... method logic ...
-            pass
+    若方法未实现，将跳过事件发布而不报错。
+    关键路径（三步）：
+    1) 检查 `event_manager` 可用性；
+    2) 执行前/后回调并编码负载；
+    3) 捕获异常并触发错误回调。
     """
 
     async def check_event_manager(self, **kwargs):
+        """校验事件管理器是否可用。"""
         if "event_manager" not in kwargs or kwargs["event_manager"] is None:
             await logger.awarning(
                 f"EventManager not available/provided, skipping observable event publishing "
@@ -63,25 +47,27 @@ def observable(observed_method: AsyncMethod) -> AsyncMethod:
         return True
 
     async def before_callback(self, *args, **kwargs):
+        """执行前置回调并编码事件负载。"""
         if not await check_event_manager(self, **kwargs):
             return
 
         if hasattr(self, "before_callback_event"):
             event_payload = self.before_callback_event(*args, **kwargs)
             event_payload = encoder.encode(event_payload)
-            # TODO: Publish event per request, would required context based queues
+            # TODO：按请求发布事件，需要基于上下文的队列
         else:
             await logger.awarning(
                 f"before_callback_event not implemented for {self.__class__.__name__}. Skipping event publishing."
             )
 
     async def after_callback(self, res: Any | None = None, *args, **kwargs):
+        """执行后置回调并编码事件负载。"""
         if not await check_event_manager(self, **kwargs):
             return
         if hasattr(self, "after_callback_event"):
             event_payload = self.after_callback_event(res, *args, **kwargs)
             event_payload = encoder.encode(event_payload)
-            # TODO: Publish event per request, would required context based queues
+            # TODO：按请求发布事件，需要基于上下文的队列
         else:
             await logger.awarning(
                 f"after_callback_event not implemented for {self.__class__.__name__}. Skipping event publishing."
@@ -89,6 +75,7 @@ def observable(observed_method: AsyncMethod) -> AsyncMethod:
 
     @functools.wraps(observed_method)
     async def wrapper(self, *args, **kwargs):
+        """包装异步方法并发布生命周期事件。"""
         await before_callback(self, *args, **kwargs)
         result = None
         try:
@@ -100,7 +87,7 @@ def observable(observed_method: AsyncMethod) -> AsyncMethod:
                 try:
                     event_payload = self.error_callback_event(e, *args, **kwargs)
                     event_payload = encoder.encode(event_payload)
-                    # TODO: Publish event per request, would required context based queues
+                    # TODO：按请求发布事件，需要基于上下文的队列
                 except Exception as callback_e:  # noqa: BLE001
                     await logger.aerror(
                         f"Exception during error_callback_event for {self.__class__.__name__}: {callback_e}"

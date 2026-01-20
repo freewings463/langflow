@@ -1,4 +1,20 @@
-"""Common utilities for CLI commands."""
+"""
+模块名称：CLI 公共工具库
+
+本模块提供 CLI 命令的通用能力，主要用于输入校验、图加载、日志捕获与依赖安装。主要功能包括：
+- 校验路径/URL 并加载 flow 或脚本
+- 执行图并捕获 stdout/stderr
+- 解析 PEP-723 依赖并按需安装
+- 处理 GitHub/ZIP 资源的下载与解压
+
+关键组件：
+- `load_graph_from_path` / `prepare_graph`：图加载与准备
+- `execute_graph_with_capture`：运行并捕获日志
+- `extract_script_dependencies` / `ensure_dependencies_installed`：脚本依赖处理
+
+设计背景：CLI 需要在无服务端环境中独立完成加载/校验/执行等流程。
+注意事项：部分函数有网络与安装副作用，调用方需在 CLI 场景显式提示用户。
+"""
 
 from __future__ import annotations
 
@@ -34,7 +50,7 @@ from lfx.schema.schema import InputValueRequest
 if TYPE_CHECKING:
     from types import ModuleType
 
-# Attempt to import tomllib (3.11+) else fall back to tomli
+# 注意：优先使用 Python 3.11+ 的 `tomllib`，否则回退到 `tomli`
 _toml_parser: ModuleType | None = None
 try:
     import tomllib as _toml_parser
@@ -46,25 +62,28 @@ except ModuleNotFoundError:
 
 MAX_PORT_NUMBER = 65535
 
-# Fixed namespace constant for deterministic UUID5 generation across runs
+# 注意：固定命名空间用于生成稳定的 UUIDv5
 _LANGFLOW_NAMESPACE_UUID = uuid.UUID("3c091057-e799-4e32-8ebc-27bc31e1108c")
 
-# Environment variable for GitHub token
+# 注意：GitHub Token 环境变量名
 _GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 
 
 def create_verbose_printer(*, verbose: bool):
-    """Create a verbose printer function that only prints in verbose mode.
+    """创建仅在 verbose 模式输出的打印函数。
 
-    Args:
-        verbose: Whether to print verbose output
-
-    Returns:
-        Function that prints to stderr only in verbose mode
+    契约：返回的函数仅在 `verbose=True` 时向 stderr 输出字符串。
+    失败语义：无。
+    副作用：可能向 stderr 写入文本。
     """
 
     def verbose_print(message: str) -> None:
-        """Print diagnostic messages to stderr only in verbose mode."""
+        """按 verbose 开关输出诊断信息。
+
+        契约：`verbose=True` 时输出到 stderr，否则静默。
+        失败语义：无。
+        副作用：写入 stderr。
+        """
         if verbose:
             typer.echo(message, file=sys.stderr)
 
@@ -72,7 +91,12 @@ def create_verbose_printer(*, verbose: bool):
 
 
 def is_port_in_use(port: int, host: str = "localhost") -> bool:
-    """Check if a port is already in use."""
+    """检查端口是否已被占用。
+
+    契约：返回 True 表示端口无法绑定，False 表示可用。
+    失败语义：仅捕获 `OSError`；其他异常上抛。
+    副作用：尝试绑定端口。
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind((host, port))
@@ -83,7 +107,12 @@ def is_port_in_use(port: int, host: str = "localhost") -> bool:
 
 
 def get_free_port(starting_port: int = 8000) -> int:
-    """Get a free port starting from the given port."""
+    """从指定起点寻找可用端口。
+
+    契约：从 `starting_port` 向上搜索，返回首个可绑定端口。
+    失败语义：当无可用端口时抛 `RuntimeError`。
+    副作用：反复尝试绑定端口。
+    """
     port = starting_port
     while port < MAX_PORT_NUMBER:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -98,15 +127,25 @@ def get_free_port(starting_port: int = 8000) -> int:
 
 
 def get_best_access_host(host: str) -> str:
-    """Get the best host address for external access."""
-    # Note: 0.0.0.0 and :: are intentionally checked as they bind to all interfaces
+    """将监听地址映射为更适合用户访问的主机名。
+
+    契约：`0.0.0.0`/`::`/空字符串统一映射为 `localhost`。
+    失败语义：无。
+    副作用：无。
+    """
+    # 注意：`0.0.0.0` 与 `::` 代表监听所有网卡，不适合作为访问地址展示
     if host in ("0.0.0.0", "::", ""):
         return "localhost"
     return host
 
 
 def get_api_key() -> str:
-    """Get the API key from environment variable."""
+    """读取 API Key。
+
+    契约：从环境变量 `LANGFLOW_API_KEY` 读取并返回字符串。
+    失败语义：缺失时抛 `ValueError`。
+    副作用：读取环境变量。
+    """
     api_key = os.getenv("LANGFLOW_API_KEY")
     if not api_key:
         msg = "LANGFLOW_API_KEY environment variable is not set"
@@ -115,13 +154,11 @@ def get_api_key() -> str:
 
 
 def is_url(path_or_url: str) -> bool:
-    """Check if the given string is a URL.
+    """判断字符串是否为 URL。
 
-    Args:
-        path_or_url: String to check
-
-    Returns:
-        True if it's a URL, False otherwise
+    契约：仅当解析后包含 scheme 与 netloc 时返回 True。
+    失败语义：解析异常时返回 False。
+    副作用：无。
     """
     try:
         result = urlparse(path_or_url)
@@ -131,17 +168,16 @@ def is_url(path_or_url: str) -> bool:
 
 
 def download_script_from_url(url: str, verbose_print) -> Path:
-    """Download a Python script from a URL and save it to a temporary file.
+    """下载脚本并保存到临时文件。
 
-    Args:
-        url: URL to download the script from
-        verbose_print: Function to print verbose messages
+    契约：仅下载文本脚本内容并写入临时 `.py` 文件，返回其路径。
+    失败语义：HTTP/网络/解析错误时抛 `typer.Exit(1)`。
+    副作用：发起网络请求并创建临时文件。
 
-    Returns:
-        Path to the temporary file containing the downloaded script
-
-    Raises:
-        typer.Exit: If download fails
+    关键路径（三步）：
+    1) 发起 HTTP 请求并校验状态码
+    2) 将响应文本写入临时 `.py`
+    3) 返回临时文件路径
     """
     verbose_print(f"Downloading script from URL: {url}")
 
@@ -150,17 +186,14 @@ def download_script_from_url(url: str, verbose_print) -> Path:
             response = client.get(url)
             response.raise_for_status()
 
-            # Check if the response is a Python script
             content_type = response.headers.get("content-type", "").lower()
             valid_types = {"application/x-python", "application/octet-stream"}
             if not (content_type.startswith("text/") or content_type in valid_types):
                 verbose_print(f"Warning: Unexpected content type: {content_type}")
 
-            # Create a temporary file with .py extension
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as temp_file:
                 temp_path = Path(temp_file.name)
 
-                # Write the content to the temporary file
                 script_content = response.text
                 temp_file.write(script_content)
 
@@ -182,19 +215,18 @@ def download_script_from_url(url: str, verbose_print) -> Path:
 
 
 def validate_script_path(script_path: Path | str, verbose_print) -> tuple[str, Path]:
-    """Validate script path or URL and return file extension and resolved path.
+    """校验脚本路径或 URL 并返回解析结果。
 
-    Args:
-        script_path: Path to the script file or URL
-        verbose_print: Function to print verbose messages
+    契约：支持本地 `.py/.json` 或 URL；返回 `(file_extension, resolved_path)`。
+    失败语义：路径非法或扩展名不支持时抛 `typer.Exit(1)`。
+    副作用：URL 情况下会下载并生成临时文件。
 
-    Returns:
-        Tuple of (file_extension, resolved_path)
-
-    Raises:
-        typer.Exit: If validation fails
+    关键路径（三步）：
+    1) 判断输入是否为 URL 并下载
+    2) 校验路径存在性与类型
+    3) 校验扩展名并返回结果
     """
-    # Handle URL case
+    # 注意：URL 会先下载再校验扩展名
     if isinstance(script_path, str) and is_url(script_path):
         resolved_path = download_script_from_url(script_path, verbose_print)
         file_extension = resolved_path.suffix.lower()
@@ -203,7 +235,6 @@ def validate_script_path(script_path: Path | str, verbose_print) -> tuple[str, P
             raise typer.Exit(1)
         return file_extension, resolved_path
 
-    # Handle local file case
     if isinstance(script_path, str):
         script_path = Path(script_path)
 
@@ -215,7 +246,6 @@ def validate_script_path(script_path: Path | str, verbose_print) -> tuple[str, P
         verbose_print(f"Error: '{script_path}' is not a file.")
         raise typer.Exit(1)
 
-    # Check file extension and validate
     file_extension = script_path.suffix.lower()
     if file_extension not in [".py", ".json"]:
         verbose_print(f"Error: '{script_path}' must be a .py or .json file.")
@@ -225,19 +255,18 @@ def validate_script_path(script_path: Path | str, verbose_print) -> tuple[str, P
 
 
 async def load_graph_from_path(script_path: Path, file_extension: str, verbose_print, *, verbose: bool = False):
-    """Load a graph from a Python script or JSON file.
+    """从脚本或 JSON 文件加载图对象。
 
-    Args:
-        script_path: Path to the script file
-        file_extension: File extension (.py or .json)
-        verbose_print: Function to print verbose messages
-        verbose: Whether verbose mode is enabled
+    契约：`.py` 通过脚本执行提取图，`.json` 直接加载 flow。
+    失败语义：解析/执行失败时抛 `typer.Exit(1)`。
+    副作用：执行脚本或读取文件，可能触发组件初始化。
 
-    Returns:
-        Loaded graph object
+    关键路径（三步）：
+    1) 根据扩展名选择脚本或 JSON 加载路径
+    2) 解析脚本并提取 `graph` 或加载 JSON
+    3) 返回图对象或抛出退出异常
 
-    Raises:
-        typer.Exit: If loading fails
+    排障入口：`verbose_print` 输出与异常消息。
     """
     file_type = "Python script" if file_extension == ".py" else "JSON flow"
     verbose_print(f"Analyzing {file_type}: {script_path}")
@@ -260,12 +289,11 @@ async def load_graph_from_path(script_path: Path, file_extension: str, verbose_p
 
             verbose_print("Loading graph...")
             graph = await load_graph_from_script(script_path)
-        else:  # .json
+        else:
             verbose_print("Loading JSON flow...")
             graph = load_flow_from_json(script_path, disable_logs=not verbose)
 
     except ValueError as e:
-        # Re-raise ValueError as typer.Exit to preserve the error message
         raise typer.Exit(1) from e
     except Exception as e:
         verbose_print(f"✗ Failed to load graph: {e}")
@@ -275,14 +303,11 @@ async def load_graph_from_path(script_path: Path, file_extension: str, verbose_p
 
 
 def prepare_graph(graph, verbose_print):
-    """Prepare a graph for execution.
+    """准备图对象以便执行。
 
-    Args:
-        graph: Graph object to prepare
-        verbose_print: Function to print verbose messages
-
-    Raises:
-        typer.Exit: If preparation fails
+    契约：调用 `graph.prepare()` 完成依赖解析与初始化。
+    失败语义：准备失败时抛 `typer.Exit(1)`。
+    副作用：修改图内部状态。
     """
     verbose_print("Preparing graph for execution...")
     try:
@@ -294,26 +319,22 @@ def prepare_graph(graph, verbose_print):
 
 
 async def execute_graph_with_capture(graph, input_value: str | None):
-    """Execute a graph and capture output.
+    """执行图并捕获 stdout/stderr。
 
-    Args:
-        graph: Graph object to execute
-        input_value: Input value to pass to the graph
+    契约：返回 `(results, captured_logs)`；`captured_logs` 由 stdout+stderr 拼接。
+    失败语义：执行异常会原样抛出，且异常消息可能包含捕获的 stderr。
+    副作用：临时替换 `sys.stdout` 与 `sys.stderr`。
 
-    Returns:
-        Tuple of (results, captured_logs)
-
-    Raises:
-        Exception: Re-raises any exception that occurs during graph execution
+    关键路径（三步）：
+    1) 组装 `InputValueRequest`
+    2) 重定向 stdout/stderr 并执行 `graph.async_start`
+    3) 恢复标准输出并返回结果与日志
     """
-    # Create input request
     inputs = InputValueRequest(input_value=input_value) if input_value else None
 
-    # Capture output during execution
     captured_stdout = StringIO()
     captured_stderr = StringIO()
 
-    # Redirect stdout and stderr during graph execution
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 
@@ -322,50 +343,48 @@ async def execute_graph_with_capture(graph, input_value: str | None):
         sys.stderr = captured_stderr
         results = [result async for result in graph.async_start(inputs)]
     except Exception as exc:
-        # Capture any error output that was written to stderr
         error_output = captured_stderr.getvalue()
         if error_output:
-            # Add error output to the exception for better debugging
+            # 注意：将 stderr 内容拼接到异常信息中，便于 CLI 排障
             exc.args = (f"{exc.args[0] if exc.args else str(exc)}\n\nCaptured stderr:\n{error_output}",)
         raise
     finally:
-        # Restore original stdout/stderr
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 
-    # Get captured logs
     captured_logs = captured_stdout.getvalue() + captured_stderr.getvalue()
 
     return results, captured_logs
 
 
 def extract_result_data(results, captured_logs: str) -> dict:
-    """Extract structured result data from graph execution results.
+    """从执行结果中抽取结构化输出。
 
-    Args:
-        results: Graph execution results
-        captured_logs: Captured output logs
-
-    Returns:
-        Structured result data dictionary
+    契约：返回字典包含 `logs` 字段与结构化结果。
+    失败语义：依赖 `extract_structured_result` 的返回；此函数不抛错。
+    副作用：无。
     """
     result_data = extract_structured_result(results)
     result_data["logs"] = captured_logs
     return result_data
 
 
-# --- Dependency helpers ------------------------------------------------------------------
+# --- 依赖解析工具 --------------------------------------------------------------------------
 
 
 def _parse_pep723_block(script_path: Path, verbose_print) -> dict | None:
-    """Extract the TOML table contained in a PEP-723 inline metadata block.
+    """解析 PEP-723 内联依赖块。
 
-    Args:
-        script_path: Path to the Python script to inspect.
-        verbose_print: Diagnostic printer.
+    契约：若存在 `# /// script` 块则解析并返回 TOML 字典，否则返回 None。
+    失败语义：读取或解析失败时返回 None，并输出诊断信息。
+    副作用：读取脚本文本。
 
-    Returns:
-        Parsed TOML dict if a block is found and successfully parsed, otherwise None.
+    关键路径（三步）：
+    1) 读取脚本并定位 `# /// script` 块
+    2) 清理注释前缀并组装 TOML 文本
+    3) 调用解析器返回字典
+
+    排障入口：`verbose_print` 输出的解析失败信息。
     """
     if _toml_parser is None:
         verbose_print("tomllib/tomli not available - cannot parse inline dependencies")
@@ -377,14 +396,12 @@ def _parse_pep723_block(script_path: Path, verbose_print) -> dict | None:
         verbose_print(f"Failed reading script for dependency parsing: {exc}")
         return None
 
-    # Locate `# /// script` and closing `# ///` markers.
     try:
         start_idx = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith("# /// script")) + 1
         end_idx = next(i for i, ln in enumerate(lines[start_idx:], start=start_idx) if ln.lstrip().startswith("# ///"))
     except StopIteration:
-        return None  # No valid block
+        return None
 
-    # Remove leading comment markers and excess whitespace
     block_lines: list[str] = []
     for raw_line in lines[start_idx:end_idx]:
         stripped_line = raw_line.lstrip()
@@ -404,10 +421,11 @@ def _parse_pep723_block(script_path: Path, verbose_print) -> dict | None:
 
 
 def extract_script_dependencies(script_path: Path, verbose_print) -> list[str]:
-    """Return dependency strings declared via PEP-723 inline metadata.
+    """读取脚本的 PEP-723 依赖声明。
 
-    Only `.py` files are supported for now. Returns an empty list if the file has
-    no metadata block or could not be parsed.
+    契约：仅支持 `.py` 文件；无元数据或解析失败时返回空列表。
+    失败语义：解析异常被视为无依赖，不抛错。
+    副作用：读取脚本文本。
     """
     if script_path.suffix != ".py":
         return []
@@ -417,38 +435,42 @@ def extract_script_dependencies(script_path: Path, verbose_print) -> list[str]:
         return []
 
     deps = parsed.get("dependencies", [])
-    # Ensure list[str]
     if isinstance(deps, list):
         return [str(d).strip() for d in deps if str(d).strip()]
     return []
 
 
 def _needs_install(requirement: str) -> bool:
-    """Heuristic: check if *some* distribution that satisfies the requirement is present.
+    """判断依赖是否可能缺失（启发式）。
 
-    Exact version resolution is delegated to the installer; here we do a best-effort
-    importlib.metadata lookup for the top-level name before the first comparison op.
+    契约：尽力通过 `importlib.metadata` 判断版本是否满足；无法判断时返回 True。
+    失败语义：解析失败或版本无法比较时视为缺失。
+    副作用：读取已安装包元数据。
+
+    关键路径（三步）：
+    1) 解析 PEP 508 依赖字符串
+    2) 查询已安装版本并进行比对
+    3) 返回是否需要安装
     """
-    from packaging.requirements import Requirement  # locally imported to avoid hard dep if unused
+    # 注意：延迟导入以避免未使用时引入额外依赖
+    from packaging.requirements import Requirement
 
     try:
         req = Requirement(requirement)
     except Exception:  # noqa: BLE001
-        return True  # If we cannot parse it, assume missing so installer handles it
+        return True
 
     try:
         dist_version = importlib_metadata.version(req.name)
     except importlib_metadata.PackageNotFoundError:
         return True
 
-    # If specifier is empty, we already have it.
     if not req.specifier:
         return False
 
     try:
         from packaging.version import InvalidVersion, Version
     except ImportError:
-        # If packaging is missing, we cannot compare - treat as missing.
         return True
 
     try:
@@ -461,11 +483,16 @@ def _needs_install(requirement: str) -> bool:
 
 
 def ensure_dependencies_installed(dependencies: list[str], verbose_print) -> None:
-    """Install missing dependencies using uv (preferred) or pip.
+    """安装缺失的脚本依赖（优先 uv，其次 pip）。
 
-    Args:
-        dependencies: List of requirement strings (PEP 508 style).
-        verbose_print: Diagnostic printer.
+    契约：仅对缺失依赖执行安装；若全部满足则直接返回。
+    失败语义：安装失败抛 `typer.Exit(1)`。
+    副作用：执行子进程安装依赖。
+
+    关键路径（三步）：
+    1) 过滤已安装依赖
+    2) 选择 uv 或 pip 作为安装器
+    3) 执行安装并处理失败
     """
     if not dependencies:
         return
@@ -480,7 +507,6 @@ def ensure_dependencies_installed(dependencies: list[str], verbose_print) -> Non
         installer_cmd = ["uv", "pip", "install", "--quiet", *missing]
         tool_name = "uv"
     else:
-        # Fall back to current interpreter's pip
         installer_cmd = [sys.executable, "-m", "pip", "install", "--quiet", *missing]
         tool_name = "pip"
 
@@ -494,34 +520,18 @@ def ensure_dependencies_installed(dependencies: list[str], verbose_print) -> Non
 
 
 def flow_id_from_path(file_path: Path, root_dir: Path) -> str:
-    """Generate a deterministic UUID-5 based flow id from *file_path*.
+    """从相对路径生成稳定的 UUIDv5。
 
-    The function uses a fixed namespace UUID and the POSIX-style relative path
-    (relative to *root_dir*) as the *name* when calling :pyfunc:`uuid.uuid5`.
-    This guarantees:
-
-    1.  The same folder deployed again produces identical flow IDs.
-    2.  IDs remain stable even if the absolute location of the folder changes
-        (only the relative path is hashed).
-    3.  Practically collision-free identifiers without maintaining external
-        state.
-
-    Args:
-        file_path: Path of the JSON flow file.
-        root_dir: Root directory from which *file_path* should be considered
-            relative.  Typically the folder passed to the deploy command.
-
-    Returns:
-    -------
-    str
-        Canonical UUID string (36 chars, including hyphens).
+    契约：使用固定命名空间与 `file_path` 相对 `root_dir` 的 POSIX 路径生成 ID。
+    失败语义：`file_path` 不在 `root_dir` 下时 `relative_to` 会抛 `ValueError`。
+    副作用：无。
     """
     relative = file_path.relative_to(root_dir).as_posix()
     return str(uuid.uuid5(_LANGFLOW_NAMESPACE_UUID, relative))
 
 
 # ---------------------------------------------------------------------------
-# GitHub / ZIP repository helpers (synchronous equivalents of initial_setup)
+# GitHub / ZIP 仓库工具（initial_setup 的同步版本）
 # ---------------------------------------------------------------------------
 
 _GITHUB_RE_REPO = re.compile(r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)(?:\.git)?/?$")
@@ -531,6 +541,12 @@ _GITHUB_RE_COMMIT = re.compile(r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-
 
 
 def _github_headers() -> dict[str, str]:
+    """构造 GitHub API 请求头。
+
+    契约：若存在 `GITHUB_TOKEN` 则返回包含 Authorization 的头，否则返回空字典。
+    失败语义：无。
+    副作用：读取环境变量。
+    """
     token = os.getenv(_GITHUB_TOKEN_ENV)
     if token:
         return {"Authorization": f"token {token}"}
@@ -538,13 +554,19 @@ def _github_headers() -> dict[str, str]:
 
 
 def detect_github_url_sync(url: str, *, timeout: float = 15.0) -> str:
-    """Convert various GitHub URLs into a direct `.zip` download link (sync).
+    """将 GitHub URL 归一化为可下载的 `.zip` 链接（同步）。
 
-    Mirrors the async implementation in *initial_setup.setup.detect_github_url*.
+    契约：支持仓库/分支/Tag/Commit 链接，返回对应的 ZIP 下载 URL。
+    失败语义：GitHub API 请求失败会抛出异常。
+    副作用：可能调用 GitHub API 获取默认分支。
+
+    关键路径（三步）：
+    1) 匹配 URL 类型（仓库/分支/Tag/Commit）
+    2) 必要时调用 GitHub API 获取默认分支
+    3) 生成并返回 ZIP 下载链接
     """
     if match := _GITHUB_RE_REPO.match(url):
         owner, repo = match.groups()
-        # Determine default branch via GitHub API
         with httpx.Client(timeout=timeout, follow_redirects=True, headers=_github_headers()) as client:
             resp = client.get(f"https://api.github.com/repos/{owner}/{repo}")
             resp.raise_for_status()
@@ -565,14 +587,20 @@ def detect_github_url_sync(url: str, *, timeout: float = 15.0) -> str:
         owner, repo, commit = match.groups()
         return f"https://github.com/{owner}/{repo}/archive/{commit}.zip"
 
-    # Not a recognized GitHub URL; assume it's already a direct link
     return url
 
 
 def download_and_extract_repo(url: str, verbose_print, *, timeout: float = 60.0) -> Path:
-    """Download a ZIP archive from *url* and extract into a temp directory.
+    """下载 ZIP 并解压到临时目录。
 
-    Returns the **root directory** containing the extracted files.
+    契约：返回包含解压文件的根目录路径。
+    失败语义：HTTP 或解压错误会抛异常。
+    副作用：网络请求、写入临时目录、修改 `sys.path`。
+
+    关键路径（三步）：
+    1) 将 URL 归一化为 ZIP 下载地址
+    2) 下载并解压到临时目录
+    3) 调整 `sys.path` 并返回根目录
     """
     verbose_print(f"Downloading repository/ZIP from {url}")
 
@@ -589,18 +617,16 @@ def download_and_extract_repo(url: str, verbose_print, *, timeout: float = 60.0)
 
         verbose_print(f"✓ Repository extracted to {tmp_dir.name}")
 
-        # Most GitHub archives have a single top-level folder; use it if present
         root_path = Path(tmp_dir.name)
         sub_entries = list(root_path.iterdir())
         if len(sub_entries) == 1 and sub_entries[0].is_dir():
             root_path = sub_entries[0]
 
-        # Ensure root on sys.path for custom components
+        # 注意：自定义组件加载需要根目录在 sys.path
         if str(root_path) not in sys.path:
             sys.path.insert(0, str(root_path))
 
-        # Attach TemporaryDirectory to path object so caller can keep reference
-        # and prevent premature cleanup. We set attribute _tmp_dir.
+        # 注意：将 TemporaryDirectory 绑定到返回对象，防止提前清理
         root_path._tmp_dir = tmp_dir  # type: ignore[attr-defined]  # noqa: SLF001
 
     except httpx.HTTPStatusError as e:
@@ -614,24 +640,23 @@ def download_and_extract_repo(url: str, verbose_print, *, timeout: float = 60.0)
 
 
 def extract_script_docstring(script_path: Path) -> str | None:
-    """Extract the module-level docstring from a Python script.
+    """提取脚本的模块级 docstring。
 
-    Args:
-        script_path: Path to the Python script file
+    契约：返回首个模块级 docstring 文本，未找到则返回 None。
+    失败语义：读取/解析失败时返回 None。
+    副作用：读取文件并解析 AST。
 
-    Returns:
-        The docstring text if found, None otherwise
+    关键路径（三步）：
+    1) 读取脚本文本并解析 AST
+    2) 判断首个语句是否为 docstring
+    3) 返回清理后的文本或 None
     """
     try:
-        # Read the file content
         with script_path.open(encoding="utf-8") as f:
             content = f.read()
 
-        # Parse the AST
         tree = ast.parse(content)
 
-        # Check if the first statement is a docstring
-        # A docstring is a string literal that appears as the first statement
         if (
             tree.body
             and isinstance(tree.body[0], ast.Expr)
@@ -639,12 +664,9 @@ def extract_script_docstring(script_path: Path) -> str | None:
             and isinstance(tree.body[0].value.value, str)
         ):
             docstring = tree.body[0].value.value
-            # Clean up the docstring by removing extra whitespace
             return docstring.strip()
 
     except (OSError, SyntaxError, UnicodeDecodeError):
-        # If we can't read or parse the file, just return None
-        # Don't raise an error as this is optional functionality
         pass
 
     return None

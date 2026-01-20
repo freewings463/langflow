@@ -1,3 +1,18 @@
+"""
+模块名称：Amazon Bedrock 向量嵌入组件
+
+本模块提供基于 Bedrock Embeddings 的组件封装，用于生成文本向量。主要功能包括：
+- 组装 Bedrock Embeddings 客户端与认证参数
+- 暴露标准化的 `Embeddings` 输出
+
+关键组件：
+- `AmazonBedrockEmbeddingsComponent`
+
+设计背景：不同向量嵌入模型需统一接入 LFX 组件体系。
+使用场景：在向量化或检索流程中生成文本向量。
+注意事项：依赖 `langchain_aws` 与 `boto3`。
+"""
+
 from lfx.base.models.aws_constants import AWS_EMBEDDING_MODEL_IDS, AWS_REGIONS
 from lfx.base.models.model import LCModelComponent
 from lfx.field_typing import Embeddings
@@ -6,6 +21,17 @@ from lfx.io import DropdownInput, MessageTextInput, Output
 
 
 class AmazonBedrockEmbeddingsComponent(LCModelComponent):
+    """Bedrock Embeddings 组件
+
+    契约：输入模型 ID、AWS 凭证与区域；输出 `Embeddings`；
+    副作用：创建 boto3 客户端；失败语义：依赖缺失抛 `ImportError`。
+    关键路径：1) 创建 boto3 Session 2) 构建 bedrock-runtime 客户端 3) 返回 `BedrockEmbeddings`。
+    决策：优先使用显式凭证，其次使用 profile，最后使用默认配置。
+    问题：用户凭证来源多样且需兼容。
+    方案：按优先级选择 Session 构建方式。
+    代价：错误配置可能导致隐式使用默认凭证。
+    重评：当统一凭证管理或强制配置来源时。
+    """
     display_name: str = "Amazon Bedrock Embeddings"
     description: str = "Generate embeddings using Amazon Bedrock models."
     icon = "Amazon"
@@ -72,6 +98,17 @@ class AmazonBedrockEmbeddingsComponent(LCModelComponent):
     ]
 
     def build_embeddings(self) -> Embeddings:
+        """构建 Bedrock Embeddings 实例
+
+        契约：读取组件输入并返回 `BedrockEmbeddings`；副作用：创建客户端连接；
+        失败语义：依赖缺失抛 `ImportError`，boto3 客户端创建失败时抛异常。
+        关键路径（三步）：1) 解析依赖 2) 生成 Session 与客户端 3) 返回嵌入对象。
+        决策：将 `endpoint_url` 与 `region_name` 直接透传给客户端。
+        问题：部分环境需要自定义终端或区域。
+        方案：通过输入字段显式配置。
+        代价：错误配置会导致请求失败。
+        重评：当统一端点配置或自动发现区域时。
+        """
         try:
             from langchain_aws import BedrockEmbeddings
         except ImportError as e:

@@ -1,3 +1,18 @@
+"""模块名称：YouTube 视频详情组件
+
+本模块提供 YouTube 视频详情与统计信息的获取能力，输出为 DataFrame。
+使用场景：根据视频 URL 拉取标题、描述、统计、内容细节等信息。
+主要功能包括：
+- 解析视频 ID 并调用 videos API
+- 可选附加统计、标签与缩略图
+
+关键组件：
+- YouTubeVideoDetailsComponent：视频详情组件入口
+
+设计背景：统一视频详情字段结构，便于分析与展示
+注意事项：视频不存在时返回包含 `error` 的 DataFrame
+"""
+
 from contextlib import contextmanager
 
 import googleapiclient
@@ -12,7 +27,13 @@ from lfx.template.field.base import Output
 
 
 class YouTubeVideoDetailsComponent(Component):
-    """A component that retrieves detailed information about YouTube videos."""
+    """YouTube 视频详情组件。
+
+    契约：输入视频 URL 与 API Key，输出视频详情 DataFrame
+    关键路径：1) 解析视频 ID 2) 拉取视频详情 3) 组装 DataFrame
+    副作用：调用 YouTube Data API，消耗配额
+    异常流：API 异常返回含 `error` 的 DataFrame
+    """
 
     display_name: str = "YouTube Video Details"
     description: str = "Retrieves detailed information and statistics about YouTube videos."
@@ -70,7 +91,7 @@ class YouTubeVideoDetailsComponent(Component):
 
     @contextmanager
     def youtube_client(self):
-        """Context manager for YouTube API client."""
+        """YouTube API 客户端上下文管理器。"""
         client = build("youtube", "v3", developerKey=self.api_key)
         try:
             yield client
@@ -78,7 +99,7 @@ class YouTubeVideoDetailsComponent(Component):
             client.close()
 
     def _extract_video_id(self, video_url: str) -> str:
-        """Extracts the video ID from a YouTube URL."""
+        """从视频 URL 中提取视频 ID。"""
         import re
 
         patterns = [
@@ -94,7 +115,7 @@ class YouTubeVideoDetailsComponent(Component):
         return video_url.strip()
 
     def _format_duration(self, duration: str) -> str:
-        """Formats the ISO 8601 duration to a readable format."""
+        """将 ISO 8601 时长格式化为可读文本。"""
         import re
 
         hours = 0
@@ -117,20 +138,25 @@ class YouTubeVideoDetailsComponent(Component):
         return f"{minutes:02d}:{seconds:02d}"
 
     def get_video_details(self) -> DataFrame:
-        """Retrieves detailed information about a YouTube video and returns as DataFrame."""
+        """获取视频详情并返回 DataFrame。
+
+        关键路径（三步）：
+        1) 解析视频 ID
+        2) 拉取视频详情并拼装字段
+        3) 按配置重排输出列
+
+        异常流：API 异常返回含 `error` 的 DataFrame
+        """
         try:
             with self.youtube_client() as youtube:
-                # Extract video ID
                 video_id = self._extract_video_id(self.video_url)
 
-                # Prepare parts for the API request
                 parts = ["snippet"]
                 if self.include_statistics:
                     parts.append("statistics")
                 if self.include_content_details:
                     parts.append("contentDetails")
 
-                # Get video information
                 video_response = youtube.videos().list(part=",".join(parts), id=video_id).execute()
 
                 if not video_response["items"]:
@@ -139,7 +165,7 @@ class YouTubeVideoDetailsComponent(Component):
                 video_info = video_response["items"][0]
                 snippet = video_info["snippet"]
 
-                # Build video data dictionary
+                # 注意：基础字段保持单行结构，便于合并统计与内容细节。
                 video_data = {
                     "video_id": [video_id],
                     "url": [f"https://www.youtube.com/watch?v={video_id}"],
@@ -152,19 +178,16 @@ class YouTubeVideoDetailsComponent(Component):
                     "live_broadcast_content": [snippet.get("liveBroadcastContent", "none")],
                 }
 
-                # Add thumbnails if requested
                 if self.include_thumbnails:
                     for size, thumb in snippet["thumbnails"].items():
                         video_data[f"thumbnail_{size}_url"] = [thumb["url"]]
                         video_data[f"thumbnail_{size}_width"] = [thumb.get("width", 0)]
                         video_data[f"thumbnail_{size}_height"] = [thumb.get("height", 0)]
 
-                # Add tags if requested
                 if self.include_tags and "tags" in snippet:
                     video_data["tags"] = [", ".join(snippet["tags"])]
                     video_data["tags_count"] = [len(snippet["tags"])]
 
-                # Add statistics if requested
                 if self.include_statistics and "statistics" in video_info:
                     stats = video_info["statistics"]
                     video_data.update(
@@ -176,7 +199,6 @@ class YouTubeVideoDetailsComponent(Component):
                         }
                     )
 
-                # Add content details if requested
                 if self.include_content_details and "contentDetails" in video_info:
                     content_details = video_info["contentDetails"]
                     video_data.update(
@@ -191,15 +213,12 @@ class YouTubeVideoDetailsComponent(Component):
                         }
                     )
 
-                    # Add content rating if available
                     if "contentRating" in content_details:
                         rating_info = content_details["contentRating"]
                         video_data["content_rating"] = [str(rating_info)]
 
-                # Create DataFrame with organized columns
                 video_df = pd.DataFrame(video_data)
 
-                # Organize columns in logical groups
                 basic_cols = [
                     "video_id",
                     "title",
@@ -229,7 +248,6 @@ class YouTubeVideoDetailsComponent(Component):
 
                 thumb_cols = [col for col in video_df.columns if col.startswith("thumbnail_")]
 
-                # Reorder columns based on what's included
                 ordered_cols = basic_cols.copy()
 
                 if self.include_statistics:
@@ -244,7 +262,6 @@ class YouTubeVideoDetailsComponent(Component):
                 if self.include_thumbnails:
                     ordered_cols.extend(sorted(thumb_cols))
 
-                # Add any remaining columns
                 remaining_cols = [col for col in video_df.columns if col not in ordered_cols]
                 ordered_cols.extend(remaining_cols)
 

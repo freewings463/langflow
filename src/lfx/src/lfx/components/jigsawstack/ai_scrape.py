@@ -1,3 +1,19 @@
+"""
+模块名称：JigsawStack AI Scraper 组件
+
+本模块提供面向 Langflow 的网页结构化抓取组件，封装 JigsawStack `web.ai_scrape`。
+主要功能包括：
+- 参数校验：`url`/`html` 二选一，`element_prompts` 最多 5 条
+- 请求组装：仅发送非空字段，避免 SDK 处理空值
+- 失败语义：API `success=False` 返回失败结果并设置 `self.status`
+
+关键组件：
+- JigsawStackAIScraperComponent：AI Scraper 组件入口
+
+设计背景：统一 Langflow 组件形态并对接 JigsawStack SDK。
+注意事项：依赖 `jigsawstack>=0.2.7`，需提供有效 `api_key`。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import MessageTextInput, Output, SecretStrInput
 from lfx.schema.data import Data
@@ -6,6 +22,13 @@ MAX_ELEMENT_PROMPTS = 5
 
 
 class JigsawStackAIScraperComponent(Component):
+    """JigsawStack AI Scraper 组件封装。
+
+    契约：输入由 `inputs` 定义（`url`/`html`/`element_prompts`），输出 `Data`。
+    副作用：触发外部网络请求并更新 `self.status`。
+    失败语义：参数缺失抛 `ValueError`；SDK 缺失抛 `ImportError`；SDK 异常返回失败 `Data`。
+    """
+
     display_name = "AI Scraper"
     description = "Scrape any website instantly and get consistent structured data \
         in seconds without writing any css selector code"
@@ -55,6 +78,20 @@ class JigsawStackAIScraperComponent(Component):
     ]
 
     def scrape(self) -> Data:
+        """执行 AI Scrape 并返回结构化结果。
+
+        契约：输入使用 `url`/`html`/`element_prompts`，输出为 `Data`。
+        副作用：触发网络请求并写入 `self.status`。
+        失败语义：参数缺失抛 `ValueError`；SDK 异常返回失败 `Data`。
+
+        关键路径（三步）：
+        1) 校验并规范化 `url`/`html`/`element_prompts`；
+        2) 组装请求并调用 `client.web.ai_scrape`；
+        3) 校验响应 `success` 并更新 `self.status`。
+
+        异常流：`JigsawStackError` -> 返回失败 `Data`；输入缺失 -> 抛 `ValueError`。
+        排障入口：`self.status` 文本。
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -66,7 +103,7 @@ class JigsawStackAIScraperComponent(Component):
         try:
             client = JigsawStack(api_key=self.api_key)
 
-            # Build request object
+            # 实现：仅在字段非空时填充请求参数，避免 SDK 处理空值
             scrape_params: dict = {}
             if self.url:
                 scrape_params["url"] = self.url
@@ -79,7 +116,7 @@ class JigsawStackAIScraperComponent(Component):
                 url_or_html_error = "Either 'url' or 'html' must be provided for scraping"
                 raise ValueError(url_or_html_error)
 
-            # Process element_prompts with proper type handling
+            # 注意：`element_prompts` 支持字符串或列表，且最多 5 条
             element_prompts_list: list[str] = []
             if self.element_prompts:
                 element_prompts_value: str | list[str] = self.element_prompts
@@ -92,7 +129,7 @@ class JigsawStackAIScraperComponent(Component):
                 elif isinstance(element_prompts_value, list):
                     element_prompts_list = element_prompts_value
                 else:
-                    # Fallback for other types
+                    # 实现：兜底将未知类型按字符串拆分
                     element_prompts_list = str(element_prompts_value).split(",")
 
                 if len(element_prompts_list) > MAX_ELEMENT_PROMPTS:
@@ -107,7 +144,7 @@ class JigsawStackAIScraperComponent(Component):
             if self.root_element_selector:
                 scrape_params["root_element_selector"] = self.root_element_selector
 
-            # Call web scraping
+            # 实现：调用 JigsawStack AI Scrape
             response = client.web.ai_scrape(scrape_params)
 
             if not response.get("success", False):

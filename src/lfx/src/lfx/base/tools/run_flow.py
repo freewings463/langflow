@@ -1,6 +1,20 @@
+"""
+模块名称：运行 Flow 工具组件
+
+本模块提供 `RunFlowBaseComponent`，用于选择 `Flow`、同步输入输出、缓存图结构，
+并将 `Flow` 作为工具暴露给 `agent`。主要功能包括：
+- 获取并缓存 `Flow` 图与元信息
+- 根据图动态生成输入/输出字段
+- 执行 `Flow` 并解析输出
+
+关键组件：`RunFlowBaseComponent`、`_flow_cache_call`、`_format_flow_outputs`
+设计背景：运行 `Flow` 需要统一的输入映射与缓存策略
+注意事项：缓存依赖用户 ID 与 `flow_id`；动态输出方法需与 `output` 名一致
+"""
+
 from collections import Counter
 from datetime import datetime
-from types import MethodType  # near the imports
+from types import MethodType  # 注意：用于动态绑定输出解析方法
 from typing import TYPE_CHECKING, Any
 
 from langflow.helpers.flow import get_flow_by_id_or_name
@@ -12,7 +26,7 @@ from lfx.field_typing import Tool
 from lfx.graph.graph.base import Graph
 from lfx.graph.vertex.base import Vertex
 
-# TODO: switch to lfx
+# TODO：切换到 `lfx` 统一实现
 from lfx.helpers import get_flow_inputs, run_flow
 from lfx.inputs.inputs import BoolInput, DropdownInput, InputTypes, MessageTextInput, StrInput
 from lfx.log.logger import logger
@@ -29,19 +43,21 @@ if TYPE_CHECKING:
 
 
 class RunFlowBaseComponent(Component):
+    """`Flow` 运行基础组件，负责输入输出映射、缓存与工具化。
+    契约：输入为 `flow` 选择与 `tweaks`；输出为动态生成的 `Flow` 输出或工具。
+    关键路径：获取图 → 同步输入/输出 → 执行 `flow` → 解析结果。
+    决策：缓存共享图以减少重复构建。问题：频繁加载图成本高；方案：共享缓存；代价：缓存失效处理复杂；重评：当图结构变更频繁时。
+    """
+
     def __init__(self, *args, **kwargs):
         self._flow_output_methods: set[str] = set()
         super().__init__(*args, **kwargs)
         self.add_tool_output = True
         ################################################################
-        # cache the selected flow's graph in the shared component cache
-        # if cache_flow is enabled.
+        # 注意：当 `cache_flow` 启用时，将选中 `Flow` 图缓存到共享缓存中。
         ################################################################
         self._shared_component_cache = get_shared_component_cache_service()
-        # add all the flow cache related methods to the dispatcher.
-        # these are used internally among the cache related methods.
-        # the _flow_cache_call method is meant to be user-facing
-        # for cache operations as it handles validation.
+        # 注意：注册缓存相关方法；`_flow_cache_call` 提供统一校验入口。
         self._cache_flow_dispatcher: dict[str, Callable[..., Any]] = {
             "get": self._get_cached_flow,
             "set": self._set_cached_flow,
@@ -49,10 +65,9 @@ class RunFlowBaseComponent(Component):
             "_build_key": self._build_flow_cache_key,
             "_build_graph": self._build_graph_from_dict,
         }
-        # save the run's outputs to avoid re-executing
-        # the flow if it has multiple outputs.
+        # 注意：缓存最近一次运行结果，避免多输出重复执行。
         self._last_run_outputs: list[Data] | None = None
-        # save the updated_at of the user's selected flow
+        # 注意：记录选中 `Flow` 的 `updated_at`，用于缓存一致性检查。
         self._cached_flow_updated_at: str | None = None
 
     _base_inputs: list[InputTypes] = [
@@ -72,7 +87,7 @@ class RunFlowBaseComponent(Component):
             info="The ID of the flow to run.",
             value=None,
             show=False,
-            override_skip=True,  # persist to runtime
+            override_skip=True,  # 注意：运行期需要保留该字段
         ),
         MessageTextInput(
             name="session_id",
@@ -80,10 +95,9 @@ class RunFlowBaseComponent(Component):
             info="The session ID to run the flow in.",
             advanced=True,
         ),
-        # bool dropdown to select if the flow should be cached
-        # Note: the user's selected flow is automatically updated when
-        # when the flow_name_selected dropdown is refreshed.
-        # TODO: find a more explicit way to update the cached flow.
+        # 注意：是否缓存 `Flow` 的开关。
+        # 说明：`flow_name_selected` 刷新会自动更新选中 `Flow`。
+        # TODO：提供更显式的缓存更新方式。
         BoolInput(
             name="cache_flow",
             display_name="Cache Flow",
@@ -96,12 +110,17 @@ class RunFlowBaseComponent(Component):
     default_keys = ["code", "_type", "flow_name_selected", "flow_id_selected", "session_id", "cache_flow"]
     FLOW_INPUTS: list[dotdict] = []
     flow_tweak_data: dict = {}
-    IOPUT_SEP = "~"  # separator for joining a vertex id and input/output name to form a unique input/output name
+    IOPUT_SEP = "~"  # 注意：连接 `vertex_id` 与输入/输出名的分隔符
 
     ################################################################
-    # set and register the selected flow's output methods
+    # 设置并注册选中 `Flow` 的输出方法
     ################################################################
-    def map_outputs(self) -> None:  # Note: overrides the base map_outputs method
+    def map_outputs(self) -> None:  # 注意：重写基础 `map_outputs`
+        """注册 Flow 动态输出方法。
+        契约：在 outputs 映射中注册动态解析方法。
+        关键路径：调用父类 → 生成动态方法。
+        决策：每次 map_outputs 前清理旧方法。问题：避免方法泄漏；方案：先清理后注册；代价：重复注册开销；重评：当输出稳定且可缓存时。
+        """
         super().map_outputs()
         self._ensure_flow_output_methods()
 
@@ -117,10 +136,14 @@ class RunFlowBaseComponent(Component):
             )
 
     ################################################################
-    # Flow retrieval
+    # `Flow` 获取
     ################################################################
     async def get_flow(self, flow_name_selected: str | None = None, flow_id_selected: str | None = None) -> Data:
-        """Get a flow's data by name or id."""
+        """按名称或 `ID` 获取 `Flow` 数据。
+        契约：返回 `Data`，找不到时返回空 `Data`。
+        关键路径：按 `flow_id`/`flow_name` 拉取 → 空值兜底。
+        决策：找不到时返回空 `Data` 而非抛错。问题：`UI` 可能需要容错；方案：空数据兜底；代价：调用方需自行判断；重评：当需要强失败语义时。
+        """
         flow = await get_flow_by_id_or_name(
             user_id=self.user_id,
             flow_id=flow_id_selected,
@@ -134,16 +157,20 @@ class RunFlowBaseComponent(Component):
         flow_id_selected: str | None = None,
         updated_at: str | None = None,
     ) -> Graph | None:
-        """Get a flow's graph by name or id."""
+        """按名称或 ID 获取 `Flow` 图。
+        契约：返回 `Graph`；不存在时抛 `ValueError`。
+        关键路径：读取缓存 → 校验更新时间 → 拉取 `Flow` → 构建 `Graph` → 缓存。
+        决策：命中缓存且未过期直接返回。问题：避免重复构建；方案：缓存校验；代价：更新时间不一致时需清理；重评：当缓存一致性无法保证时。
+        """
         if not (flow_name_selected or flow_id_selected):
             msg = "Flow name or id is required"
             raise ValueError(msg)
         if flow_id_selected and (flow := self._flow_cache_call("get", flow_id=flow_id_selected)):
             if self._is_cached_flow_up_to_date(flow, updated_at):
                 return flow
-            self._flow_cache_call("delete", flow_id=flow_id_selected)  # stale, delete it
+            self._flow_cache_call("delete", flow_id=flow_id_selected)  # 注意：过期缓存需删除
 
-        # TODO: use flow id only
+        # TODO：仅使用 `flow_id` 路径
         flow = await self.get_flow(flow_name_selected=flow_name_selected, flow_id_selected=flow_id_selected)
         if not flow:
             msg = "Flow not found"
@@ -162,13 +189,23 @@ class RunFlowBaseComponent(Component):
         return graph
 
     ################################################################
-    # Flow inputs/config
+    # `Flow` 输入与配置
     ################################################################
     def get_new_fields_from_graph(self, graph: Graph) -> list[dotdict]:
+        """从图生成新的输入字段列表。
+        契约：返回 dotdict 列表，用于构建组件输入。
+        关键路径：提取 `Flow` 输入 → 转换为字段模板。
+        决策：直接基于 `get_flow_inputs` 转换。问题：保持与 `Flow` 输入一致；方案：复用工具函数；代价：依赖外部实现；重评：当输入解析策略变化时。
+        """
         inputs = get_flow_inputs(graph)
         return self.get_new_fields(inputs)
 
     def update_build_config_from_graph(self, build_config: dotdict, graph: Graph):
+        """基于图更新 `build_config` 的输入字段。
+        契约：原地更新 `build_config`；失败抛 `RuntimeError`。
+        关键路径：生成新字段 → 计算保留键 → 删除旧字段 → 写入新字段。
+        决策：仅保留新字段与默认键。问题：旧字段可能失效；方案：清理后重建；代价：丢失旧值；重评：当需要保留历史输入时。
+        """
         try:
             new_fields = self.get_new_fields_from_graph(graph)
             keep_fields: set[str] = set([new_field["name"] for new_field in new_fields] + self.default_keys)
@@ -180,6 +217,11 @@ class RunFlowBaseComponent(Component):
             raise RuntimeError(msg) from e
 
     def get_new_fields(self, inputs_vertex: list[Vertex]) -> list[dotdict]:
+        """将输入节点转换为字段模板列表。
+        契约：返回字段 dotdict 列表；缺少模板时跳过。
+        关键路径：遍历输入顶点 → 读取模板 → 生成字段列表。
+        决策：`display_name` 冲突时附加顶点标识。问题：同名字段易混淆；方案：追加顶点名/`ID`；代价：显示变长；重评：当 `UI` 支持分组展示时。
+        """
         new_fields: list[dotdict] = []
         vdisp_cts = Counter(v.display_name for v in inputs_vertex)
 
@@ -201,7 +243,7 @@ class RunFlowBaseComponent(Component):
                                 f"({vertex.display_name}-{vertex.id.split('-')[-1]})"
                             )
                         ),
-                        # TODO: make this more robust?
+                        # TODO：提升生成规则的健壮性
                         "tool_mode": not (field_template[input_name].get("advanced", False)),
                     }
                 )
@@ -212,17 +254,20 @@ class RunFlowBaseComponent(Component):
         return new_fields
 
     def add_new_fields(self, build_config: dotdict, new_fields: list[dotdict]) -> dotdict:
-        """Add new fields to the build_config."""
+        """向 `build_config` 添加新字段。
+        契约：原地写入并返回 `build_config`。
+        关键路径：遍历新字段 → 覆盖写入。
+        决策：不做重复检测直接覆盖。问题：字段可能冲突；方案：后写覆盖；代价：旧值丢失；重评：当需要合并策略时。
+        """
         for field in new_fields:
             build_config[field["name"]] = field
         return build_config
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:
-        """Delete specified fields from build_config.
-
-        Args:
-            build_config: The build_config to delete the fields from.
-            fields: The fields to delete from the build_config.
+        """删除 `build_config` 中指定字段。
+        契约：支持传入 dict 或字段名列表；不存在时忽略。
+        关键路径：规范字段列表 → 逐项 pop 删除。
+        决策：缺失字段不报错。问题：批量删除时避免噪声；方案：pop 默认 None；代价：静默忽略；重评：当需要强校验时。
         """
         if isinstance(fields, dict):
             fields = list(fields.keys())
@@ -230,20 +275,10 @@ class RunFlowBaseComponent(Component):
             build_config.pop(field, None)
 
     async def get_required_data(self) -> tuple[str, list[dotdict]] | None:
-        """Retrieve flow description and tool-mode input fields for the selected flow.
-
-        Fetches the graph for the given flow, extracts its input fields, and filters
-        for only those inputs that are eligible for tool mode (non-advanced fields).
-
-        Args:
-            flow_name_selected: The name of the flow to retrieve data for. If None,
-                returns None.
-
-        Returns:
-            A tuple of (flow_description, tool_mode_fields) where:
-                - flow_description (str): The human-readable description of the flow
-                - tool_mode_fields (list[dotdict]): Input fields marked for tool mode
-            Returns None if the flow cannot be found or loaded.
+        """获取 `Flow` 描述与 `tool_mode` 输入字段。
+        契约：返回 (description, tool_mode_fields)；找不到 `flow` 时返回 `None`。
+        关键路径：获取 `graph` → 同步输出 → 生成字段 → 过滤 `tool_mode`。
+        决策：仅暴露非 `advanced` 字段作为 `tool_mode`。问题：避免暴露复杂配置；方案：过滤 `advanced`；代价：功能受限；重评：当需要高级工具输入时。
         """
         graph = await self.get_graph(self.flow_name_selected, self.flow_id_selected, self._cached_flow_updated_at)
         formatted_outputs = self._format_flow_outputs(graph)
@@ -254,15 +289,10 @@ class RunFlowBaseComponent(Component):
         return (graph.description, [field for field in new_fields if field.get("tool_mode") is True])
 
     def update_input_types(self, fields: list[dotdict]) -> list[dotdict]:
-        """Update the input_types of the fields.
-
-            If a field's input_types is None, it will be set to an empty list.
-
-        Args:
-            fields: The fields to update the input_types for.
-
-        Returns:
-            The updated fields.
+        """修正字段的 `input_types`。
+        契约：将 `None` 规范为 [] 并返回更新后的字段列表。
+        关键路径：遍历字段 → 修正 `input_types`。
+        决策：`None` 统一转空列表。问题：前端不接受 `None`；方案：规范化；代价：掩盖上游配置问题；重评：当上游保证一致性时。
         """
         for field in fields:
             if isinstance(field, dict):
@@ -273,12 +303,14 @@ class RunFlowBaseComponent(Component):
         return fields
 
     async def _get_tools(self) -> list[Tool]:
-        """Expose flow as a tool."""
+        """将 `Flow` 作为工具暴露。
+        契约：返回 `Tool` 列表；无 `tool_mode` 输入时返回空列表。
+        """
         component_toolkit: type[ComponentToolkit] = get_component_toolkit()
         flow_description, tool_mode_inputs = await self.get_required_data()
         if not tool_mode_inputs:
             return []
-        # convert list of dicts to list of dotdicts
+        # 注意：将 `dict` 列表转为 `dotdict` 列表。
         tool_mode_inputs = [dotdict(field) for field in tool_mode_inputs]
         return component_toolkit(component=self).get_tools(
             tool_name=f"{self.flow_name_selected}_tool",
@@ -290,7 +322,7 @@ class RunFlowBaseComponent(Component):
         )
 
     ################################################################
-    # Flow output resolution
+    # `Flow` 输出解析
     ################################################################
     async def _get_cached_run_outputs(
         self,
@@ -313,17 +345,9 @@ class RunFlowBaseComponent(Component):
         return self._last_run_outputs
 
     async def _resolve_flow_output(self, *, vertex_id: str, output_name: str):
-        """Resolve the value of a given vertex's output.
-
-            Given a vertex_id and output_name, it will resolve the value of the output
-            belonging to the vertex with the given vertex_id.
-
-        Args:
-            vertex_id: The ID of the vertex to resolve the output for.
-            output_name: The name of the output to resolve.
-
-        Returns:
-            The resolved output.
+        """解析指定顶点输出值。
+        契约：返回输出值或 `None`。
+        决策：仅从第一个匹配输出返回结果。问题：避免多值混淆；方案：首匹配返回；代价：忽略后续结果；重评：当需要聚合所有输出时。
         """
         run_outputs = await self._get_cached_run_outputs(
             user_id=self.user_id,
@@ -370,16 +394,12 @@ class RunFlowBaseComponent(Component):
         return method_name
 
     ################################################################
-    # Dynamic flow output synchronization
+    # 动态输出同步
     ################################################################
     def _sync_flow_outputs(self, outputs: list[Output]) -> None:
-        """Persist dynamic flow outputs in the component.
-
-        Args:
-            outputs: The list of Output objects to persist.
-
-        Returns:
-            None
+        """同步并持久化动态输出列表。
+        契约：更新 `outputs` 与 `_outputs_map`；保留 `TOOL_OUTPUT_NAME`。
+        决策：始终保留工具输出。问题：工具输出被覆盖会失效；方案：强制写回；代价：需额外合并逻辑；重评：当工具输出独立管理时。
         """
         tool_output = None
         if TOOL_OUTPUT_NAME in self._outputs_map:
@@ -395,18 +415,10 @@ class RunFlowBaseComponent(Component):
         self._outputs_map[TOOL_OUTPUT_NAME] = tool_output
 
     async def update_outputs(self, frontend_node: dict, field_name: str, field_value: Any) -> dict:
-        """Update the outputs of the frontend node.
-
-        This method is called when the flow_name_selected field is updated.
-        It will generate the Output objects for the selected flow and update the outputs of the frontend node.
-
-        Args:
-            frontend_node: The frontend node to update the outputs for.
-            field_name: The name of the field that was updated.
-            field_value: The value of the field that was updated.
-
-        Returns:
-            The updated frontend node.
+        """更新前端节点的输出列表。
+        契约：仅在 `flow_name_selected` 变更时更新并返回节点。
+        关键路径：读取选中 `Flow` → 生成输出 → 同步到前端节点。
+        决策：字段无效时直接返回原节点。问题：避免不必要的重建；方案：提前返回；代价：依赖字段判断准确性；重评：当需要更强制的同步策略时。
         """
         if field_name != "flow_name_selected" or not field_value:
             return frontend_node
@@ -419,28 +431,18 @@ class RunFlowBaseComponent(Component):
             flow_id_selected=flow_selected_metadata.get("id"),
             updated_at=flow_selected_metadata.get("updated_at"),
         )
-        outputs = self._format_flow_outputs(graph)  # generate Output objects from the flow's output nodes
+        outputs = self._format_flow_outputs(graph)  # 注意：从输出节点生成 `Output` 列表
         self._sync_flow_outputs(outputs)
         frontend_node["outputs"] = [output.model_dump() for output in outputs]
         return frontend_node
 
     ################################################################
-    # Tool mode + formatting
+    # 工具模式与输出格式化
     ################################################################
     def _format_flow_outputs(self, graph: Graph) -> list[Output]:
-        """Generate Output objects from the graph's outputs.
-
-        The Output objects modify the name and method of the graph's outputs.
-        The name is modified by prepending the vertex_id and to the original name,
-        which uniquely identifies the output.
-        The method is set to a dynamically generated method which uses a unique name
-        to resolve the output to its value generated during the flow execution.
-
-        Args:
-            graph: The graph to generate outputs for.
-
-        Returns:
-            A list of Output objects.
+        """从图的输出节点生成 `Output` 列表。
+        契约：返回包含动态 `method` 与唯一 `name` 的 `Output` 列表。
+        决策：输出名使用 `vertex_id` 前缀。问题：避免同名输出冲突；方案：前缀拼接；代价：名称变长；重评：当 `UI` 支持分组展示时。
         """
         output_vertices: list[Vertex] = [v for v in graph.vertices if v.is_output]
         outputs: list[Output] = []
@@ -462,10 +464,10 @@ class RunFlowBaseComponent(Component):
                     if one_out and vdisp_cts[vdn] == 1
                     else odn
                     + (
-                        # output.display_name potentially collides w/ those of other vertices
+                        # 注意：`display_name` 可能与其它顶点冲突
                         f" ({vdn})"
                         if vdisp_cts[vdn] == 1
-                        # output.display_name collides w/ those of duplicate vertices
+                        # 注意：重复顶点时用 `vertex_id` 区分
                         else f"-{vertex.id}"
                     )
                 )
@@ -478,14 +480,9 @@ class RunFlowBaseComponent(Component):
         vertex_id: str,
         ioput_name: str,
     ) -> str:
-        """Helper for joining a vertex id and input/output name to form a unique input/output name.
-
-        Args:
-            vertex_id: The ID of the vertex who's input/output name is being generated.
-            ioput_name: The name of the input/output to get the name for.
-
-        Returns:
-            A unique output name for the given vertex's output.
+        """拼接 `vertex_id` 与输入/输出名，生成唯一名称。
+        契约：`vertex_id` 与 `ioput_name` 缺失时抛 `ValueError`。
+        决策：使用固定分隔符拼接。问题：避免名称冲突；方案：统一分隔符；代价：依赖分隔符不冲突；重评：当字段名包含分隔符时。
         """
         if not vertex_id or not ioput_name:
             msg = "Vertex ID and input/output name are required"
@@ -493,7 +490,7 @@ class RunFlowBaseComponent(Component):
         return f"{vertex_id}{self.IOPUT_SEP}{ioput_name}"
 
     ################################################################
-    # Flow execution
+    # `Flow` 执行
     ################################################################
     async def _run_flow_with_cached_graph(
         self,
@@ -501,7 +498,7 @@ class RunFlowBaseComponent(Component):
         user_id: str | None = None,
         tweaks: dict | None = None,
         inputs: dict | list[dict] | None = None,
-        output_type: str = "any",  # "any" is used to return all outputs
+        output_type: str = "any",  # 注意：`any` 用于返回全部输出
     ):
         graph = await self.get_graph(
             flow_name_selected=self.flow_name_selected,
@@ -522,10 +519,13 @@ class RunFlowBaseComponent(Component):
         )
 
     ################################################################
-    # Flow cache utils
+    # `Flow` 缓存工具
     ################################################################
     def _flow_cache_call(self, action: str, *args, **kwargs):
-        """Call a flow cache related method."""
+        """调用 `Flow` 缓存相关方法。
+        契约：缓存关闭或缓存服务不可用时返回 `None`。
+        决策：缓存失败时记录告警并返回 `None`。问题：避免缓存影响主流程；方案：软失败；代价：缓存命中率下降；重评：当缓存是强依赖时。
+        """
         if not self.cache_flow:
             msg = "Cache flow is disabled"
             logger.warning(msg)
@@ -571,15 +571,9 @@ class RunFlowBaseComponent(Component):
         self._shared_component_cache.set(cache_key, payload)
 
     def _build_flow_cache_key(self, *, flow_id: str | None = None) -> str | None:
-        """Build a cache key for a flow.
-
-        Raises a ValueError if the user or flow ID is not provided.
-
-        Args:
-            flow_id: The ID of the flow to build the cache key for.
-
-        Returns:
-            The cache key for the flow.
+        """构建 `Flow` 缓存 key。
+        契约：缺少 `user_id` 或 `flow_id` 时抛 `ValueError`。
+        决策：key 包含 `user_id` 与 `flow_id`。问题：隔离不同用户缓存；方案：拼接标识；代价：key 依赖 `user_id`；重评：当改为全局缓存时。
         """
         if not (self.user_id and flow_id):
             msg = "Failed to build cache key: Flow ID and user ID are required"
@@ -601,7 +595,7 @@ class RunFlowBaseComponent(Component):
 
     def _is_cached_flow_up_to_date(self, cached_flow: Graph, updated_at: str | None) -> bool:
         if not updated_at or not (cached_ts := getattr(cached_flow, "updated_at", None)):
-            return False  # both timetamps must be present
+            return False  # 注意：两侧时间戳必须都存在
         return self._parse_timestamp(cached_ts) >= self._parse_timestamp(updated_at)
 
     @staticmethod
@@ -618,14 +612,9 @@ class RunFlowBaseComponent(Component):
             return None
 
     def _delete_cached_flow(self, flow_id: str | None) -> None:
-        """Remove the flow with the given ID or name from cache.
-
-        Args:
-            flow_id: The ID of the flow to delete from cache.
-            flow_name: The name of the flow to delete from cache.
-
-        Returns:
-            None
+        """从缓存中删除指定 `Flow`。
+        契约：缺少 `user_id`/`flow_id` 时抛 `ValueError`。
+        决策：严格校验 `flow_id`。问题：避免误删；方案：强校验；代价：调用方需保证输入；重评：当支持按名称删除时。
         """
         err_msg_prefix = "Failed to delete user flow from cache"
         if self._shared_component_cache is None:
@@ -641,7 +630,7 @@ class RunFlowBaseComponent(Component):
         self._shared_component_cache.delete(self._build_flow_cache_key(flow_id=flow_id))
 
     ################################################################
-    # Build inputs and flow tweak data
+    # 构建输入与 `tweak` 数据
     ################################################################
     def _extract_tweaks_from_keyed_values(
         self,
@@ -687,8 +676,11 @@ class RunFlowBaseComponent(Component):
             return updated_at
         return self._attributes.get("flow_name_selected_updated_at")
 
-    def _pre_run_setup(self) -> None:  # Note: overrides the base pre_run_setup method
-        """Reset the last run's outputs upon new flow execution."""
+    def _pre_run_setup(self) -> None:  # 注意：重写基础 pre_run_setup
+        """新一次执行前的准备工作。
+        契约：清空上次运行缓存并重建 `tweaks`/`inputs`。
+        决策：每次执行前清空 `_last_run_outputs`。问题：避免复用过期输出；方案：强制清空；代价：无法重用缓存；重评：当需要跨次复用时。
+        """
         self._last_run_outputs = None
         self._cached_flow_updated_at = self._get_selected_flow_updated_at()
         if self._cached_flow_updated_at:

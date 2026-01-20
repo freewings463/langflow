@@ -1,3 +1,13 @@
+"""文本处理组件。
+
+本模块提供词数统计、大小写转换、文本替换/提取/清洗及文本转表等操作。
+主要功能包括：
+- 根据操作动态展示输入与输出
+- 对文本执行单一处理并返回 Data/Message/DataFrame
+
+注意事项：为空文本在部分操作中会返回空结果或零计数。
+"""
+
 import contextlib
 import re
 from typing import Any
@@ -21,12 +31,18 @@ from lfx.schema.message import Message
 
 
 class TextOperations(Component):
+    """文本处理组件封装。
+
+    契约：输入为文本与操作类型；输出类型随操作变化。
+    副作用：根据操作动态更新输出端口。
+    失败语义：参数非法时抛 `ValueError`。
+    """
     display_name = "Text Operations"
     description = "Perform various text processing operations including text-to-DataFrame conversion."
     icon = "type"
     name = "TextOperations"
 
-    # Configuration for operation-specific input fields
+    # 操作对应的动态字段配置
     OPERATION_FIELDS: dict[str, list[str]] = {
         "Text to DataFrame": ["table_separator", "has_header"],
         "Word Count": ["count_words", "count_characters", "count_lines"],
@@ -258,7 +274,7 @@ class TextOperations(Component):
     outputs = []
 
     def update_build_config(self, build_config: dict, field_value: Any, field_name: str | None = None) -> dict:
-        """Update build configuration to show/hide relevant inputs based on operation."""
+        """根据操作显示/隐藏动态输入字段。"""
         for field in self.ALL_DYNAMIC_FIELDS:
             if field in build_config:
                 build_config[field]["show"] = False
@@ -278,7 +294,7 @@ class TextOperations(Component):
         return build_config
 
     def update_outputs(self, frontend_node: dict, field_name: str, field_value: Any) -> dict:
-        """Create dynamic outputs based on selected operation."""
+        """根据操作类型动态创建输出端口。"""
         if field_name != "operation":
             return frontend_node
 
@@ -298,23 +314,28 @@ class TextOperations(Component):
         return frontend_node
 
     def _extract_operation_name(self, field_value: Any) -> str:
-        """Extract operation name from SortableListInput value."""
+        """从 SortableListInput 中提取操作名。"""
         if isinstance(field_value, list) and len(field_value) > 0:
             return field_value[0].get("name", "")
         return ""
 
     def get_operation_name(self) -> str:
-        """Get the selected operation name."""
+        """获取当前选中的操作名。"""
         operation_input = getattr(self, "operation", [])
         return self._extract_operation_name(operation_input)
 
     def process_text(self) -> Any:
-        """Process text based on selected operation."""
+        """根据操作处理文本并返回结果。
+
+        关键路径（三步）：
+        1) 获取操作名并处理空文本边界；
+        2) 选择对应处理函数；
+        3) 返回处理结果或原文本。
+        """
         text = getattr(self, "text_input", "")
         operation = self.get_operation_name()
 
-        # Allow empty text for Text Join (second input might have content)
-        # and Word Count (should return zeros for empty text)
+        # 注意：Text Join/Word Count 允许空文本输入
         if not text and operation not in ("Text Join", "Word Count"):
             return None
         operation_handlers = {
@@ -336,7 +357,7 @@ class TextOperations(Component):
         return text
 
     def _text_to_dataframe(self, text: str) -> DataFrame:
-        """Convert markdown-style table text to DataFrame."""
+        """将表格文本转换为 DataFrame。"""
         lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
         if not lines:
             return DataFrame(pd.DataFrame())
@@ -355,7 +376,7 @@ class TextOperations(Component):
         return DataFrame(df)
 
     def _parse_table_rows(self, lines: list[str], separator: str) -> list[list[str]]:
-        """Parse table lines into rows of cells."""
+        """解析表格行并拆分单元格。"""
         rows = []
         for line in lines:
             cleaned_line = line.strip(separator)
@@ -364,13 +385,13 @@ class TextOperations(Component):
         return rows
 
     def _create_dataframe(self, rows: list[list[str]], *, has_header: bool) -> pd.DataFrame:
-        """Create DataFrame from parsed rows."""
+        """从解析行构建 DataFrame。"""
         if has_header and len(rows) > 1:
             header = rows[0]
             data_rows = rows[1:]
             header_col_count = len(header)
 
-            # Validate that all data rows have the same number of columns as header
+            # 注意：数据行列数必须与表头一致
             for i, row in enumerate(data_rows):
                 row_col_count = len(row)
                 if row_col_count != header_col_count:
@@ -388,16 +409,16 @@ class TextOperations(Component):
         return pd.DataFrame(rows, columns=columns)
 
     def _convert_numeric_columns(self, df: pd.DataFrame) -> None:
-        """Attempt to convert string columns to numeric where possible."""
+        """尽可能将字符串列转换为数值列。"""
         for col in df.columns:
             with contextlib.suppress(ValueError, TypeError):
                 df[col] = pd.to_numeric(df[col])
 
     def _word_count(self, text: str) -> dict[str, Any]:
-        """Count words, characters, and lines in text."""
+        """统计词数、字符数和行数。"""
         result: dict[str, Any] = {}
 
-        # Handle empty or whitespace-only text - return zeros
+        # 注意：空文本返回 0 计数
         text_str = str(text) if text else ""
         is_empty = not text_str or not text_str.strip()
 
@@ -430,13 +451,13 @@ class TextOperations(Component):
         return result
 
     def _case_conversion(self, text: str) -> str:
-        """Convert text case."""
+        """文本大小写转换。"""
         case_type = getattr(self, "case_type", "lowercase")
         converter = self.CASE_CONVERTERS.get(case_type)
         return converter(text) if converter else text
 
     def _text_replace(self, text: str) -> str:
-        """Replace text patterns."""
+        """替换文本中的匹配片段。"""
         search_pattern = getattr(self, "search_pattern", "")
         if not search_pattern:
             return text
@@ -454,7 +475,7 @@ class TextOperations(Component):
         return text.replace(search_pattern, replacement_text)
 
     def _text_extract(self, text: str) -> list[str]:
-        """Extract text matching patterns."""
+        """提取匹配片段列表。"""
         extract_pattern = getattr(self, "extract_pattern", "")
         if not extract_pattern:
             return []
@@ -470,7 +491,7 @@ class TextOperations(Component):
         return matches[:max_matches] if max_matches > 0 else matches
 
     def _text_head(self, text: str) -> str:
-        """Extract characters from the beginning of text."""
+        """截取开头字符。"""
         head_characters = getattr(self, "head_characters", 100)
         if head_characters < 0:
             msg = f"Characters from Start must be a non-negative integer, got {head_characters}"
@@ -480,7 +501,7 @@ class TextOperations(Component):
         return text[:head_characters]
 
     def _text_tail(self, text: str) -> str:
-        """Extract characters from the end of text."""
+        """截取末尾字符。"""
         tail_characters = getattr(self, "tail_characters", 100)
         if tail_characters < 0:
             msg = f"Characters from End must be a non-negative integer, got {tail_characters}"
@@ -490,25 +511,24 @@ class TextOperations(Component):
         return text[-tail_characters:]
 
     def _text_strip(self, text: str) -> str:
-        """Remove whitespace or specific characters from text edges."""
+        """按模式去除两端字符。"""
         strip_mode = getattr(self, "strip_mode", "both")
         strip_characters = getattr(self, "strip_characters", "")
 
-        # Convert to string to ensure proper handling
         text_str = str(text) if text else ""
 
-        # None means strip all whitespace (spaces, tabs, newlines, etc.)
+        # 注意：None 表示去除所有空白字符
         chars_to_strip = strip_characters if strip_characters else None
 
         if strip_mode == "left":
             return text_str.lstrip(chars_to_strip)
         if strip_mode == "right":
             return text_str.rstrip(chars_to_strip)
-        # Default: "both"
+        # 默认：双侧去除
         return text_str.strip(chars_to_strip)
 
     def _text_join(self, text: str) -> str:
-        """Join two texts with line break separator."""
+        """拼接两段文本。"""
         text_input_2 = getattr(self, "text_input_2", "")
 
         text1 = str(text) if text else ""
@@ -519,14 +539,14 @@ class TextOperations(Component):
         return text1 or text2
 
     def _text_clean(self, text: str) -> str:
-        """Clean text by removing extra spaces, special chars, etc."""
+        """清洗文本（空格/特殊字符/空行）。"""
         result = text
 
         if getattr(self, "remove_extra_spaces", True):
             result = re.sub(r"\s+", " ", result)
 
         if getattr(self, "remove_special_chars", False):
-            # Remove ALL special characters except alphanumeric and spaces
+            # 注意：仅保留字母数字与空格
             result = re.sub(r"[^\w\s]", "", result)
 
         if getattr(self, "remove_empty_lines", False):
@@ -536,7 +556,7 @@ class TextOperations(Component):
         return result
 
     def _format_result_as_text(self, result: Any) -> str:
-        """Format result as text string."""
+        """将结果格式化为文本。"""
         if result is None:
             return ""
         if isinstance(result, list):
@@ -544,7 +564,7 @@ class TextOperations(Component):
         return str(result)
 
     def get_dataframe(self) -> DataFrame:
-        """Return result as DataFrame - only for Text to DataFrame operation."""
+        """返回 DataFrame 结果（仅 Text to DataFrame）。"""
         if self.get_operation_name() != "Text to DataFrame":
             return DataFrame(pd.DataFrame())
 
@@ -555,12 +575,12 @@ class TextOperations(Component):
         return self._text_to_dataframe(text)
 
     def get_text(self) -> Message:
-        """Return result as Message - for text operations only."""
+        """返回文本结果的 Message。"""
         result = self.process_text()
         return Message(text=self._format_result_as_text(result))
 
     def get_data(self) -> Data:
-        """Return result as Data object - only for Word Count operation."""
+        """返回统计结果 Data（仅 Word Count）。"""
         if self.get_operation_name() != "Word Count":
             return Data(data={})
 
@@ -575,6 +595,6 @@ class TextOperations(Component):
         return Data(data={"result": str(result)})
 
     def get_message(self) -> Message:
-        """Return result as simple message with the processed text."""
+        """返回处理结果的 Message。"""
         result = self.process_text()
         return Message(text=self._format_result_as_text(result))

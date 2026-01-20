@@ -1,9 +1,22 @@
+"""Data 键提取组件。
+
+本模块从 Data 或 Data 列表中提取指定键，并返回对应值。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：未找到键时会返回错误信息的 Data。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import DataInput, Output, StrInput
 from lfx.schema.data import Data
 
 
 class ExtractDataKeyComponent(Component):
+    """键提取组件封装。
+
+    契约：输入为 Data 或 Data 列表与 `key`；输出为 Data 或 Data 列表。
+    副作用：更新 `self.status`。
+    失败语义：输入类型不符时返回错误 Data。
+    """
     display_name = "Extract Key"
     description = (
         "Extract a specific key from a Data object or a list of "
@@ -32,6 +45,7 @@ class ExtractDataKeyComponent(Component):
     ]
 
     def extract_key(self) -> Data | list[Data]:
+        """提取指定键并返回结果。"""
         key = self.key
 
         if isinstance(self.data_input, list):

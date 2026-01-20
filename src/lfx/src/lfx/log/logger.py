@@ -1,4 +1,11 @@
-"""Logging configuration for Langflow using structlog."""
+"""日志配置模块。
+
+本模块基于 structlog 构建日志体系，支持缓冲读取与文件轮转。
+主要功能包括：
+- 动态配置日志级别与输出格式
+- 缓冲日志以供 API 拉取
+- 兼容 uvicorn/gunicorn 的日志拦截
+"""
 
 import json
 import logging
@@ -20,7 +27,7 @@ from lfx.settings import DEV
 
 VALID_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-# Map log level names to integers
+# 日志级别名称映射
 LOG_LEVEL_MAP = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -35,7 +42,7 @@ class SizedLogBuffer:
 
     def __init__(
         self,
-        max_readers: int = 20,  # max number of concurrent readers for the buffer
+        max_readers: int = 20,  # 最大并发读取数
     ):
         """Initialize the buffer.
 
@@ -50,23 +57,27 @@ class SizedLogBuffer:
         self._max = 0
 
     def get_write_lock(self) -> Lock:
-        """Get the write lock."""
+        """获取写锁。"""
         return self._wlock
 
     def write(self, message: str) -> None:
-        """Write a message to the buffer."""
+        """写入一条日志到缓冲区。
+
+        关键路径（三步）：
+        1) 解析日志 JSON 并提取事件内容；
+        2) 计算时间戳；
+        3) 写入缓冲并裁剪超限内容。
+        """
         record = json.loads(message)
         log_entry = record.get("event", record.get("msg", record.get("text", "")))
 
-        # Extract timestamp - support both direct timestamp and nested record.time.timestamp
+        # 注意：支持嵌套时间戳结构
         timestamp = record.get("timestamp", 0)
         if timestamp == 0 and "record" in record:
-            # Support nested structure from tests: record.time.timestamp
             time_info = record["record"].get("time", {})
             timestamp = time_info.get("timestamp", 0)
 
         if isinstance(timestamp, str):
-            # Parse ISO format timestamp
             dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             epoch = int(dt.timestamp() * 1000)
         else:
@@ -79,11 +90,11 @@ class SizedLogBuffer:
             self.buffer.append((epoch, log_entry))
 
     def __len__(self) -> int:
-        """Get the length of the buffer."""
+        """返回缓冲区长度。"""
         return len(self.buffer)
 
     def get_after_timestamp(self, timestamp: int, lines: int = 5) -> dict[int, str]:
-        """Get log entries after a timestamp."""
+        """获取指定时间戳之后的日志。"""
         rc = {}
 
         self._rsemaphore.acquire()
@@ -101,7 +112,7 @@ class SizedLogBuffer:
         return rc
 
     def get_before_timestamp(self, timestamp: int, lines: int = 5) -> dict[int, str]:
-        """Get log entries before a timestamp."""
+        """获取指定时间戳之前的日志。"""
         self._rsemaphore.acquire()
         try:
             with self._wlock:
@@ -123,7 +134,7 @@ class SizedLogBuffer:
             self._rsemaphore.release()
 
     def get_last_n(self, last_idx: int) -> dict[int, str]:
-        """Get the last n log entries."""
+        """获取最后 N 条日志。"""
         self._rsemaphore.acquire()
         try:
             with self._wlock:
@@ -134,8 +145,8 @@ class SizedLogBuffer:
 
     @property
     def max(self) -> int:
-        """Get the maximum buffer size."""
-        # Get it dynamically to allow for env variable changes
+        """获取缓冲区最大大小。"""
+        # 注意：从环境变量动态读取
         if self._max == 0:
             env_buffer_size = os.getenv("LANGFLOW_LOG_RETRIEVER_BUFFER_SIZE", "0")
             if env_buffer_size.isdigit():
@@ -144,25 +155,25 @@ class SizedLogBuffer:
 
     @max.setter
     def max(self, value: int) -> None:
-        """Set the maximum buffer size."""
+        """设置缓冲区最大大小。"""
         self._max = value
 
     def enabled(self) -> bool:
-        """Check if the buffer is enabled."""
+        """判断缓冲区是否启用。"""
         return self.max > 0
 
     def max_size(self) -> int:
-        """Get the maximum buffer size."""
+        """返回缓冲区最大大小。"""
         return self.max
 
 
-# log buffer for capturing log messages
+# 用于日志拉取的缓冲区
 log_buffer = SizedLogBuffer()
 
 
 def add_serialized(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """Add serialized version of the log entry."""
-    # Only add serialized if we're in JSON mode (for log buffer)
+    """为日志条目添加序列化字段。"""
+    # 注意：仅在启用缓冲时添加
     if log_buffer.enabled():
         subset = {
             "timestamp": event_dict.get("timestamp", 0),
@@ -175,7 +186,7 @@ def add_serialized(_logger: Any, _method_name: str, event_dict: dict[str, Any]) 
 
 
 def remove_exception_in_production(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """Remove exception details in production."""
+    """在生产环境移除异常详情。"""
     if DEV is False:
         event_dict.pop("exception", None)
         event_dict.pop("exc_info", None)
@@ -183,10 +194,9 @@ def remove_exception_in_production(_logger: Any, _method_name: str, event_dict: 
 
 
 def buffer_writer(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """Write to log buffer if enabled."""
+    """将日志写入缓冲区（若启用）。"""
     if log_buffer.enabled() and "serialized" in event_dict:
-        # Use the already-serialized version prepared by add_serialized()
-        # This avoids duplicate serialization and ensures consistency
+        # 注意：复用序列化字段，避免重复序列化
         serialized_bytes = event_dict["serialized"]
         log_buffer.write(serialized_bytes.decode("utf-8"))
     return event_dict
@@ -213,8 +223,14 @@ def configure(
     cache: bool | None = None,
     output_file=None,
 ) -> None:
-    """Configure the logger."""
-    # Early-exit only if structlog is configured AND current min level matches the requested one.
+    """配置日志系统。
+
+    关键路径（三步）：
+    1) 解析环境变量与参数优先级；
+    2) 组装 structlog 处理器与输出配置；
+    3) 初始化 logger 并挂载文件/服务日志。
+    """
+    # 注意：若已配置且最小级别一致则直接返回
     cfg = structlog.get_config() if structlog.is_configured() else {}
     wrapper_class = cfg.get("wrapper_class")
     current_min_level = getattr(wrapper_class, "min_level", None)
@@ -239,18 +255,18 @@ def configure(
     if log_env is None:
         log_env = os.getenv("LANGFLOW_LOG_ENV", "")
 
-    # Get log format from env if not provided
+    # 从环境变量读取日志格式（如未显式传入）
     if log_format is None:
         log_format = os.getenv("LANGFLOW_LOG_FORMAT")
 
-    # Configure processors based on environment
+    # 根据环境配置处理器链
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
     ]
 
-    # Add callsite information only when LANGFLOW_DEV is set
+    # 仅在 DEV 模式记录调用位置
     if DEV:
         processors.append(
             structlog.processors.CallsiteParameterAdder(
@@ -270,21 +286,21 @@ def configure(
         ]
     )
 
-    # Configure output based on environment
+    # 根据环境配置输出格式
     if log_env.lower() == "container" or log_env.lower() == "container_json":
         processors.append(structlog.processors.JSONRenderer())
     elif log_env.lower() == "container_csv":
-        # Include callsite fields in key order when DEV is enabled
+        # DEV 模式追加调用位置信息
         key_order = ["timestamp", "level", "event"]
         if DEV:
             key_order += ["filename", "func_name", "lineno"]
 
         processors.append(structlog.processors.KeyValueRenderer(key_order=key_order, drop_missing=True))
     else:
-        # Use rich console for pretty printing based on environment variable
+        # 根据环境变量决定是否美化输出
         log_stdout_pretty = os.getenv("LANGFLOW_PRETTY_LOGS", "true").lower() == "true"
         if log_stdout_pretty:
-            # If custom format is provided, use KeyValueRenderer with custom format
+            # 若指定自定义格式则使用 KeyValueRenderer
             if log_format:
                 processors.append(structlog.processors.KeyValueRenderer())
             else:
@@ -292,15 +308,14 @@ def configure(
         else:
             processors.append(structlog.processors.JSONRenderer())
 
-    # Get numeric log level
+    # 解析日志级别
     numeric_level = LOG_LEVEL_MAP.get(log_level.upper(), logging.ERROR)
 
-    # Create wrapper class and attach the min level for later comparison
+    # 创建 wrapper_class 并缓存 min_level
     wrapper_class = structlog.make_filtering_bound_logger(numeric_level)
     wrapper_class.min_level = numeric_level
 
-    # Configure structlog
-    # Default to stdout for backward compatibility, unless output_file is specified
+    # 配置 structlog（默认 stdout）
     log_output_file = output_file if output_file is not None else sys.stdout
 
     structlog.configure(
@@ -313,31 +328,29 @@ def configure(
         cache_logger_on_first_use=cache if cache is not None else True,
     )
 
-    # Set up file logging if needed
+    # 如需写文件则设置文件处理器
     if log_file:
         if not log_file.parent.exists():
             cache_dir = Path(user_cache_dir("langflow"))
             log_file = cache_dir / "langflow.log"
 
-        # Parse rotation settings
+        # 解析轮转配置
         if log_rotation:
-            # Handle rotation like "1 day", "100 MB", etc.
-            max_bytes = 10 * 1024 * 1024  # Default 10MB
+            max_bytes = 10 * 1024 * 1024  # 默认 10MB
             if "MB" in log_rotation.upper():
                 try:
-                    # Look for pattern like "100 MB" (with space)
                     parts = log_rotation.split()
                     expected_parts = 2
                     if len(parts) >= expected_parts and parts[1].upper() == "MB":
                         mb = int(parts[0])
-                        if mb > 0:  # Only use valid positive values
+                        if mb > 0:
                             max_bytes = mb * 1024 * 1024
                 except (ValueError, IndexError):
                     pass
         else:
-            max_bytes = 10 * 1024 * 1024  # Default 10MB
+            max_bytes = 10 * 1024 * 1024  # 默认 10MB
 
-        # Since structlog doesn't have built-in rotation, we'll use stdlib logging for file output
+        # 注意：structlog 无内建轮转，使用 stdlib 处理
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=max_bytes,
@@ -345,20 +358,20 @@ def configure(
         )
         file_handler.setFormatter(logging.Formatter("%(message)s"))
 
-        # Add file handler to root logger
+        # 将文件处理器挂到 root logger
         logging.root.addHandler(file_handler)
         logging.root.setLevel(numeric_level)
 
-    # Set up interceptors for uvicorn and gunicorn
+    # 配置 uvicorn/gunicorn 日志重定向
     setup_uvicorn_logger()
     setup_gunicorn_logger()
 
-    # Create the global logger instance
+    # 创建全局 logger
     global logger  # noqa: PLW0603
     logger = structlog.get_logger()
 
     if disable:
-        # In structlog, we can set a very high filter level to effectively disable logging
+        # 通过设置极高日志级别来禁用输出
         structlog.configure(
             wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL),
         )
@@ -367,7 +380,7 @@ def configure(
 
 
 def setup_uvicorn_logger() -> None:
-    """Redirect uvicorn logs through structlog."""
+    """将 uvicorn 日志重定向到 structlog。"""
     loggers = (logging.getLogger(name) for name in logging.root.manager.loggerDict if name.startswith("uvicorn."))
     for uvicorn_logger in loggers:
         uvicorn_logger.handlers = []
@@ -375,7 +388,7 @@ def setup_uvicorn_logger() -> None:
 
 
 def setup_gunicorn_logger() -> None:
-    """Redirect gunicorn logs through structlog."""
+    """将 gunicorn 日志重定向到 structlog。"""
     logging.getLogger("gunicorn.error").handlers = []
     logging.getLogger("gunicorn.error").propagate = True
     logging.getLogger("gunicorn.access").handlers = []
@@ -386,12 +399,12 @@ class InterceptHandler(logging.Handler):
     """Intercept standard logging messages and route them to structlog."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Emit a log record by passing it to structlog."""
-        # Get corresponding structlog logger
+        """将标准日志转发到 structlog。"""
+        # 获取对应 structlog logger
         logger_name = record.name
         structlog_logger = structlog.get_logger(logger_name)
 
-        # Map log levels
+        # 映射日志级别
         level = record.levelno
         if level >= logging.CRITICAL:
             structlog_logger.critical(record.getMessage())
@@ -405,7 +418,6 @@ class InterceptHandler(logging.Handler):
             structlog_logger.debug(record.getMessage())
 
 
-# Initialize logger - will be reconfigured when configure() is called
-# Set it to critical level
+# 初始化 logger（后续会在 configure 中重新配置）
 logger: structlog.BoundLogger = structlog.get_logger()
 configure(log_level="CRITICAL", cache=False)

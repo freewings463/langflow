@@ -1,4 +1,15 @@
-# This module is used to import any langchain class by name.
+"""
+模块名称：`interface.importing` 导入入口
+
+本模块提供动态导入相关的公开符号列表，主要用于对外暴露导入能力。主要功能包括：
+- 暴露 `import_by_type` 的可用列表
+
+关键组件：
+- `ALL`：公开导出名称清单
+
+设计背景：集中管理可被外部引用的导入工具
+注意事项：仅维护导出清单，不提供具体实现
+"""
 
 ALL = [
     "import_by_type",

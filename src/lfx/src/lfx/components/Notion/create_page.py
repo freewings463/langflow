@@ -12,12 +12,14 @@ from lfx.schema.data import Data
 
 
 class NotionPageCreator(LCToolComponent):
+    # 创建 Notion 页面组件
     display_name: str = "Create Page "
     description: str = "A component for creating Notion pages."
     documentation: str = "https://docs.langflow.org/bundles-notion"
     icon = "NotionDirectoryLoader"
 
     inputs = [
+        # 用户输入：数据库 ID、密钥、页面属性
         StrInput(
             name="database_id",
             display_name="Database ID",
@@ -37,10 +39,12 @@ class NotionPageCreator(LCToolComponent):
     ]
 
     class NotionPageCreatorSchema(BaseModel):
+        # 工具入参 Schema
         database_id: str = Field(..., description="The ID of the Notion database.")
         properties_json: str = Field(..., description="The properties of the new page as a JSON string.")
 
     def run_model(self) -> Data:
+        # 执行创建并转换为 Data 输出
         result = self._create_notion_page(self.database_id, self.properties_json)
         if isinstance(result, str):
             # An error occurred, return it as text
@@ -52,6 +56,7 @@ class NotionPageCreator(LCToolComponent):
         return Data(text=output, data=result)
 
     def build_tool(self) -> Tool:
+        # 以结构化工具形式暴露
         return StructuredTool.from_function(
             name="create_notion_page",
             description="Create a new page in a Notion database. "
@@ -61,6 +66,7 @@ class NotionPageCreator(LCToolComponent):
         )
 
     def _create_notion_page(self, database_id: str, properties_json: str) -> dict[str, Any] | str:
+        # 校验入参并解析属性 JSON
         if not database_id or not properties_json:
             return "Invalid input. Please provide 'database_id' and 'properties_json'."
 
@@ -69,6 +75,7 @@ class NotionPageCreator(LCToolComponent):
         except json.JSONDecodeError as e:
             return f"Invalid properties format. Please provide a valid JSON string. Error: {e}"
 
+        # 构造 Notion API 请求
         headers = {
             "Authorization": f"Bearer {self.notion_secret}",
             "Content-Type": "application/json",
@@ -81,6 +88,7 @@ class NotionPageCreator(LCToolComponent):
         }
 
         try:
+            # 发送创建页面请求
             response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data, timeout=10)
             response.raise_for_status()
             return response.json()

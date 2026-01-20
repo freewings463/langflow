@@ -1,3 +1,12 @@
+"""基础模型与 Schema 构建工具。
+
+本模块提供从简化 schema 定义构建 Pydantic 模型的工具函数。
+主要功能包括：
+- 将字符串类型映射为 Python 类型
+- 生成 Pydantic 模型与字段描述
+- 将多种输入值归一为布尔值
+"""
+
 from typing import Any, TypedDict
 
 from pydantic import BaseModel as PydanticBaseModel
@@ -18,6 +27,11 @@ class BaseModel(PydanticBaseModel):
 
 
 def _get_type_annotation(type_str: str, *, multiple: bool) -> type:
+    """将字符串类型映射为注解类型。
+
+    契约：输入为类型字符串与是否多值；输出为 Python 类型。
+    失败语义：未知类型抛 `ValueError`。
+    """
     type_mapping = {
         "str": str,
         "int": int,
@@ -40,6 +54,13 @@ def _get_type_annotation(type_str: str, *, multiple: bool) -> type:
 
 
 def build_model_from_schema(schema: list[SchemaField]) -> type[PydanticBaseModel]:
+    """根据 schema 构建 Pydantic 模型。
+
+    关键路径（三步）：
+    1) 解析字段类型与是否多值；
+    2) 生成字段注解与描述；
+    3) 创建并返回动态模型。
+    """
     fields = {}
     for field in schema:
         field_name = field["name"]
@@ -53,14 +74,10 @@ def build_model_from_schema(schema: list[SchemaField]) -> type[PydanticBaseModel
 
 
 def coalesce_bool(value: Any) -> bool:
-    """Coalesces the given value into a boolean.
+    """将输入归一为布尔值。
 
-    Args:
-        value (Any): The value to be coalesced.
-
-    Returns:
-        bool: The coalesced boolean value.
-
+    契约：输入为任意类型；输出为 `bool`。
+    失败语义：不抛异常，无法识别时返回 False。
     """
     if isinstance(value, bool):
         return value

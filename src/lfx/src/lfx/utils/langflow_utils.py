@@ -1,4 +1,12 @@
-"""Langflow environment utility functions."""
+"""模块名称：Langflow 运行环境探测
+
+模块目的：提供 `langflow` 包可用性的懒加载检测。
+主要功能：检测是否安装 `langflow` 并缓存结果。
+使用场景：可选依赖场景下的条件启用与能力降级。
+关键组件：`_LangflowModule`、`has_langflow_memory`
+设计背景：避免启动时强依赖可选包，并减少重复 `find_spec` 开销。
+注意事项：缓存为进程级静态状态，运行期安装/卸载不会自动刷新。
+"""
 
 import importlib.util
 
@@ -6,11 +14,10 @@ from lfx.log.logger import logger
 
 
 class _LangflowModule:
-    # Static variable
-    # Tri-state:
-    # - None: Langflow check not performed yet
-    # - True: Langflow is available
-    # - False: Langflow is not available
+    # 注意：三态缓存
+    # - None：尚未检查
+    # - True：已确认可用
+    # - False：已确认不可用
     _available = None
 
     @classmethod
@@ -23,19 +30,20 @@ class _LangflowModule:
 
 
 def has_langflow_memory():
-    """Check if langflow.memory (with database support) and MessageTable are available."""
-    # TODO: REVISIT: Optimize this implementation later
-    # - Consider refactoring to use lazy loading or a more robust service discovery mechanism
-    #   that can handle runtime availability changes.
+    """检查 `langflow` 包是否可用并缓存结果。
 
-    # Use cached check from previous invocation (if applicable)
+    失败语义：导入探测异常将记录日志并视为不可用。
+    """
+    # TODO：后续可改为更细粒度的服务发现与运行期变更感知。
+
+    # 使用缓存结果，避免重复探测
 
     is_langflow_available = _LangflowModule.is_available()
 
     if is_langflow_available is not None:
         return is_langflow_available
 
-    # First check (lazy load and cache check)
+    # 首次探测并缓存
 
     module_spec = None
 

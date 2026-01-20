@@ -1,3 +1,10 @@
+"""JSON 解析与筛选组件。
+
+本模块将输入转换为 JSON，并通过 JQ 查询提取字段。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：输入会通过 `json_repair` 修复后再解析。
+"""
+
 import json
 from json import JSONDecodeError
 
@@ -13,6 +20,12 @@ from lfx.schema.message import Message
 
 
 class ParseJSONDataComponent(Component):
+    """JSON 解析组件封装。
+
+    契约：输入为 Message/Data 与 JQ 查询；输出为 Data 列表。
+    副作用：无。
+    失败语义：JSON 不合法抛 `ValueError`。
+    """
     display_name = "Parse JSON"
     description = "Convert and extract JSON fields."
     icon = "braces"
@@ -41,6 +54,7 @@ class ParseJSONDataComponent(Component):
     ]
 
     def _parse_data(self, input_value) -> str:
+        """将输入值规范化为 JSON 字符串。"""
         if isinstance(input_value, Message) and isinstance(input_value.text, str):
             return input_value.text
         if isinstance(input_value, Data):
@@ -48,16 +62,23 @@ class ParseJSONDataComponent(Component):
         return str(input_value)
 
     def filter_data(self) -> list[Data]:
+        """执行 JQ 过滤并返回结果列表。
+
+        关键路径（三步）：
+        1) 规范化输入并修复 JSON；
+        2) 执行 JQ 查询；
+        3) 将结果映射为 Data 列表。
+        """
         to_filter = self.input_value
         if not to_filter:
             return []
-        # Check if input is a list
+        # 实现：兼容列表输入
         if isinstance(to_filter, list):
             to_filter = [self._parse_data(f) for f in to_filter]
         else:
             to_filter = self._parse_data(to_filter)
 
-        # If input is not a list, don't wrap it in a list
+        # 实现：区分单对象与列表
         if not isinstance(to_filter, list):
             to_filter = repair_json(to_filter)
             try:

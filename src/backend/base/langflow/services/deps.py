@@ -1,5 +1,24 @@
+"""
+模块名称：服务依赖注入工具
+
+本模块提供服务依赖注入和获取的功能，包括各种服务的便捷访问方法。
+主要功能包括：
+- 服务获取和依赖注入
+- 各种特定服务的便捷访问方法
+- 会话管理上下文
+
+关键组件：
+- `get_service`：通用服务获取方法
+- `get_*_service`：特定服务获取方法
+- `session_scope`：会话范围上下文管理器
+
+设计背景：提供统一的服务获取接口，简化依赖注入过程。
+注意事项：这些方法是服务访问的主要入口点。
+"""
+
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Union
 
@@ -31,16 +50,17 @@ from langflow.services.telemetry.service import TelemetryService  # noqa: TC001
 
 
 def get_service(service_type: ServiceType, default=None):
-    """Retrieves the service instance for the given service type.
+    """获取指定类型的服务实例。
 
-    Args:
-        service_type (ServiceType): The type of service to retrieve.
-        default (ServiceFactory, optional): The default ServiceFactory to use if the service is not found.
-            Defaults to None.
-
-    Returns:
-        Any: The service instance.
-
+    契约：返回给定服务类型的实例。
+    副作用：可能初始化服务管理器。
+    失败语义：如果找不到服务且没有默认值，则抛出异常。
+    
+    决策：使用服务管理器模式
+    问题：需要统一的服务访问方式
+    方案：通过服务类型获取对应服务实例
+    代价：增加一层间接调用
+    重评：当需要更灵活的服务发现机制时
     """
     from lfx.services.manager import get_service_manager
 
@@ -49,17 +69,18 @@ def get_service(service_type: ServiceType, default=None):
     if not service_manager.are_factories_registered():
         # ! This is a workaround to ensure that the service manager is initialized
         # ! Not optimal, but it works for now
-        from langflow.services.manager import ServiceManager
+        from lfx.services.manager import ServiceManager
 
         service_manager.register_factories(ServiceManager.get_factories())
     return service_manager.get(service_type, default)
 
 
 def get_telemetry_service() -> TelemetryService:
-    """Retrieves the TelemetryService instance from the service manager.
+    """获取 TelemetryService 实例。
 
-    Returns:
-        TelemetryService: The TelemetryService instance.
+    契约：返回 TelemetryService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.telemetry.factory import TelemetryServiceFactory
 
@@ -67,10 +88,11 @@ def get_telemetry_service() -> TelemetryService:
 
 
 def get_tracing_service() -> TracingService:
-    """Retrieves the TracingService instance from the service manager.
+    """获取 TracingService 实例。
 
-    Returns:
-        TracingService: The TracingService instance.
+    契约：返回 TracingService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.tracing.factory import TracingServiceFactory
 
@@ -78,10 +100,11 @@ def get_tracing_service() -> TracingService:
 
 
 def get_state_service() -> StateService:
-    """Retrieves the StateService instance from the service manager.
+    """获取 StateService 实例。
 
-    Returns:
-        The StateService instance.
+    契约：返回 StateService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.state.factory import StateServiceFactory
 
@@ -89,10 +112,11 @@ def get_state_service() -> StateService:
 
 
 def get_storage_service() -> StorageService:
-    """Retrieves the storage service instance.
+    """获取存储服务实例。
 
-    Returns:
-        The storage service instance.
+    契约：返回存储服务实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.storage.factory import StorageServiceFactory
 
@@ -100,11 +124,11 @@ def get_storage_service() -> StorageService:
 
 
 def get_variable_service() -> VariableService:
-    """Retrieves the VariableService instance from the service manager.
+    """获取 VariableService 实例。
 
-    Returns:
-        The VariableService instance.
-
+    契约：返回 VariableService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.variable.factory import VariableServiceFactory
 
@@ -112,10 +136,11 @@ def get_variable_service() -> VariableService:
 
 
 def is_settings_service_initialized() -> bool:
-    """Check if the SettingsService is already initialized without triggering initialization.
+    """检查 SettingsService 是否已初始化而不触发初始化。
 
-    Returns:
-        bool: True if the SettingsService is already initialized, False otherwise.
+    契约：返回 SettingsService 是否已初始化的状态。
+    副作用：无。
+    失败语义：不抛出异常。
     """
     from lfx.services.manager import get_service_manager
 
@@ -123,15 +148,13 @@ def is_settings_service_initialized() -> bool:
 
 
 def get_settings_service() -> SettingsService:
-    """Retrieves the SettingsService instance.
+    """获取 SettingsService 实例。
 
-    If the service is not yet initialized, it will be initialized before returning.
-
-    Returns:
-        The SettingsService instance.
-
-    Raises:
-        ValueError: If the service cannot be retrieved or initialized.
+    如果服务尚未初始化，则在返回之前初始化。
+    
+    契约：返回 SettingsService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务无法获取或初始化则抛出异常。
     """
     from lfx.services.settings.factory import SettingsServiceFactory
 
@@ -139,11 +162,11 @@ def get_settings_service() -> SettingsService:
 
 
 def get_db_service() -> DatabaseService:
-    """Retrieves the DatabaseService instance from the service manager.
+    """获取 DatabaseService 实例。
 
-    Returns:
-        The DatabaseService instance.
-
+    契约：返回 DatabaseService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.database.factory import DatabaseServiceFactory
 
@@ -157,18 +180,15 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 @asynccontextmanager
 async def session_scope() -> AsyncGenerator[AsyncSession, None]:
-    """Context manager for managing an async session scope.
+    """异步会话范围的上下文管理器。
 
-    This context manager is used to manage an async session scope for database operations.
-    It ensures that the session is properly committed if no exceptions occur,
-    and rolled back if an exception is raised.
+    此上下文管理器用于管理数据库操作的异步会话范围。
+    它确保在没有异常发生时会话被正确提交，
+    在发生异常时进行回滚。
 
-    Yields:
-        AsyncSession: The async session object.
-
-    Raises:
-        Exception: If an error occurs during the session scope.
-
+    契约：提供异步会话上下文。
+    副作用：创建和管理数据库会话。
+    失败语义：如果会话操作期间发生错误则抛出异常。
     """
     from lfx.services.deps import session_scope as lfx_session_scope
 
@@ -177,10 +197,11 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
 
 
 def get_cache_service() -> Union[CacheService, AsyncBaseCacheService]:  # noqa: UP007
-    """Retrieves the cache service from the service manager.
+    """获取缓存服务实例。
 
-    Returns:
-        The cache service instance.
+    契约：返回缓存服务实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.cache.factory import CacheServiceFactory
 
@@ -188,10 +209,11 @@ def get_cache_service() -> Union[CacheService, AsyncBaseCacheService]:  # noqa: 
 
 
 def get_shared_component_cache_service() -> CacheService:
-    """Retrieves the cache service from the service manager.
+    """获取缓存服务实例。
 
-    Returns:
-        The cache service instance.
+    契约：返回缓存服务实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.shared_component_cache.factory import SharedComponentCacheServiceFactory
 
@@ -199,10 +221,11 @@ def get_shared_component_cache_service() -> CacheService:
 
 
 def get_session_service() -> SessionService:
-    """Retrieves the session service from the service manager.
+    """获取会话服务实例。
 
-    Returns:
-        The session service instance.
+    契约：返回会话服务实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.session.factory import SessionServiceFactory
 
@@ -210,11 +233,11 @@ def get_session_service() -> SessionService:
 
 
 def get_task_service() -> TaskService:
-    """Retrieves the TaskService instance from the service manager.
+    """获取 TaskService 实例。
 
-    Returns:
-        The TaskService instance.
-
+    契约：返回 TaskService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     from langflow.services.task.factory import TaskServiceFactory
 
@@ -222,25 +245,27 @@ def get_task_service() -> TaskService:
 
 
 def get_chat_service() -> ChatService:
-    """Get the chat service instance.
+    """获取聊天服务实例。
 
-    Returns:
-        ChatService: The chat service instance.
+    契约：返回聊天服务实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     return get_service(ServiceType.CHAT_SERVICE)
 
 
 def get_store_service() -> StoreService:
-    """Retrieves the StoreService instance from the service manager.
+    """获取 StoreService 实例。
 
-    Returns:
-        StoreService: The StoreService instance.
+    契约：返回 StoreService 实例。
+    副作用：可能初始化服务。
+    失败语义：如果服务不可用则抛出异常。
     """
     return get_service(ServiceType.STORE_SERVICE)
 
 
 def get_queue_service() -> JobQueueService:
-    """Retrieves the QueueService instance from the service manager."""
+    """获取 QueueService 实例。"""
     from langflow.services.job_queue.factory import JobQueueServiceFactory
 
     return get_service(ServiceType.JOB_QUEUE_SERVICE, JobQueueServiceFactory())

@@ -1,3 +1,19 @@
+"""
+模块名称：Run Flow 组件
+
+本模块提供在当前项目内执行其他 Flow 的组件封装，主要用于流程复用与
+作为代理工具调用。
+主要功能包括：
+- 动态加载 Flow 图并同步构建配置
+- 支持 Flow 选择与过期检测更新
+
+关键组件：
+- `RunFlowComponent`：Flow 执行组件
+
+设计背景：复用已构建的 Flow 并作为可组合的运行单元。
+注意事项：Flow 过期检测依赖更新时间字段。
+"""
+
 from datetime import datetime
 from typing import Any
 
@@ -8,6 +24,12 @@ from lfx.schema.dotdict import dotdict
 
 
 class RunFlowComponent(RunFlowBaseComponent):
+    """运行其他 Flow 的组件。
+
+    契约：输入为 Flow 选择与参数，输出为 Flow 执行结果。
+    副作用：可能加载 Graph 并更新 build_config。
+    失败语义：Flow 加载/构建异常会抛 `RuntimeError`。
+    """
     display_name = "Run Flow"
     description = (
         "Executes another flow from within the same project. Can also be used as a tool for agents."
@@ -27,6 +49,14 @@ class RunFlowComponent(RunFlowBaseComponent):
         field_value: Any,
         field_name: str | None = None,
     ):
+        """根据字段变化更新构建配置与 Flow 选项。
+
+        关键路径（三步）：
+        1) 补齐缺失字段并准备默认结构
+        2) 刷新 Flow 列表或根据选择加载 Graph
+        3) 写回更新后的 build_config
+        异常流：Flow 加载失败会抛 `RuntimeError`。
+        """
         missing_keys = [key for key in self.default_keys if key not in build_config]
         for key in missing_keys:
             if key == "flow_name_selected":
@@ -38,22 +68,22 @@ class RunFlowComponent(RunFlowBaseComponent):
             else:
                 build_config[key] = {}
         if field_name == "flow_name_selected" and (build_config.get("is_refresh", False) or field_value is None):
-            # refresh button was clicked or componented was initialized, so list the flows
+            # 实现：刷新按钮触发或初始化时加载 Flow 列表
             options: list[str] = await self.alist_flows_by_flow_folder()
             build_config["flow_name_selected"]["options"] = [flow.data["name"] for flow in options]
             build_config["flow_name_selected"]["options_metadata"] = []
             for flow in options:
-                # populate options_metadata
+                # 实现：填充 options_metadata
                 build_config["flow_name_selected"]["options_metadata"].append(
                     {"id": flow.data["id"], "updated_at": flow.data["updated_at"]}
                 )
-                # update selected flow if it is stale
+                # 注意：选中 Flow 过期时自动更新
                 if str(flow.data["id"]) == self.flow_id_selected:
                     await self.check_and_update_stale_flow(flow, build_config)
         elif field_name in {"flow_name_selected", "flow_id_selected"} and field_value is not None:
-            # flow was selected by name or id, so get the flow and update the bcfg
+            # 实现：选择 Flow 后加载并更新配置
             try:
-                # derive flow id if the field_name is flow_name_selected
+                # 实现：当字段为名称时派生 flow_id
                 build_config["flow_id_selected"]["value"] = (
                     self.get_selected_flow_meta(build_config, "id") or build_config["flow_id_selected"]["value"]
                 )
@@ -69,7 +99,7 @@ class RunFlowComponent(RunFlowBaseComponent):
         return build_config
 
     def get_selected_flow_meta(self, build_config: dotdict, field: str) -> dict:
-        """Get the selected flow's metadata from the build config."""
+        """从 build_config 中获取已选 Flow 的元数据。"""
         return build_config.get("flow_name_selected", {}).get("selected_metadata", {}).get(field)
 
     async def load_graph_and_update_cfg(
@@ -78,7 +108,7 @@ class RunFlowComponent(RunFlowBaseComponent):
         flow_id: str,
         updated_at: str | datetime,
     ) -> None:
-        """Load a flow's graph and update the build config."""
+        """加载 Flow 图并更新构建配置。"""
         graph = await self.get_graph(
             flow_id_selected=flow_id,
             updated_at=self.get_str_isots(updated_at),
@@ -86,16 +116,16 @@ class RunFlowComponent(RunFlowBaseComponent):
         self.update_build_config_from_graph(build_config, graph)
 
     def should_update_stale_flow(self, flow: Data, build_config: dotdict) -> bool:
-        """Check if the flow should be updated."""
+        """判断选中 Flow 是否过期需要更新。"""
         return (
-            (updated_at := self.get_str_isots(flow.data["updated_at"]))  # true updated_at date just fetched from db
-            and (stale_at := self.get_selected_flow_meta(build_config, "updated_at"))  # outdated date in bcfg
-            and self._parse_timestamp(updated_at) > self._parse_timestamp(stale_at)  # stale flow condition
+            (updated_at := self.get_str_isots(flow.data["updated_at"]))  # 注意：数据库最新时间
+            and (stale_at := self.get_selected_flow_meta(build_config, "updated_at"))  # 注意：配置中旧时间
+            and self._parse_timestamp(updated_at) > self._parse_timestamp(stale_at)  # 注意：过期判断
         )
 
     async def check_and_update_stale_flow(self, flow: Data, build_config: dotdict) -> None:
-        """Check if the flow should be updated and update it if necessary."""
-        # TODO: improve contract/return value
+        """检测 Flow 是否过期并按需更新。"""
+        # 注意：TODO 改进契约/返回值
         if self.should_update_stale_flow(flow, build_config):
             await self.load_graph_and_update_cfg(
                 build_config,
@@ -104,5 +134,5 @@ class RunFlowComponent(RunFlowBaseComponent):
             )
 
     def get_str_isots(self, date: datetime | str) -> str:
-        """Get a string timestamp from a datetime or string."""
+        """将 datetime 或字符串转换为 ISO 字符串。"""
         return date.isoformat() if hasattr(date, "isoformat") else date

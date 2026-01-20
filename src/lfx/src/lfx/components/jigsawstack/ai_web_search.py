@@ -1,3 +1,19 @@
+"""
+模块名称：JigsawStack AI Web Search 组件
+
+本模块封装 JigsawStack `web.search`，用于 Web 搜索与 AI 概述生成。
+主要功能包括：
+- 请求参数标准化（拼写检查/安全搜索/AI 概述）
+- 统一返回结构，便于 Langflow 下游消费
+- 失败语义集中处理并反馈到 `self.status`
+
+关键组件：
+- JigsawStackAIWebSearchComponent：AI Search 组件入口
+
+设计背景：将 JigsawStack 搜索能力适配为 Langflow 组件。
+注意事项：依赖 `jigsawstack>=0.2.7` 且需要有效 `api_key`。
+"""
+
 from lfx.custom.custom_component.component import Component
 from lfx.io import BoolInput, DropdownInput, Output, QueryInput, SecretStrInput
 from lfx.schema.data import Data
@@ -5,6 +21,13 @@ from lfx.schema.message import Message
 
 
 class JigsawStackAIWebSearchComponent(Component):
+    """JigsawStack AI Web Search 组件封装。
+
+    契约：输入由 `inputs` 定义，输出 `Data` 或 `Message`。
+    副作用：网络调用 JigsawStack 搜索服务并更新 `self.status`。
+    失败语义：SDK 缺失抛 `ImportError`；API 失败返回失败 `Data`/`Message`。
+    """
+
     display_name = "AI Web Search"
     description = "Effortlessly search the Web and get access to high-quality results powered with AI."
     documentation = "https://jigsawstack.com/docs/api-reference/web/ai-search"
@@ -54,6 +77,19 @@ class JigsawStackAIWebSearchComponent(Component):
     ]
 
     def search(self) -> Data:
+        """执行 AI 搜索并返回结构化结果。
+
+        契约：输入为 `query` 与可选参数，输出为 `Data`。
+        副作用：触发网络请求并更新 `self.status`。
+        失败语义：API `success=False` 抛 `ValueError`；SDK 异常返回失败 `Data`。
+
+        关键路径（三步）：
+        1) 组装 `query` 与可选参数；
+        2) 调用 `client.web.search`；
+        3) 归一化响应并写入 `self.status`。
+
+        排障入口：`self.status` 文本。
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError as e:
@@ -65,7 +101,7 @@ class JigsawStackAIWebSearchComponent(Component):
         try:
             client = JigsawStack(api_key=self.api_key)
 
-            # build request object
+            # 实现：仅发送非空参数，保持与 SDK 的可选字段语义一致
             search_params = {}
             if self.query:
                 search_params["query"] = self.query
@@ -76,14 +112,14 @@ class JigsawStackAIWebSearchComponent(Component):
             if self.spell_check is not None:
                 search_params["spell_check"] = self.spell_check
 
-            # Call web scraping
+            # 实现：调用 JigsawStack 搜索服务
             response = client.web.search(search_params)
 
             api_error_msg = "JigsawStack API returned unsuccessful response"
             if not response.get("success", False):
                 raise ValueError(api_error_msg)
 
-            # Create comprehensive data object
+            # 实现：归一化输出字段，便于 Langflow 下游使用
             result_data = {
                 "query": self.query,
                 "ai_overview": response.get("ai_overview", ""),
@@ -103,13 +139,19 @@ class JigsawStackAIWebSearchComponent(Component):
             return Data(data=error_data)
 
     def get_content_text(self) -> Message:
+        """仅返回 AI 概述文本内容。
+
+        契约：输入使用 `query` 与可选参数；输出 `Message(text=ai_overview)`。
+        失败语义：SDK 缺失返回错误文本；API 失败抛 `JigsawStackError` 后返回错误文本。
+        副作用：触发网络调用。
+        """
         try:
             from jigsawstack import JigsawStack, JigsawStackError
         except ImportError:
             return Message(text="Error: JigsawStack package not found.")
 
         try:
-            # Initialize JigsawStack client
+            # 实现：构建客户端并复用与 `search` 相同的参数语义
             client = JigsawStack(api_key=self.api_key)
             search_params = {}
             if self.query:
@@ -121,14 +163,13 @@ class JigsawStackAIWebSearchComponent(Component):
             if self.spell_check is not None:
                 search_params["spell_check"] = self.spell_check
 
-            # Call web scraping
+            # 实现：调用搜索并读取 `ai_overview`
             response = client.web.search(search_params)
 
             request_failed_msg = "Request Failed"
             if not response.get("success", False):
                 raise JigsawStackError(request_failed_msg)
 
-            # Return the content as text
             content = response.get("ai_overview", "")
             return Message(text=content)
 

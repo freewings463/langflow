@@ -1,3 +1,19 @@
+"""
+模块名称：assemblyai_start_transcript
+
+本模块提供 AssemblyAI 转写任务创建组件，支持本地文件或 URL。
+主要功能包括：
+- 构造转写配置并提交任务
+- 返回转写任务 ID 供后续轮询
+
+关键组件：
+- `AssemblyAITranscriptionJobCreator`：转写任务创建组件
+
+设计背景：音频转写为异步任务，需要先提交再轮询
+使用场景：上传音频后创建转写任务
+注意事项：`audio_file` 与 `audio_file_url` 至少提供其一
+"""
+
 from pathlib import Path
 
 import assemblyai as aai
@@ -9,6 +25,13 @@ from lfx.schema.data import Data
 
 
 class AssemblyAITranscriptionJobCreator(Component):
+    """AssemblyAI 转写任务创建组件。
+
+    契约：必须提供 `api_key`，并提供音频文件或 URL。
+    副作用：读取本地文件路径并调用 AssemblyAI API。
+    失败语义：输入校验或 API 失败返回带 `error` 的 `Data`。
+    排障入口：日志 `Error submitting transcription job` 与 `status`。
+    """
     display_name = "AssemblyAI Start Transcript"
     description = "Create a transcription job for an audio file using AssemblyAI with advanced options"
     documentation = "https://www.assemblyai.com/docs"
@@ -134,9 +157,21 @@ class AssemblyAITranscriptionJobCreator(Component):
     ]
 
     def create_transcription_job(self) -> Data:
+        """创建转写任务并返回任务 ID。
+
+        契约：`audio_file` 与 `audio_file_url` 至少提供其一。
+        副作用：设置 `aai.settings.api_key` 并提交转写任务。
+        失败语义：校验失败或 API 异常时返回 `error`。
+        关键路径（三步）：1) 校验输入 2) 构造配置 3) 提交任务。
+        决策：当同时提供文件与 URL 时优先使用本地文件。
+        问题：二者同时存在会导致数据源不确定。
+        方案：忽略 URL 并记录告警。
+        代价：调用方需自行保证 URL 未被误忽略。
+        重评：当需要支持多源备份策略时。
+        """
         aai.settings.api_key = self.api_key
 
-        # Convert speakers_expected to int if it's not empty
+        # 注意：允许为空，否则转换为整数。
         speakers_expected = None
         if self.speakers_expected and self.speakers_expected.strip():
             try:
@@ -162,7 +197,7 @@ class AssemblyAITranscriptionJobCreator(Component):
             if self.audio_file_url:
                 logger.warning("Both an audio file an audio URL were specified. The audio URL was ignored.")
 
-            # Check if the file exists
+            # 注意：本地文件必须存在。
             if not Path(self.audio_file).exists():
                 self.status = "Error: Audio file not found"
                 return Data(data={"error": "Error: Audio file not found"})

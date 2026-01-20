@@ -1,3 +1,19 @@
+"""
+模块名称：`AIML` 文本模型组件
+
+本模块提供基于 `AI/ML API` 的文本生成组件，主要用于将配置映射为 `ChatOpenAI` 模型实例。
+主要功能包括：
+- 拉取并刷新可用模型列表
+- 组装模型参数并构建 `ChatOpenAI` 实例
+- 解析部分 `OpenAI` 错误以提取用户可读信息
+
+关键组件：
+- `AIMLModelComponent`
+
+设计背景：统一 `AI/ML API` 模型配置入口，保持与 LangFlow 组件接口一致。
+注意事项：`o1` 模型温度参数需特殊处理；无效配置会在模型构建阶段暴露异常。
+"""
+
 from langchain_openai import ChatOpenAI
 from pydantic.v1 import SecretStr
 from typing_extensions import override
@@ -17,6 +33,14 @@ from lfx.inputs.inputs import (
 
 
 class AIMLModelComponent(LCModelComponent):
+    """`AI/ML API` 文本模型组件
+
+    契约：
+    - 输入：模型名、`API` Key、温度、最大 token 等配置
+    - 输出：`ChatOpenAI` 语言模型实例
+    - 副作用：可能触发模型列表刷新
+    - 失败语义：构建失败时抛出底层异常
+    """
     display_name = "AI/ML API"
     description = "Generates text using AI/ML API LLMs."
     icon = "AIML"
@@ -65,6 +89,14 @@ class AIMLModelComponent(LCModelComponent):
 
     @override
     def update_build_config(self, build_config: dict, field_value: str, field_name: str | None = None):
+        """更新构建配置并刷新模型列表
+
+        契约：
+        - 输入：构建配置、字段值与字段名
+        - 输出：更新后的构建配置
+        - 副作用：调用 `AimlModels.get_aiml_models` 刷新模型列表
+        - 失败语义：模型拉取失败时可能抛异常
+        """
         if field_name in {"api_key", "aiml_api_base", "model_name"}:
             aiml = AimlModels()
             aiml.get_aiml_models()
@@ -72,6 +104,23 @@ class AIMLModelComponent(LCModelComponent):
         return build_config
 
     def build_model(self) -> LanguageModel:  # type: ignore[type-var]
+        """构建 `ChatOpenAI` 模型实例
+
+        关键路径（三步）：
+        1) 读取组件字段与默认值
+        2) 处理 `o1` 模型温度兼容逻辑
+        3) 组装并返回 `ChatOpenAI` 实例
+
+        异常流：无效配置会在模型初始化时抛出异常。
+        性能瓶颈：无显著性能瓶颈。
+        排障入口：底层 `OpenAI`/网络异常日志。
+        
+        契约：
+        - 输入：无（使用组件字段）
+        - 输出：`LanguageModel` 实例
+        - 副作用：无
+        - 失败语义：构建失败时抛出异常
+        """
         aiml_api_key = self.api_key
         temperature = self.temperature
         model_name: str = self.model_name
@@ -81,8 +130,7 @@ class AIMLModelComponent(LCModelComponent):
 
         openai_api_key = aiml_api_key.get_secret_value() if isinstance(aiml_api_key, SecretStr) else aiml_api_key
 
-        # TODO: Once OpenAI fixes their o1 models, this part will need to be removed
-        # to work correctly with o1 temperature settings.
+        # 注意：`OpenAI` 修复 `o1` 温度参数前需强制设为 `1`
         if "o1" in model_name:
             temperature = 1
 
@@ -96,13 +144,13 @@ class AIMLModelComponent(LCModelComponent):
         )
 
     def _get_exception_message(self, e: Exception):
-        """Get a message from an OpenAI exception.
+        """从 `OpenAI` 异常中提取可读消息
 
-        Args:
-            e (Exception): The exception to get the message from.
-
-        Returns:
-            str: The message from the exception.
+        契约：
+        - 输入：异常对象
+        - 输出：错误消息字符串或 `None`
+        - 副作用：无
+        - 失败语义：无匹配错误类型时返回 `None`
         """
         try:
             from openai.error import BadRequestError

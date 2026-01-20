@@ -1,3 +1,19 @@
+"""
+模块名称：ClickHouse 向量存储组件
+
+本模块提供 ClickHouse 向量存储的连接、写入与相似度检索能力，主要用于在 Langflow
+中构建基于 ClickHouse 的向量检索组件。主要功能包括：
+- 校验 ClickHouse 连接并初始化向量存储
+- 将输入数据转换为 LangChain 文档并写入
+- 执行向量相似度查询并输出为 `Data`
+
+关键组件：
+- `ClickhouseVectorStoreComponent`：ClickHouse 向量存储组件入口
+
+设计背景：为使用 ClickHouse 的向量检索场景提供统一组件封装。
+注意事项：依赖 `clickhouse-connect`，连接失败将抛 `ValueError`。
+"""
+
 from langchain_community.vectorstores import Clickhouse, ClickhouseSettings
 
 from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
@@ -65,6 +81,17 @@ class ClickhouseVectorStoreComponent(LCVectorStoreComponent):
 
     @check_cached_vector_store
     def build_vector_store(self) -> Clickhouse:
+        """构建 ClickHouse 向量存储实例。
+
+        契约：输入为组件字段与 `ingest_data`，输出 `Clickhouse` 实例。
+        关键路径（三步）：
+        1) 校验依赖并测试 ClickHouse 连接。
+        2) 预处理输入数据并构建文档列表。
+        3) 生成 `ClickhouseSettings` 并实例化向量存储。
+
+        异常流：依赖缺失抛 `ImportError`；连接失败抛 `ValueError`。
+        排障入口：错误消息前缀 `Failed to connect to Clickhouse`。
+        """
         try:
             import clickhouse_connect
         except ImportError as e:
@@ -83,7 +110,6 @@ class ClickhouseVectorStoreComponent(LCVectorStoreComponent):
             msg = f"Failed to connect to Clickhouse: {e}"
             raise ValueError(msg) from e
 
-        # Convert DataFrame to Data if needed using parent's method
         self.ingest_data = self._prepare_ingest_data()
 
         documents = []
@@ -120,6 +146,12 @@ class ClickhouseVectorStoreComponent(LCVectorStoreComponent):
         return clickhouse_vs
 
     def search_documents(self) -> list[Data]:
+        """执行向量相似度检索。
+
+        契约：输入为 `search_query/number_of_results/score_threshold`，输出 `Data` 列表。
+        副作用：会触发向量存储连接与查询，并更新 `self.status`。
+        失败语义：查询条件为空时返回空列表。
+        """
         vector_store = self.build_vector_store()
 
         if self.search_query and isinstance(self.search_query, str) and self.search_query.strip():

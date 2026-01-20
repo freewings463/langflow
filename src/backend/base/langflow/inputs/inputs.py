@@ -1,10 +1,17 @@
-"""Re-export of all input classes from lfx.
+"""
+模块名称：输入类型兼容导出
 
-This module maintains backward compatibility by re-exporting all input classes from lfx.
-All input classes have been migrated to lfx and this file serves as a compatibility layer.
+本模块集中重导出 `lfx` 的输入类型，主要用于保持旧导入路径可用。
+主要功能包括：
+- 暴露 `InputTypes`、`InputTypesMap` 与各类 `*Input` 类型。
+- 转发 `instantiate_input`，便于从序列化数据实例化输入。
+
+关键组件：`InputTypes`、`InputTypesMap`、`instantiate_input`。
+设计背景：输入体系已迁移至 `lfx`，此处作为兼容层。
+使用场景：历史代码从 `langflow.inputs.inputs` 引用输入类型。
+注意事项：此处不新增实现逻辑，所有行为以 `lfx` 为准。
 """
 
-# Re-export all inputs from lfx
 from lfx.inputs.inputs import (
     AuthInput,
     BoolInput,

@@ -1,3 +1,19 @@
+"""
+模块名称：Loop 组件
+
+本模块提供对 Data/Message 列表的循环处理能力，主要用于在流程中逐项处理并聚合结果。
+主要功能包括：
+- 输入 DataFrame/Data/Message 列表并逐项输出
+- 维护上下文索引与聚合列表
+- 在循环结束时输出聚合结果
+
+关键组件：
+- `LoopComponent`：循环组件
+
+设计背景：在流程控制中提供可重复执行的迭代机制，并保持输出一致性。
+注意事项：Message 会被自动转换为 Data 以保持类型一致。
+"""
+
 from lfx.components.processing.converter import convert_to_data
 from lfx.custom.custom_component.component import Component
 from lfx.inputs.inputs import HandleInput
@@ -8,6 +24,12 @@ from lfx.template.field.base import Output
 
 
 class LoopComponent(Component):
+    """循环输出输入列表的单项并聚合结果。
+
+    契约：`item_output` 输出单条 Data；`done_output` 输出聚合 DataFrame。
+    副作用：在上下文中维护 `_data`/`_index`/`_aggregated` 状态。
+    失败语义：输入类型不合法会抛 `TypeError`。
+    """
     display_name = "Loop"
     description = (
         "Iterates over a list of Data or Message objects, outputting one item at a time and "
@@ -39,14 +61,14 @@ class LoopComponent(Component):
     ]
 
     def initialize_data(self) -> None:
-        """Initialize the data list, context index, and aggregated list."""
+        """初始化数据列表、索引与聚合列表。"""
         if self.ctx.get(f"{self._id}_initialized", False):
             return
 
-        # Ensure data is a list of Data objects
+        # 实现：确保数据为 Data 列表
         data_list = self._validate_data(self.data)
 
-        # Store the initial data and context variables
+        # 实现：写入初始上下文状态
         self.update_ctx(
             {
                 f"{self._id}_data": data_list,
@@ -57,21 +79,21 @@ class LoopComponent(Component):
         )
 
     def _convert_message_to_data(self, message: Message) -> Data:
-        """Convert a Message object to a Data object using Type Convert logic."""
+        """将 Message 转为 Data（复用转换逻辑）。"""
         return convert_to_data(message, auto_parse=False)
 
     def _validate_data(self, data):
-        """Validate and return a list of Data objects. Message objects are auto-converted to Data."""
+        """校验并返回 Data 列表，必要时将 Message 转为 Data。"""
         if isinstance(data, DataFrame):
             return data.to_data_list()
         if isinstance(data, Data):
             return [data]
         if isinstance(data, Message):
-            # Auto-convert Message to Data
+            # 实现：自动转换 Message 为 Data
             converted_data = self._convert_message_to_data(data)
             return [converted_data]
         if isinstance(data, list) and all(isinstance(item, (Data, Message)) for item in data):
-            # Convert any Message objects in the list to Data objects
+            # 实现：列表内 Message 逐个转换为 Data
             converted_list = []
             for item in data:
                 if isinstance(item, Message):
@@ -83,23 +105,31 @@ class LoopComponent(Component):
         raise TypeError(msg)
 
     def evaluate_stop_loop(self) -> bool:
-        """Evaluate whether to stop item or done output."""
+        """判断是否应结束循环。"""
         current_index = self.ctx.get(f"{self._id}_index", 0)
         data_length = len(self.ctx.get(f"{self._id}_data", []))
         return current_index > data_length
 
     def item_output(self) -> Data:
-        """Output the next item in the list or stop if done."""
+        """输出当前项或在完成后停止循环。
+
+        关键路径（三步）：
+        1) 初始化上下文并读取当前索引
+        2) 输出当前项并递增索引
+        3) 更新依赖以触发下一轮
+        异常流：索引越界时返回空 Data。
+        性能瓶颈：与列表长度线性相关。
+        """
         self.initialize_data()
         current_item = Data(text="")
 
         if self.evaluate_stop_loop():
             self.stop("item")
         else:
-            # Get data list and current index
+            # 实现：读取数据列表与当前索引
             data_list, current_index = self.loop_variables()
             if current_index < len(data_list):
-                # Output current item and increment index
+                # 实现：输出当前项并递增索引
                 try:
                     current_item = data_list[current_index]
                 except IndexError:
@@ -107,7 +137,7 @@ class LoopComponent(Component):
             self.aggregated_output()
             self.update_ctx({f"{self._id}_index": current_index + 1})
 
-        # Now we need to update the dependencies for the next run
+        # 实现：更新依赖以驱动下一轮执行
         self.update_dependency()
         return current_item
 
@@ -115,13 +145,15 @@ class LoopComponent(Component):
         item_dependency_id = self.get_incoming_edge_by_target_param("item")
         if item_dependency_id not in self.graph.run_manager.run_predecessors[self._id]:
             self.graph.run_manager.run_predecessors[self._id].append(item_dependency_id)
-            # CRITICAL: Also update run_map so remove_from_predecessors() works correctly
-            # run_map[predecessor] = list of vertices that depend on predecessor
+            # 注意：同步更新 run_map 以确保 remove_from_predecessors() 正常工作
             if self._id not in self.graph.run_manager.run_map[item_dependency_id]:
                 self.graph.run_manager.run_map[item_dependency_id].append(self._id)
 
     def done_output(self) -> DataFrame:
-        """Trigger the done output when iteration is complete."""
+        """在迭代完成后输出聚合结果。
+
+        关键路径：检查停止条件 → 输出聚合 DataFrame → 停止/启动分支。
+        """
         self.initialize_data()
 
         if self.evaluate_stop_loop():
@@ -135,27 +167,31 @@ class LoopComponent(Component):
         return DataFrame([])
 
     def loop_variables(self):
-        """Retrieve loop variables from context."""
+        """从上下文读取循环变量。"""
         return (
             self.ctx.get(f"{self._id}_data", []),
             self.ctx.get(f"{self._id}_index", 0),
         )
 
     def aggregated_output(self) -> list[Data]:
-        """Return the aggregated list once all items are processed.
+        """聚合当前循环输入并返回聚合列表。
 
-        Returns Data or Message objects depending on loop input types.
+        关键路径（三步）：
+        1) 读取上下文中的数据与聚合列表
+        2) 规范化当前输入为 Data
+        3) 追加并写回聚合列表
+        异常流：无显式异常抛出。
         """
         self.initialize_data()
 
-        # Get data list and aggregated list
+        # 实现：读取数据列表与聚合列表
         data_list = self.ctx.get(f"{self._id}_data", [])
         aggregated = self.ctx.get(f"{self._id}_aggregated", [])
         loop_input = self.item
 
-        # Append the current loop input to aggregated if it's not already included
+        # 实现：追加当前输入到聚合列表
         if loop_input is not None and not isinstance(loop_input, str) and len(aggregated) <= len(data_list):
-            # If the loop input is a Message, convert it to Data for consistency
+            # 注意：Message 转换为 Data 以保持一致性
             if isinstance(loop_input, Message):
                 loop_input = self._convert_message_to_data(loop_input)
             aggregated.append(loop_input)

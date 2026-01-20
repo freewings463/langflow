@@ -1,3 +1,10 @@
+"""正则提取组件。
+
+本模块基于正则表达式从文本中提取匹配结果。
+设计背景：旧组件保留以兼容历史流程。
+注意事项：正则错误会返回错误信息 Data。
+"""
+
 import re
 
 from lfx.custom.custom_component.component import Component
@@ -7,6 +14,12 @@ from lfx.schema.message import Message
 
 
 class RegexExtractorComponent(Component):
+    """正则提取组件封装。
+
+    契约：输入为文本与正则；输出为 Data 列表或文本消息。
+    副作用：更新 `self.status`。
+    失败语义：正则语法错误返回错误 Data。
+    """
     display_name = "Regex Extractor"
     description = "Extract patterns from text using regular expressions."
     icon = "regex"
@@ -36,21 +49,19 @@ class RegexExtractorComponent(Component):
     ]
 
     def extract_matches(self) -> list[Data]:
+        """执行正则匹配并返回结果列表。"""
         if not self.pattern or not self.input_text:
             self.status = []
             return []
 
         try:
-            # Compile regex pattern
             pattern = re.compile(self.pattern)
 
-            # Find all matches in the input text
             matches = pattern.findall(self.input_text)
 
-            # Filter out empty matches
-            filtered_matches = [match for match in matches if match]  # Remove empty matches
+            # 注意：过滤空匹配
+            filtered_matches = [match for match in matches if match]
 
-            # Return empty list for no matches, or list of matches if found
             result: list = [] if not filtered_matches else [Data(data={"match": match}) for match in filtered_matches]
 
         except re.error as e:
@@ -64,7 +75,7 @@ class RegexExtractorComponent(Component):
         return result
 
     def get_matches_text(self) -> Message:
-        """Get matches as a formatted text message."""
+        """将匹配结果格式化为文本消息。"""
         matches = self.extract_matches()
 
         if not matches:

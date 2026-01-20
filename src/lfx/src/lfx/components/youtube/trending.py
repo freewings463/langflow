@@ -1,3 +1,18 @@
+"""模块名称：YouTube 热门趋势组件
+
+本模块提供 YouTube Trending 视频获取能力，输出为 DataFrame。
+使用场景：按地区/分类获取热门视频并附带统计或内容细节。
+主要功能包括：
+- 拉取热门视频列表并支持地区/分类过滤
+- 可选附加统计、内容细节与缩略图
+
+关键组件：
+- YouTubeTrendingComponent：热门趋势组件入口
+
+设计背景：统一热门视频数据结构，便于展示与分析
+注意事项：默认区域“Global”映射为 US
+"""
+
 from contextlib import contextmanager
 
 import pandas as pd
@@ -16,15 +31,23 @@ MAX_API_RESULTS = 50
 
 
 class YouTubeTrendingComponent(Component):
-    """A component that retrieves trending videos from YouTube."""
+    """YouTube 热门趋势组件。
+
+    契约：输入 API Key 与筛选条件，输出热门视频 DataFrame
+    关键路径：1) 组装请求参数 2) 拉取热门列表 3) 组装 DataFrame
+    副作用：调用 YouTube Data API，消耗配额
+    异常流：API 异常返回含 `error` 的 DataFrame
+    决策：Global 映射为 US；问题：API 不支持全球维度；方案：用 US 作为默认；
+    代价：结果偏向 US；重评：当 API 支持全球维度或引入多地区聚合时
+    """
 
     display_name: str = "YouTube Trending"
     description: str = "Retrieves trending videos from YouTube with filtering options."
     icon: str = "YouTube"
 
-    # Dictionary of country codes and names
+    # 注意：地区代码用于 `regionCode` 参数映射，Global 默认映射为 US。
     COUNTRY_CODES = {
-        "Global": "US",  # Default to US for global
+        "Global": "US",
         "United States": "US",
         "Brazil": "BR",
         "United Kingdom": "GB",
@@ -44,7 +67,7 @@ class YouTubeTrendingComponent(Component):
         "Argentina": "AR",
     }
 
-    # Dictionary of video categories
+    # 注意：视频分类需映射为 `videoCategoryId`。
     VIDEO_CATEGORIES = {
         "All": "0",
         "Film & Animation": "1",
@@ -119,17 +142,16 @@ class YouTubeTrendingComponent(Component):
     max_results: int
 
     def _format_duration(self, duration: str) -> str:
-        """Formats ISO 8601 duration to readable format."""
+        """将 ISO 8601 时长格式化为可读文本。"""
         import re
 
-        # Remove 'PT' from the start of duration
+        # 注意：去掉前缀 PT 以简化解析。
         duration = duration[2:]
 
         hours = 0
         minutes = 0
         seconds = 0
 
-        # Extract hours, minutes and seconds
         time_dict = {}
         for time_unit in ["H", "M", "S"]:
             match = re.search(r"(\d+)" + time_unit, duration)
@@ -143,14 +165,13 @@ class YouTubeTrendingComponent(Component):
         if "S" in time_dict:
             seconds = time_dict["S"]
 
-        # Format the time string
         if hours > 0:
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
     @contextmanager
     def youtube_client(self):
-        """Context manager for YouTube API client."""
+        """YouTube API 客户端上下文管理器。"""
         client = build("youtube", "v3", developerKey=self.api_key)
         try:
             yield client
@@ -158,25 +179,30 @@ class YouTubeTrendingComponent(Component):
             client.close()
 
     def get_trending_videos(self) -> DataFrame:
-        """Retrieves trending videos from YouTube and returns as DataFrame."""
+        """获取热门视频并返回 DataFrame。
+
+        关键路径（三步）：
+        1) 校验并裁剪 max_results
+        2) 组装请求参数并拉取热门列表
+        3) 组装统计/内容细节/缩略图字段
+
+        异常流：API 异常返回含 `error` 的 DataFrame
+        性能瓶颈：包含内容细节与缩略图时字段数量增加
+        """
         try:
-            # Validate max_results
+            # 注意：API 最大支持 50 条，超过会被裁剪。
             if not 1 <= self.max_results <= MAX_API_RESULTS:
                 self.max_results = min(max(1, self.max_results), MAX_API_RESULTS)
 
-            # Use context manager for YouTube API client
             with self.youtube_client() as youtube:
-                # Get country code
                 region_code = self.COUNTRY_CODES[self.region]
 
-                # Prepare API request parts
                 parts = ["snippet"]
                 if self.include_statistics:
                     parts.append("statistics")
                 if self.include_content_details:
                     parts.append("contentDetails")
 
-                # Prepare API request parameters
                 request_params = {
                     "part": ",".join(parts),
                     "chart": "mostPopular",
@@ -184,11 +210,9 @@ class YouTubeTrendingComponent(Component):
                     "maxResults": self.max_results,
                 }
 
-                # Add category filter if not "All"
                 if self.category != "All":
                     request_params["videoCategoryId"] = self.VIDEO_CATEGORIES[self.category]
 
-                # Get trending videos
                 request = youtube.videos().list(**request_params)
                 response = request.execute()
 
@@ -206,14 +230,12 @@ class YouTubeTrendingComponent(Component):
                         "category": self.category,
                     }
 
-                    # Add thumbnails if requested
                     if self.include_thumbnails:
                         for size, thumb in item["snippet"]["thumbnails"].items():
                             video_data[f"thumbnail_{size}_url"] = thumb["url"]
                             video_data[f"thumbnail_{size}_width"] = thumb.get("width", 0)
                             video_data[f"thumbnail_{size}_height"] = thumb.get("height", 0)
 
-                    # Add statistics if requested
                     if self.include_statistics and "statistics" in item:
                         video_data.update(
                             {
@@ -223,7 +245,6 @@ class YouTubeTrendingComponent(Component):
                             }
                         )
 
-                    # Add content details if requested
                     if self.include_content_details and "contentDetails" in item:
                         content_details = item["contentDetails"]
                         video_data.update(
@@ -238,10 +259,10 @@ class YouTubeTrendingComponent(Component):
 
                     videos_data.append(video_data)
 
-                # Convert to DataFrame
+                # 注意：组装 DataFrame 以便下游处理。
                 videos_df = pd.DataFrame(videos_data)
 
-                # Organize columns
+                # 注意：按固定列顺序组织输出，便于展示与排序。
                 column_order = [
                     "video_id",
                     "title",
@@ -260,12 +281,12 @@ class YouTubeTrendingComponent(Component):
                 if self.include_content_details:
                     column_order.extend(["duration", "definition", "has_captions", "licensed_content", "projection"])
 
-                # Add thumbnail columns at the end if included
+                # 注意：缩略图列数量不定，统一追加到末尾。
                 if self.include_thumbnails:
                     thumbnail_cols = [col for col in videos_df.columns if col.startswith("thumbnail_")]
                     column_order.extend(sorted(thumbnail_cols))
 
-                # Reorder columns, including any that might not be in column_order
+                # 注意：保留未覆盖的列，避免丢失字段。
                 remaining_cols = [col for col in videos_df.columns if col not in column_order]
                 videos_df = videos_df[column_order + remaining_cols]
 

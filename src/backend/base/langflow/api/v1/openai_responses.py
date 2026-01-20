@@ -1,3 +1,15 @@
+"""
+模块名称：OpenAI Responses 兼容接口
+
+本模块提供与 OpenAI Responses API 兼容的运行与流式响应适配。
+主要功能：
+- 将 Langflow 流程运行结果映射为 OpenAI Responses 格式
+- 支持 SSE 流式输出与事件转换
+- 校验流程包含必要的 ChatInput/ChatOutput 组件
+设计背景：便于第三方客户端以 OpenAI Responses 协议接入 Langflow。
+注意事项：缺失组件会抛出 `ValueError` 并终止请求。
+"""
+
 import asyncio
 import json
 import time
